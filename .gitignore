@@ -1,0 +1,39 @@
+# This file only covers things at the repo root and inside tools/.
+# backend/ and frontend/ each have their own .gitignore (Laravel, Next.js).
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+.fleet/
+.nova/
+.zed/
+
+# Env files anywhere in the repo
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Python (tools/whisper-engine)
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Portable redis runtime state (tools/redis) — binaries stay tracked
+tools/redis/dump.rdb
+tools/redis/*.pid
+tools/redis/redis.log
+
+# Dev scratch data (tools/testdata)
+tools/testdata/node_modules/
+tools/testdata/shots/
+tools/testdata/*_check.png
+tools/testdata/*_check.jpg
