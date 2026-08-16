@@ -1,0 +1,14 @@
+{
+  "name": "clipper-instagram-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted Puppeteer service that logs into Instagram and publishes clips through the web UI, since Instagram's official publishing API requires a Business/Creator account and Meta App Review.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^24.15.0"
+  }
+}

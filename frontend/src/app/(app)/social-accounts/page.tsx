@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { mutate } from "swr";
 import { Plus, Share2, Unlink, RefreshCw } from "lucide-react";
 import { useApi } from "@/lib/hooks";
@@ -16,9 +17,29 @@ import { PLATFORM_LABELS } from "@/components/social/platforms";
 import { formatRelativeTime } from "@/lib/format";
 import type { SocialAccount } from "@/lib/types";
 
-export default function SocialAccountsPage() {
+function SocialAccountsPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [modalOpen, setModalOpen] = useState(false);
   const { data, isLoading } = useApi<{ data: SocialAccount[] }>("/social-accounts");
+
+  // Lands here after a real OAuth round trip (SocialAccountController::callback
+  // always redirects back with ?connected=<platform> or ?error=<message>).
+  useEffect(() => {
+    const connected = searchParams.get("connected");
+    const error = searchParams.get("error");
+    if (!connected && !error) return;
+
+    if (connected) {
+      toast(`${PLATFORM_LABELS[connected] ?? connected} account connected.`, "success");
+      mutate("/social-accounts");
+    } else if (error) {
+      toast(error, "danger");
+    }
+
+    router.replace("/social-accounts");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const grouped = (data?.data ?? []).reduce<Record<string, SocialAccount[]>>((acc, a) => {
     (acc[a.platform] ??= []).push(a);
@@ -143,5 +164,13 @@ export default function SocialAccountsPage() {
 
       <ConnectAccountModal open={modalOpen} onClose={() => setModalOpen(false)} />
     </div>
+  );
+}
+
+export default function SocialAccountsPage() {
+  return (
+    <Suspense fallback={null}>
+      <SocialAccountsPageInner />
+    </Suspense>
   );
 }

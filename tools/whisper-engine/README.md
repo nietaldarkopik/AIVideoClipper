@@ -52,6 +52,37 @@ Configure via environment variables before starting:
 Models download from Hugging Face on first use and are cached under
 `~/.cache/huggingface`.
 
+### CPU-only / no-GPU machines
+
+`whisper_engine.py` always runs with `vad_filter=True` (skips silent/non-speech
+stretches instead of decoding them — less compute, and it also avoids Whisper's
+tendency to hallucinate text over silence) and `condition_on_previous_text=False`
+(each chunk from `WhisperEngineTranscriptionProvider` is already an independent
+slice, not a real continuation, so carrying prior text as context adds nothing and
+occasionally sends the model into a CPU-burning repetition loop on noisy audio).
+Neither of these trades away transcription quality — they're both free wins,
+which is why they're not exposed as env vars. `beam_size=5` (the actual
+speed/accuracy knob) is left alone by default; dropping it to `1` (greedy decoding)
+would lighten load further but does measurably affect accuracy, so that's a
+deliberate choice to leave for you to make in `whisper_engine.py` if you want it.
+
+### Long videos and resource use
+
+This service itself always transcribes whatever WAV path it's given in one shot —
+it doesn't chunk anything. The caller does that: `WhisperEngineTranscriptionProvider`
+(Laravel side) splits the source audio into fixed-length chunks (`WHISPER_ENGINE_CHUNK_SECONDS`
+in `backend/.env`, default 120s) with ffmpeg and sends them one at a time, stitching
+the results back into one timeline by offsetting each chunk's timestamps.
+
+This exists because transcribing a long recording in a single call keeps the whole
+thing — plus beam search and word-timestamp state — resident in CPU/RAM for the
+entire run. On modest hardware that's been enough to freeze or reboot the machine.
+If you still see that happen, lower `WHISPER_ENGINE_CHUNK_SECONDS` further (e.g. `60`).
+Other things worth checking on a machine that reboots under load: CPU thermals
+(sustained 100% CPU for a `base`/`small` model on a poorly-cooled laptop can trigger
+a thermal shutdown), and free RAM if other clipper-tools processes (Next.js, queue
+worker, MySQL/Redis) are running at the same time.
+
 ## API
 
 - `GET /health` — `{"status": "ok", "model_loaded": bool}`

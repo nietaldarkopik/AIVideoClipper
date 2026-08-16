@@ -7,6 +7,7 @@ use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
+use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
@@ -37,6 +38,7 @@ class AIServiceProvider extends ServiceProvider
             return new FFmpegService(
                 ffmpegBin: config('services.media.ffmpeg_bin', 'ffmpeg'),
                 ffprobeBin: config('services.media.ffprobe_bin', 'ffprobe'),
+                x264Preset: config('services.media.ffmpeg_preset', 'superfast'),
             );
         });
 
@@ -62,8 +64,10 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.openai.transcribe_model', 'whisper-1'),
                 ),
                 'whisper_engine' => new WhisperEngineTranscriptionProvider(
+                    $app->make(FFmpegService::class),
                     (string) config('services.whisper_engine.base_url'),
                     (int) config('services.whisper_engine.timeout', 1200),
+                    (float) config('services.whisper_engine.chunk_seconds', 120),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_TRANSCRIPTION_PROVIDER [{$provider}]. Valid values: mock, openai, whisper_engine."),
             };
@@ -93,7 +97,11 @@ class AIServiceProvider extends ServiceProvider
         $this->app->bind(ReframingProvider::class, function ($app) {
             return match ($provider = config('services.ai.reframing_provider', 'mock')) {
                 'mock' => $app->make(MockReframingProvider::class),
-                default => throw new InvalidArgumentException("Unknown AI_REFRAMING_PROVIDER [{$provider}]. Valid values: mock."),
+                'face_tracker' => new FaceTrackerReframingProvider(
+                    (string) config('services.face_tracker.base_url'),
+                    (int) config('services.face_tracker.timeout', 300),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_REFRAMING_PROVIDER [{$provider}]. Valid values: mock, face_tracker."),
             };
         });
 

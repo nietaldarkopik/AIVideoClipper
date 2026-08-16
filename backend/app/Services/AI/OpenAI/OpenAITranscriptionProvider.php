@@ -2,9 +2,11 @@
 
 namespace App\Services\AI\OpenAI;
 
+use App\Exceptions\JobCancelledException;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\DTOs\TranscriptionResult;
 use App\Services\Video\FFmpegService;
+use Closure;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -29,7 +31,7 @@ class OpenAITranscriptionProvider implements TranscriptionProvider
     ) {
     }
 
-    public function transcribe(string $audioPath, ?string $language = null): TranscriptionResult
+    public function transcribe(string $audioPath, ?string $language = null, ?Closure $shouldAbort = null): TranscriptionResult
     {
         if (empty($this->apiKey)) {
             throw new RuntimeException('OPENAI_API_KEY is not set — required for AI_TRANSCRIPTION_PROVIDER=openai.');
@@ -48,6 +50,10 @@ class OpenAITranscriptionProvider implements TranscriptionProvider
             $offset = 0.0;
             $chunkIndex = 0;
             while ($offset < max($duration, self::CHUNK_SECONDS) && $offset < $duration) {
+                if ($shouldAbort && $shouldAbort()) {
+                    throw new JobCancelledException('Cancelled by user.');
+                }
+
                 $chunkLength = min(self::CHUNK_SECONDS, $duration - $offset);
                 $chunkPath = "{$tmpDir}/chunk_{$chunkIndex}.mp3";
                 $this->ffmpeg->transcodeAudioSegment($audioPath, $chunkPath, $offset, $chunkLength);

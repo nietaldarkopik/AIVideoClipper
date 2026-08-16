@@ -11,6 +11,12 @@ class FFmpegService
     public function __construct(
         private readonly string $ffmpegBin = 'ffmpeg',
         private readonly string $ffprobeBin = 'ffprobe',
+        // x264 preset for renderClip(). Quality is set by -crf below, not by preset —
+        // preset only trades CPU time for compression *efficiency* (output file
+        // size), so dropping to a faster preset on a CPU-only, no-GPU machine cuts
+        // encode time/load without touching visual quality, just a somewhat larger
+        // output file. See config('services.media.ffmpeg_preset').
+        private readonly string $x264Preset = 'superfast',
     ) {
     }
 
@@ -98,6 +104,26 @@ class FFmpegService
         $this->assertSuccess($result, 'transcode audio segment');
     }
 
+    /**
+     * Cut a slice of an already-extracted WAV to its own small WAV file, for feeding
+     * a local transcription engine (e.g. whisper-engine) a bounded amount of audio
+     * per request instead of an entire long recording at once — keeps peak CPU/RAM
+     * per request low enough that a long video won't stall or crash the machine.
+     */
+    public function sliceAudioSegment(string $sourcePath, string $outPath, float $start, float $duration): void
+    {
+        $this->ensureDir($outPath);
+
+        $result = Process::timeout(300)->run([
+            $this->ffmpegBin, '-y',
+            '-ss', (string) $start, '-i', $sourcePath, '-t', (string) $duration,
+            '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+            $outPath,
+        ]);
+
+        $this->assertSuccess($result, 'slice audio segment');
+    }
+
     public function generateThumbnail(string $videoPath, string $outPath, float $atSecond = 1.0): void
     {
         $this->ensureDir($outPath);
@@ -159,7 +185,7 @@ class FFmpegService
         }
 
         $args = array_merge($args, [
-            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
+            '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
             '-c:a', 'aac', '-b:a', '128k',
             '-movflags', '+faststart',
             $outPath,
@@ -171,9 +197,10 @@ class FFmpegService
 
     /**
      * Build a per-frame ffmpeg crop expression from crop keyframes. With zero or one
-     * keyframe this is a static crop; with multiple it step-interpolates between them
-     * (ffmpeg expressions don't have an easy native lerp across arbitrary keyframes,
-     * so we approximate with a nearest-keyframe step function using `if()` chains).
+     * keyframe this is a static crop; with multiple, x/y linearly interpolate between
+     * consecutive keyframes (piecewise lerp via an `if()` chain) so the crop pans
+     * smoothly across each keyframe interval instead of jump-cutting at each one, and
+     * holds the final position after the last keyframe.
      */
     private function buildCropExpression(array $cropKeyframes, float $duration): string
     {
@@ -193,20 +220,29 @@ class FFmpegService
         // Commas inside the if(...) eval expressions must be escaped: ffmpeg's
         // filtergraph tokenizer splits on unescaped commas to separate chained
         // filters, even when they appear inside a function call's argument list.
-        $xExpr = str_replace(',', '\\,', $this->stepExpression($cropKeyframes, 'x'));
-        $yExpr = str_replace(',', '\\,', $this->stepExpression($cropKeyframes, 'y'));
+        $xExpr = str_replace(',', '\\,', $this->lerpExpression($cropKeyframes, 'x'));
+        $yExpr = str_replace(',', '\\,', $this->lerpExpression($cropKeyframes, 'y'));
 
         return "crop={$w}:{$h}:{$xExpr}:{$yExpr}";
     }
 
-    private function stepExpression(array $keyframes, string $field): string
+    private function lerpExpression(array $keyframes, string $field): string
     {
-        // Builds: if(lt(t,k1.time),k0.value, if(lt(t,k2.time),k1.value, ... lastValue))
-        $expr = (string) (int) end($keyframes)[$field];
+        // Builds nested ifs, one per keyframe interval:
+        //   if(lt(t,k1.time), lerp(k0,k1,t), if(lt(t,k2.time), lerp(k1,k2,t), ... kLast.value))
+        // Each interval linearly interpolates between its two keyframes' values, so
+        // the crop pans smoothly instead of snapping at each keyframe. Past the final
+        // keyframe the position just holds. Keyframe times are strictly increasing
+        // (each one only exists because the tracked position changed), so every
+        // interval's time span is > 0 and the division below is always safe.
+        $expr = (string) end($keyframes)[$field];
         for ($i = count($keyframes) - 1; $i > 0; $i--) {
-            $threshold = $keyframes[$i]['time'];
-            $value = (int) $keyframes[$i - 1][$field];
-            $expr = "if(lt(t,{$threshold}),{$value},{$expr})";
+            $t0 = $keyframes[$i - 1]['time'];
+            $t1 = $keyframes[$i]['time'];
+            $v0 = $keyframes[$i - 1][$field];
+            $v1 = $keyframes[$i][$field];
+            $lerp = "({$v0}+({$v1}-{$v0})*(t-{$t0})/({$t1}-{$t0}))";
+            $expr = "if(lt(t,{$t1}),{$lerp},{$expr})";
         }
 
         return $expr;

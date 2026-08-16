@@ -17,8 +17,14 @@ interface SocialProvider
      * Real providers return the platform's OAuth consent screen URL; the mock
      * provider returns an internal frontend route that simulates the OAuth
      * consent + callback round trip without leaving the app.
+     *
+     * $state is a caller-generated, tamper-evident token (see
+     * SocialAccountController::authorize()) that must be echoed back verbatim
+     * as the `state` query param on the redirect URI — it's how the callback
+     * (which Google/etc. hit directly, with no bearer token attached) recovers
+     * which user initiated the connection.
      */
-    public function getAuthorizationUrl(User $user, string $redirectUri): string;
+    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string;
 
     /**
      * Exchange the OAuth callback (or, for mock providers, a user-supplied handle)

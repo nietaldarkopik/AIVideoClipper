@@ -18,6 +18,45 @@ return [
         'key' => env('POSTMARK_API_KEY'),
     ],
 
+    // Used by App\Console\Commands\ReapStalledProcessingJobs — a ProcessingJob stuck
+    // at status=running with no progress update for this many minutes is assumed
+    // to have died with its worker process (crash, PC restart) and gets marked failed.
+    'processing' => [
+        'stall_minutes' => env('PROCESSING_JOB_STALL_MINUTES', 20),
+    ],
+
+    'google' => [
+        // OAuth client for real YouTube publishing (YouTubeProvider). Set up at
+        // console.cloud.google.com: enable "YouTube Data API v3", create an OAuth
+        // client ID (Web application), and register redirect_uri below verbatim
+        // as an authorized redirect URI.
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+        'redirect_uri' => env('GOOGLE_REDIRECT_URI'),
+    ],
+
+    'facebook' => [
+        // Meta for Developers app (developers.facebook.com) with Facebook Login
+        // configured. Meta's "App Domains" field rejects bare "localhost"/wildcard
+        // DNS tricks in practice, so this goes through a real reverse-proxied
+        // subdomain (clipper.opik.unwim.ac.id -> Apache on server.unwim.ac.id ->
+        // WireGuard tunnel -> this machine's Laravel dev server). Register
+        // redirect_uri below verbatim as a Valid OAuth Redirect URI, and
+        // "opik.unwim.ac.id" as an App Domain in Settings > Basic.
+        'app_id' => env('FACEBOOK_APP_ID'),
+        'app_secret' => env('FACEBOOK_APP_SECRET'),
+        'graph_version' => env('FACEBOOK_GRAPH_VERSION', 'v21.0'),
+        'redirect_uri' => env('FACEBOOK_REDIRECT_URI'),
+    ],
+
+    'instagram_automation' => [
+        // Self-hosted Puppeteer service (tools/instagram-automation) — no official
+        // API involved. Instagram publishing has no OAuth: InstagramProvider logs
+        // in with a stored username/password instead. See that service's README.
+        'base_url' => env('IG_AUTOMATION_URL', 'http://127.0.0.1:8300'),
+        'timeout' => env('IG_AUTOMATION_TIMEOUT', 180),
+    ],
+
     'resend' => [
         'key' => env('RESEND_API_KEY'),
     ],
@@ -39,6 +78,12 @@ return [
         'ffmpeg_bin' => env('FFMPEG_BIN', 'ffmpeg'),
         'ffprobe_bin' => env('FFPROBE_BIN', 'ffprobe'),
         'ytdlp_bin' => env('YTDLP_BIN', 'yt-dlp'),
+        // x264 preset for clip rendering. Visual quality is controlled by -crf (see
+        // FFmpegService::renderClip), not by preset — preset only trades encode
+        // time for file size. Default 'superfast' favors a CPU-only, no-GPU machine;
+        // go slower (e.g. 'medium') only if you specifically want smaller files and
+        // have CPU headroom to spare.
+        'ffmpeg_preset' => env('FFMPEG_PRESET', 'superfast'),
     ],
 
     'ai' => [
@@ -62,6 +107,11 @@ return [
         // (a ~65min clip took ~15-20min on a 4-core i7). No per-request cost like
         // OpenAI, so it's safe to give this a generous ceiling.
         'timeout' => env('WHISPER_ENGINE_TIMEOUT', 3600),
+        // Long recordings are split into WAV chunks of this length before each is
+        // sent to the engine, so peak CPU/RAM per request stays bounded instead of
+        // scaling with total video length — on weaker machines, transcribing an hour
+        // of audio in one call has been enough to lock up or reboot the PC.
+        'chunk_seconds' => env('WHISPER_ENGINE_CHUNK_SECONDS', 120),
     ],
 
     'ollama' => [
@@ -72,6 +122,11 @@ return [
         'base_url' => env('OLLAMA_URL', 'http://127.0.0.1:11434'),
         'model' => env('OLLAMA_MODEL', 'llama3.1'),
         'timeout' => env('OLLAMA_TIMEOUT', 180),
+    ],
+
+    'face_tracker' => [
+        'base_url' => env('FACE_TRACKER_URL', 'http://127.0.0.1:8200'),
+        'timeout' => env('FACE_TRACKER_TIMEOUT', 300),
     ],
 
 ];

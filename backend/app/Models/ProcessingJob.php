@@ -76,4 +76,18 @@ class ProcessingJob extends Model
             'finished_at' => now(),
         ]);
     }
+
+    /**
+     * Flag this job as cancelled. Doesn't stop the PHP process actually running it
+     * (impossible without pcntl on Windows) — the running job's own cooperative
+     * check (App\Jobs\Concerns\ChecksCancellation) is what notices this and bails.
+     */
+    public function cancel(?string $reason = null): void
+    {
+        $this->update([
+            'status' => self::STATUS_CANCELLED,
+            'error' => $reason ?? 'Cancelled by user.',
+            'finished_at' => now(),
+        ]);
+    }
 }

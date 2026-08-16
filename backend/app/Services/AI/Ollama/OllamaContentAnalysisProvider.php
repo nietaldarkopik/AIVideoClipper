@@ -2,22 +2,36 @@
 
 namespace App\Services\AI\Ollama;
 
+use App\Exceptions\JobCancelledException;
 use App\Models\Transcript;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
+use Closure;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use RuntimeException;
 
 /**
- * Moment-detection via a self-hosted Ollama instance, using its OpenAI-compatible
- * /v1/chat/completions endpoint. Same prompt contract as OpenAIContentAnalysisProvider
- * so behavior is a drop-in swap — free and private, but quality depends entirely on
- * which local model is pulled (e.g. llama3.1, qwen2.5) and its context window.
+ * Moment-detection via an Ollama instance (self-hosted or a shared server such as
+ * prof.unwim.ac.id), using Ollama's native /api/chat endpoint. Same prompt contract
+ * as OpenAIContentAnalysisProvider so behavior is a drop-in swap — free, but quality
+ * and latency depend entirely on which model is loaded server-side and how busy it is.
+ *
+ * The transcript is analyzed in fixed time windows rather than as one giant prompt.
+ * A ~30-minute video sent whole to a small shared model either times out (observed:
+ * a 10-minute cURL timeout on video 9) or comes back with an empty candidate list —
+ * the same way a person can't productively skim an hour of transcript in one pass.
+ * Chunking keeps each request small and fast, and one chunk's failure only costs
+ * that window's candidates instead of the whole analysis.
  */
 class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 {
+    private const CHUNK_SECONDS = 300.0;
+
+    private const MAX_CANDIDATES_PER_CHUNK = 2;
+
     public function __construct(
         private readonly string $baseUrl,
         private readonly string $model,
@@ -35,44 +49,100 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
         return $scenes;
     }
 
-    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds): array
+    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds, ?Closure $shouldAbort = null): array
     {
         $segments = $transcript->segments ?? [];
         if (empty($segments)) {
             return [];
         }
 
-        $transcriptText = implode("\n", array_map(
-            fn ($s) => sprintf('[%s-%s] %s', $this->fmt($s['start']), $this->fmt($s['end']), $s['text']),
-            $segments
-        ));
+        $results = [];
+        foreach ($this->chunkSegments($segments) as $chunk) {
+            if ($shouldAbort && $shouldAbort()) {
+                throw new JobCancelledException('Cancelled by user.');
+            }
+
+            $results = array_merge($results, $this->analyzeChunk($chunk, $durationSeconds, $transcript->language));
+        }
+
+        usort($results, fn ($a, $b) => $b->overallScore <=> $a->overallScore);
 
         $maxCandidates = min(8, max(3, (int) round($durationSeconds / 180)));
 
-        $response = Http::timeout($this->timeoutSeconds)
-            ->post(rtrim($this->baseUrl, '/') . '/v1/chat/completions', [
-                'model' => $this->model,
-                'response_format' => ['type' => 'json_object'],
-                'temperature' => 0.4,
-                'messages' => [
-                    ['role' => 'system', 'content' => $this->systemPrompt($maxCandidates)],
-                    ['role' => 'user', 'content' => $this->userPrompt($transcriptText, $durationSeconds, $transcript->language)],
-                ],
-            ]);
+        return array_slice($results, 0, $maxCandidates);
+    }
 
-        if ($response->failed()) {
-            throw new RuntimeException(
-                "Ollama analysis failed ({$response->status()}): {$response->body()}. " .
-                "Is Ollama running at {$this->baseUrl} with model \"{$this->model}\" pulled?"
-            );
+    /**
+     * @param  array<int, array{start: float, end: float, text: string}>  $segments
+     * @return array<int, array<int, array{start: float, end: float, text: string}>>
+     */
+    private function chunkSegments(array $segments): array
+    {
+        $chunks = [];
+        foreach ($segments as $segment) {
+            $index = (int) floor(((float) $segment['start']) / self::CHUNK_SECONDS);
+            $chunks[$index][] = $segment;
         }
 
-        $raw = $response->json('choices.0.message.content');
-        $parsed = json_decode((string) $raw, true);
+        ksort($chunks);
+
+        return array_values($chunks);
+    }
+
+    /**
+     * @param  array<int, array{start: float, end: float, text: string}>  $chunk
+     * @return ClipCandidateData[]
+     */
+    private function analyzeChunk(array $chunk, float $durationSeconds, string $language): array
+    {
+        $transcriptText = implode("\n", array_map(
+            fn ($s) => sprintf('[%s-%s] %s', $this->fmt($s['start']), $this->fmt($s['end']), $s['text']),
+            $chunk
+        ));
+
+        $chunkStart = (float) $chunk[0]['start'];
+        $chunkEnd = (float) $chunk[count($chunk) - 1]['end'];
+
+        try {
+            $response = Http::timeout($this->timeoutSeconds)
+                ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
+                    'model' => $this->model,
+                    'stream' => false,
+                    'format' => 'json',
+                    'options' => ['temperature' => 0.4],
+                    'messages' => [
+                        ['role' => 'system', 'content' => $this->systemPrompt(self::MAX_CANDIDATES_PER_CHUNK)],
+                        ['role' => 'user', 'content' => $this->userPrompt($transcriptText, $durationSeconds, $chunkStart, $chunkEnd, $language)],
+                    ],
+                ]);
+        } catch (ConnectionException|RequestException $e) {
+            Log::warning('Ollama analysis chunk failed; skipping this window', [
+                'chunk_start' => $chunk[0]['start'] ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        if ($response->failed()) {
+            Log::warning('Ollama analysis chunk returned an error; skipping this window', [
+                'chunk_start' => $chunk[0]['start'] ?? null,
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            return [];
+        }
+
+        $raw = $this->extractMessageContent($response->body());
+        $parsed = json_decode($raw, true);
         $candidates = $parsed['candidates'] ?? [];
 
         if (! is_array($candidates)) {
-            Log::warning('Ollama analysis returned unexpected shape', ['raw' => $raw]);
+            Log::warning('Ollama analysis chunk returned unexpected shape', [
+                'chunk_start' => $chunk[0]['start'] ?? null,
+                'raw' => $raw,
+            ]);
 
             return [];
         }
@@ -81,7 +151,7 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
         foreach ($candidates as $c) {
             $start = (float) ($c['start_time'] ?? 0);
             $end = (float) ($c['end_time'] ?? 0);
-            if ($end <= $start || $start < 0 || $end > $durationSeconds + 1 || ($end - $start) < 8) {
+            if ($end <= $start || $start < $chunkStart - 1 || $end > min($chunkEnd, $durationSeconds) + 1 || ($end - $start) < 8) {
                 continue;
             }
 
@@ -105,17 +175,16 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
             );
         }
 
-        usort($results, fn ($a, $b) => $b->overallScore <=> $a->overallScore);
-
         return $results;
     }
 
     private function systemPrompt(int $maxCandidates): string
     {
         return <<<PROMPT
-You are an expert short-form video producer. Given a timestamped transcript of a
-long video, find the {$maxCandidates} best self-contained moments to cut into
-short vertical clips (like TikTok/Reels/Shorts).
+You are an expert short-form video producer. Given a timestamped transcript excerpt
+from a longer video, find up to {$maxCandidates} best self-contained moments in THIS
+excerpt to cut into short vertical clips (like TikTok/Reels/Shorts). It's fine to
+return fewer than {$maxCandidates}, or none, if this excerpt has no strong moments.
 
 Respond with ONLY a JSON object: {"candidates": [...]}. Each candidate object must have:
 start_time (number, seconds), end_time (number, seconds, 15-90 seconds after start_time
@@ -132,13 +201,40 @@ Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
 self-contained idea, and an emotional or informational payoff. Only use start_time/end_time
-values that fall within the transcript's timestamp range.
+values that fall within THIS EXCERPT's timestamp range, not the full video.
 PROMPT;
     }
 
-    private function userPrompt(string $transcriptText, float $durationSeconds, string $language): string
+    private function userPrompt(string $transcriptText, float $durationSeconds, float $chunkStart, float $chunkEnd, string $language): string
     {
-        return "Video duration: {$durationSeconds} seconds. Transcript language: {$language}.\n\nTranscript:\n{$transcriptText}";
+        return "This is one excerpt ({$this->fmt($chunkStart)}-{$this->fmt($chunkEnd)}) from a " .
+            "{$durationSeconds}-second video. Transcript language: {$language}.\n\n" .
+            "Excerpt transcript:\n{$transcriptText}";
+    }
+
+    /**
+     * We always send stream:false, but some proxies/servers stream regardless —
+     * in that case the body is newline-delimited JSON chunks (Ollama's native
+     * streaming format) rather than one JSON object. Handle both.
+     */
+    private function extractMessageContent(string $body): string
+    {
+        $single = json_decode($body, true);
+        if (is_array($single) && isset($single['message']['content'])) {
+            return (string) $single['message']['content'];
+        }
+
+        $content = '';
+        foreach (explode("\n", trim($body)) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $chunk = json_decode($line, true);
+            $content .= (string) ($chunk['message']['content'] ?? '');
+        }
+
+        return $content;
     }
 
     private function clampScore(mixed $value): int

@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Exceptions\JobCancelledException;
+use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\Clip;
 use App\Models\ProcessingJob;
 use App\Models\Subtitle;
@@ -20,7 +22,7 @@ use Throwable;
 
 class RenderClipJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use ChecksCancellation, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 2;
     public int $timeout = 1800;
@@ -57,6 +59,7 @@ class RenderClipJob implements ShouldQueue
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
 
+            $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(15, 'Calculating smart crop...');
             $keyframes = $reframing->detectCropKeyframes(
                 $sourcePath,
@@ -71,6 +74,7 @@ class RenderClipJob implements ShouldQueue
 
             $assPath = null;
             if ($clip->subtitles_enabled && $video->transcript) {
+                $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(35, 'Generating captions...');
 
                 $segments = $subtitleService->buildClipSegments(
@@ -101,6 +105,7 @@ class RenderClipJob implements ShouldQueue
                 $watermarkPath = $disk->path($config['branding']['watermark_path']);
             }
 
+            $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(55, 'Rendering video...');
             $clip->update(['progress' => 55]);
 
@@ -117,6 +122,7 @@ class RenderClipJob implements ShouldQueue
                 $watermarkPath,
             );
 
+            $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(90, 'Generating thumbnail...');
             $thumbRelative = "clips/{$clip->id}/thumbnail.jpg";
             $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($thumbRelative), 0.3);
@@ -131,6 +137,11 @@ class RenderClipJob implements ShouldQueue
             ]);
 
             $processingJob->markCompleted('Clip rendered');
+            $this->settleProjectStatus($clip->project_id);
+        } catch (JobCancelledException $e) {
+            // See the matching catch in AnalyzeVideoJob: already marked cancelled by
+            // whoever stopped it, don't overwrite that or retry.
+            $clip->update(['status' => Clip::STATUS_FAILED, 'failure_reason' => $e->getMessage()]);
             $this->settleProjectStatus($clip->project_id);
         } catch (Throwable $e) {
             $clip->update(['status' => Clip::STATUS_FAILED, 'failure_reason' => $e->getMessage()]);

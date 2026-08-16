@@ -17,15 +17,13 @@ abstract class AbstractMockSocialProvider implements SocialProvider
      * provider (TikTokProvider, YouTubeProvider, ...) once API keys are available —
      * everything downstream (publish jobs, controllers) only depends on the interface.
      */
-    public function getAuthorizationUrl(User $user, string $redirectUri): string
+    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string
     {
-        $state = Str::random(24);
-
         return sprintf(
             '%s/social-accounts/mock-connect?platform=%s&state=%s&redirect_uri=%s',
             config('app.frontend_url'),
             $this->platform(),
-            $state,
+            urlencode($state),
             urlencode($redirectUri)
         );
     }

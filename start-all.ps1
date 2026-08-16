@@ -12,13 +12,23 @@
     Force-skip the whisper-engine window even if AI_TRANSCRIPTION_PROVIDER
     in backend\.env is "whisper_engine".
 
+.PARAMETER FaceTracker
+    Force-start the face-tracker window even if AI_REFRAMING_PROVIDER
+    in backend\.env isn't "face_tracker".
+
+.PARAMETER NoFaceTracker
+    Force-skip the face-tracker window even if AI_REFRAMING_PROVIDER
+    in backend\.env is "face_tracker".
+
 .EXAMPLE
     .\start-all.ps1
     .\start-all.ps1 -WhisperEngine
 #>
 param(
     [switch]$WhisperEngine,
-    [switch]$NoWhisperEngine
+    [switch]$NoWhisperEngine,
+    [switch]$FaceTracker,
+    [switch]$NoFaceTracker
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +56,20 @@ if ($WhisperEngine) {
     }
 }
 
+# --- decide whether face-tracker should be started ---
+$startFaceTracker = $false
+if ($FaceTracker) {
+    $startFaceTracker = $true
+} elseif (-not $NoFaceTracker) {
+    $envPath = Join-Path $root 'backend\.env'
+    if (Test-Path $envPath) {
+        $line = Select-String -Path $envPath -Pattern '^AI_REFRAMING_PROVIDER=' -ErrorAction SilentlyContinue
+        if ($line -and ($line.Line -replace '^AI_REFRAMING_PROVIDER=', '').Trim() -eq 'face_tracker') {
+            $startFaceTracker = $true
+        }
+    }
+}
+
 Write-Host "Starting clipper-tools..." -ForegroundColor Cyan
 
 # 1. Redis
@@ -62,6 +86,14 @@ Start-Service -Title 'clipper: laravel api' `
 Start-Service -Title 'clipper: queue worker' `
     -WorkDir (Join-Path $root 'backend') `
     -Command 'php artisan queue:work redis --queue=default'
+
+# 3b. Scheduler — runs App\Console\Commands\ReapStalledProcessingJobs every 5min
+# (see bootstrap/app.php withSchedule) to auto-fail ProcessingJob rows stuck at
+# "running" because their worker died (crash, PC restart) without ever getting to
+# mark them failed itself.
+Start-Service -Title 'clipper: scheduler' `
+    -WorkDir (Join-Path $root 'backend') `
+    -Command 'php artisan schedule:work'
 
 # 4. Next.js frontend
 Start-Service -Title 'clipper: frontend' `
@@ -82,10 +114,27 @@ if ($startWhisper) {
     Write-Host "Skipping whisper-engine (AI_TRANSCRIPTION_PROVIDER isn't whisper_engine; pass -WhisperEngine to force it)" -ForegroundColor DarkGray
 }
 
+# 6. Face tracker (optional)
+if ($startFaceTracker) {
+    $venvPython = Join-Path $root 'tools\face-tracker\venv\Scripts\python.exe'
+    if (-not (Test-Path $venvPython)) {
+        Write-Host "Skipping face-tracker: venv not found at $venvPython (see tools\face-tracker\README.md)" -ForegroundColor Yellow
+    } else {
+        Start-Service -Title 'clipper: face tracker' `
+            -WorkDir (Join-Path $root 'tools\face-tracker') `
+            -Command '.\venv\Scripts\python.exe main.py'
+    }
+} else {
+    Write-Host "Skipping face-tracker (AI_REFRAMING_PROVIDER isn't face_tracker; pass -FaceTracker to force it)" -ForegroundColor DarkGray
+}
+
 Write-Host ""
-Write-Host "5 windows opened (or 4 if whisper-engine was skipped). Close a window to stop that process." -ForegroundColor Cyan
+Write-Host "Windows opened (whisper-engine/face-tracker included only if enabled). Close a window to stop that process." -ForegroundColor Cyan
 Write-Host "Frontend:  http://localhost:3000"
 Write-Host "API:       http://localhost:8000"
 if ($startWhisper) {
     Write-Host "Whisper:   http://127.0.0.1:8100/health"
+}
+if ($startFaceTracker) {
+    Write-Host "Face tracker: http://127.0.0.1:8200/health"
 }

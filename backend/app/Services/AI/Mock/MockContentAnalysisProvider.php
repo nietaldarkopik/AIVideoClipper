@@ -6,6 +6,7 @@ use App\Models\Transcript;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
+use Closure;
 
 class MockContentAnalysisProvider implements ContentAnalysisProvider
 {
@@ -29,7 +30,7 @@ class MockContentAnalysisProvider implements ContentAnalysisProvider
      * @param  SceneMarker[]  $scenes
      * @return ClipCandidateData[]
      */
-    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds): array
+    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds, ?Closure $shouldAbort = null): array
     {
         $hooksByType = MockContentBank::hooks();
         $flatHooks = [];

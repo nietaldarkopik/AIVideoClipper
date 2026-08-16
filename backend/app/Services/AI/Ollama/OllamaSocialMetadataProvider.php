@@ -28,10 +28,11 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
         $platformList = implode(', ', $platforms);
 
         $response = Http::timeout($this->timeoutSeconds)
-            ->post(rtrim($this->baseUrl, '/') . '/v1/chat/completions', [
+            ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
                 'model' => $this->model,
-                'response_format' => ['type' => 'json_object'],
-                'temperature' => 0.6,
+                'stream' => false,
+                'format' => 'json',
+                'options' => ['temperature' => 0.6],
                 'messages' => [
                     ['role' => 'system', 'content' => $this->systemPrompt($platformList)],
                     ['role' => 'user', 'content' => $context],
@@ -45,7 +46,7 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
             );
         }
 
-        $parsed = json_decode((string) $response->json('choices.0.message.content'), true) ?? [];
+        $parsed = json_decode($this->extractMessageContent($response->body()), true) ?? [];
         $result = [];
 
         foreach ($platforms as $platform) {
@@ -61,6 +62,31 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
         }
 
         return $result;
+    }
+
+    /**
+     * We always send stream:false, but some proxies/servers stream regardless —
+     * in that case the body is newline-delimited JSON chunks (Ollama's native
+     * streaming format) rather than one JSON object. Handle both.
+     */
+    private function extractMessageContent(string $body): string
+    {
+        $single = json_decode($body, true);
+        if (is_array($single) && isset($single['message']['content'])) {
+            return (string) $single['message']['content'];
+        }
+
+        $content = '';
+        foreach (explode("\n", trim($body)) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $chunk = json_decode($line, true);
+            $content .= (string) ($chunk['message']['content'] ?? '');
+        }
+
+        return $content;
     }
 
     private function systemPrompt(string $platformList): string

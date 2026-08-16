@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Exceptions\JobCancelledException;
+use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\Video;
@@ -17,7 +19,7 @@ use Throwable;
 
 class ImportVideoJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use ChecksCancellation, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 2;
     public int $timeout = 1800;
@@ -43,6 +45,7 @@ class ImportVideoJob implements ShouldQueue
             $video->update(['status' => 'processing']);
 
             if ($video->source_type !== 'upload') {
+                $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(10, 'Downloading video...');
                 $destDir = $disk->path("videos/{$video->id}");
                 $downloaded = $downloader->download($video->source_url, $destDir);
@@ -62,6 +65,7 @@ class ImportVideoJob implements ShouldQueue
                 ]);
             }
 
+            $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(40, 'Reading video metadata...');
             $fullPath = $disk->path($video->disk_path);
             $probe = $ffmpeg->probe($fullPath);
@@ -73,6 +77,7 @@ class ImportVideoJob implements ShouldQueue
                 'file_size_bytes' => $probe['size'],
             ]);
 
+            $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(75, 'Generating thumbnail...');
             $thumbRelative = "videos/{$video->id}/thumbnail.jpg";
             $ffmpeg->generateThumbnail(
@@ -95,6 +100,13 @@ class ImportVideoJob implements ShouldQueue
             Project::where('id', $video->project_id)
                 ->where('status', Project::STATUS_UPLOADING)
                 ->update(['status' => Project::STATUS_DRAFT]);
+        } catch (JobCancelledException $e) {
+            // See the matching catch in AnalyzeVideoJob: already marked cancelled by
+            // whoever stopped it, don't overwrite that or retry.
+            $video->update(['status' => 'failed', 'failure_reason' => $e->getMessage()]);
+            Project::where('id', $video->project_id)
+                ->where('status', Project::STATUS_UPLOADING)
+                ->update(['status' => Project::STATUS_FAILED, 'failure_reason' => $e->getMessage()]);
         } catch (Throwable $e) {
             $video->update(['status' => 'failed', 'failure_reason' => $e->getMessage()]);
             $processingJob->markFailed($e->getMessage());

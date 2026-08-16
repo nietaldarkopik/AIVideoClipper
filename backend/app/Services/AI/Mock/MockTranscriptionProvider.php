@@ -5,6 +5,7 @@ namespace App\Services\AI\Mock;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\DTOs\TranscriptionResult;
 use App\Services\Video\FFmpegService;
+use Closure;
 
 class MockTranscriptionProvider implements TranscriptionProvider
 {
@@ -12,7 +13,7 @@ class MockTranscriptionProvider implements TranscriptionProvider
     {
     }
 
-    public function transcribe(string $audioPath, ?string $language = null): TranscriptionResult
+    public function transcribe(string $audioPath, ?string $language = null, ?Closure $shouldAbort = null): TranscriptionResult
     {
         $duration = $this->ffmpeg->probeDuration($audioPath) ?? 300.0;
         $language = $language ?? 'en';

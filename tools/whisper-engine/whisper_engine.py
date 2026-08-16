@@ -29,6 +29,20 @@ class WhisperEngine:
             beam_size=5,
             language=language,
             word_timestamps=True,
+            # Skip silent/non-speech stretches entirely instead of running the model
+            # over them — less audio actually decoded (lighter on a CPU-only, no-GPU
+            # machine) and it also sidesteps Whisper's well-known tendency to
+            # hallucinate text during silence, so this is a pure win, not a
+            # speed/quality tradeoff.
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            # Each audio chunk here is already an independent slice from
+            # WhisperEngineTranscriptionProvider's own chunking, not a real
+            # continuation of prior speech — feeding it the previous window's text as
+            # context doesn't add real information and occasionally sends the model
+            # into a repetition loop (a real CPU-burning failure mode) on noisy or
+            # silent stretches. Off is both lighter and safer for this chunked setup.
+            condition_on_previous_text=False,
         )
 
         segments = []

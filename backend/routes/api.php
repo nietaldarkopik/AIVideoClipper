@@ -23,6 +23,11 @@ Route::get('/media/{path}', [MediaStreamController::class, 'stream'])
     ->where('path', '.*')
     ->name('media.stream');
 
+// Public: the browser lands here straight from the platform's OAuth consent screen
+// (Google/etc.), with no bearer token attached — the signed `state` param is what
+// identifies which user this connection belongs to. See SocialAccountController.
+Route::get('/social-accounts/{platform}/callback', [SocialAccountController::class, 'callback']);
+
 // Templates & categories are readable by anyone signed in; mutations are admin-only below.
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -39,6 +44,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/projects/{project}/generate-clips', [ProjectController::class, 'generateClips']);
     Route::get('/projects/{project}/clip-candidates', [ClipCandidateController::class, 'index']);
     Route::get('/projects/{project}/processing-jobs', [ProcessingJobController::class, 'forProject']);
+    Route::post('/projects/{project}/processing-jobs/{processingJob}/cancel', [ProcessingJobController::class, 'cancel']);
     Route::post('/projects/{project}/videos', [VideoController::class, 'store']);
 
     Route::get('/videos/{video}', [VideoController::class, 'show']);
@@ -61,6 +67,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/social-accounts/platforms', [SocialAccountController::class, 'platforms']);
     Route::get('/social-accounts', [SocialAccountController::class, 'index']);
     Route::post('/social-accounts/connect', [SocialAccountController::class, 'connect']);
+    Route::get('/social-accounts/{platform}/authorize', [SocialAccountController::class, 'authorize']);
     Route::patch('/social-accounts/{socialAccount}', [SocialAccountController::class, 'update']);
     Route::post('/social-accounts/{socialAccount}/refresh', [SocialAccountController::class, 'refresh']);
     Route::post('/social-accounts/{socialAccount}/disconnect', [SocialAccountController::class, 'disconnect']);

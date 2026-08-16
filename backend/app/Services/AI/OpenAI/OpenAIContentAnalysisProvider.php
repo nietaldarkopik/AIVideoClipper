@@ -6,6 +6,7 @@ use App\Models\Transcript;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
+use Closure;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -39,7 +40,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
         return $scenes;
     }
 
-    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds): array
+    public function analyzeMoments(Transcript $transcript, array $scenes, float $durationSeconds, ?Closure $shouldAbort = null): array
     {
         if (empty($this->apiKey)) {
             throw new RuntimeException('OPENAI_API_KEY is not set — required for AI_ANALYSIS_PROVIDER=openai.');
