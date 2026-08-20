@@ -50,6 +50,11 @@ const STATUS_TONE: Record<string, Tone> = {
   scheduled: "accent",
   publishing: "accent",
   cancelled: "muted",
+  pending: "muted",
+  importing: "accent",
+  skipped: "muted",
+  running: "accent",
+  completed_with_errors: "warning",
 };
 
 export function StatusBadge({ status }: { status: string }) {

@@ -6,12 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\ClipResource;
 use App\Http\Resources\ProjectResource;
 use App\Jobs\AnalyzeVideoJob;
+use App\Jobs\ImportVideoJob;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
-use App\Models\ClipCandidate;
 use App\Models\Project;
-use App\Models\Template;
+use App\Services\Video\ClipGenerationService;
+use App\Services\Video\ProjectReprocessor;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
@@ -97,10 +99,65 @@ class ProjectController extends Controller
     }
 
     /**
+     * Retry a failed project from wherever it actually broke — re-download if the
+     * import failed, re-analyze if the transcript/candidates never came back,
+     * re-render any clip that failed. Never auto-publishes: that stays a deliberate
+     * manual step from the Publish panel, same as a normal (non-batch) project.
+     */
+    public function reprocess(Request $request, Project $project, ProjectReprocessor $reprocessor)
+    {
+        $this->authorizeProject($request, $project);
+
+        if ($project->status !== Project::STATUS_FAILED) {
+            return response()->json(['message' => 'Only a failed project can be reprocessed.'], 422);
+        }
+
+        $plan = $reprocessor->plan($project);
+
+        switch ($plan['stage']) {
+            case ProjectReprocessor::STAGE_IMPORT:
+                $video = $plan['video'];
+                if (! $video) {
+                    return response()->json(['message' => 'This project has no video to re-import.'], 422);
+                }
+                $video->update(['status' => 'pending', 'failure_reason' => null]);
+                $project->update(['status' => Project::STATUS_UPLOADING, 'failure_reason' => null, 'last_edited_at' => now()]);
+                // Chained: AnalyzeVideoJob only runs if the re-import actually succeeds.
+                Bus::chain([new ImportVideoJob($video->id), new AnalyzeVideoJob($project->id, $video->id)])->dispatch();
+                $message = 'Re-downloading the video, then re-analyzing.';
+                break;
+
+            case ProjectReprocessor::STAGE_ANALYZE:
+                $project->update(['status' => Project::STATUS_PROCESSING, 'failure_reason' => null, 'last_edited_at' => now()]);
+                AnalyzeVideoJob::dispatch($project->id, $plan['video']->id);
+                $message = 'Re-analyzing the video.';
+                break;
+
+            case ProjectReprocessor::STAGE_RENDER:
+                foreach ($plan['clips'] as $clip) {
+                    $clip->update(['status' => Clip::STATUS_QUEUED, 'progress' => 0, 'failure_reason' => null]);
+                    RenderClipJob::dispatch($clip->id);
+                }
+                $project->update(['status' => Project::STATUS_RENDERING, 'failure_reason' => null, 'last_edited_at' => now()]);
+                $message = sprintf('Re-rendering %d failed clip(s).', $plan['clips']->count());
+                break;
+
+            default:
+                // Nothing actually looks broken (e.g. candidates exist but rendering
+                // was never started) — just clear the failed flag; the normal
+                // "Generate Clips" flow picks up from here.
+                $project->update(['status' => Project::STATUS_COMPLETED, 'failure_reason' => null, 'last_edited_at' => now()]);
+                $message = 'Nothing to re-run — pick clips to generate below.';
+        }
+
+        return ProjectResource::make($project->fresh())->additional(['message' => $message]);
+    }
+
+    /**
      * Turn selected AI clip candidates into rendered Clip records + render jobs.
      * Body: { candidate_ids?: int[], mode?: top_3|top_5|top_10|all, template_id, aspect_ratio?, subtitle_language? }
      */
-    public function generateClips(Request $request, Project $project)
+    public function generateClips(Request $request, Project $project, ClipGenerationService $clipGeneration)
     {
         $this->authorizeProject($request, $project);
 
@@ -114,63 +171,19 @@ class ProjectController extends Controller
             'subtitles_enabled' => ['sometimes', 'boolean'],
         ]);
 
-        $query = ClipCandidate::where('project_id', $project->id);
+        $clips = $clipGeneration->selectAndCreateClips($project, $data);
 
-        if (! empty($data['candidate_ids'])) {
-            $query->whereIn('id', $data['candidate_ids']);
-        } else {
-            $query->orderByDesc('overall_score');
-            $limit = match ($data['mode'] ?? 'top_5') {
-                'top_3' => 3,
-                'top_10' => 10,
-                'all' => null,
-                default => 5,
-            };
-            if ($limit) {
-                $query->limit($limit);
-            }
-        }
-
-        $candidates = $query->get();
-
-        if ($candidates->isEmpty()) {
+        if ($clips->isEmpty()) {
             return response()->json(['message' => 'No clip candidates matched.'], 422);
         }
 
-        $template = null;
-        if (! empty($data['template_id'])) {
-            $template = Template::with('currentVersion')->find($data['template_id']);
-        }
-
-        $clips = [];
-        foreach ($candidates as $candidate) {
-            $clip = Clip::create([
-                'project_id' => $project->id,
-                'video_id' => $candidate->video_id,
-                'clip_candidate_id' => $candidate->id,
-                'template_id' => $template?->id,
-                'template_version_id' => $template?->current_version_id,
-                'title' => $candidate->suggested_title,
-                'caption' => $candidate->suggested_caption,
-                'hashtags' => $candidate->suggested_hashtags,
-                'start_time' => $candidate->start_time,
-                'end_time' => $candidate->end_time,
-                'duration' => $candidate->duration,
-                'aspect_ratio' => $data['aspect_ratio'] ?? $template?->aspect_ratio ?? '9:16',
-                'subtitle_language' => $data['subtitle_language'] ?? 'en',
-                'subtitles_enabled' => $data['subtitles_enabled'] ?? true,
-                'status' => Clip::STATUS_QUEUED,
-            ]);
-
-            $candidate->update(['status' => 'generated']);
-
+        foreach ($clips as $clip) {
             RenderClipJob::dispatch($clip->id);
-            $clips[] = $clip;
         }
 
         $project->update(['status' => Project::STATUS_RENDERING, 'last_edited_at' => now()]);
 
-        return ClipResource::collection(collect($clips))->response()->setStatusCode(201);
+        return ClipResource::collection($clips)->response()->setStatusCode(201);
     }
 
     private function authorizeProject(Request $request, Project $project): void

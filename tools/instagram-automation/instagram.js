@@ -45,27 +45,62 @@ async function login(page, username, password) {
   await page.type('input[name="email"]', username, { delay: 30 });
   await page.type('input[name="pass"]', password, { delay: 30 });
 
+  // Debug: prove what actually landed in the fields before submitting, in
+  // plaintext (not the masked dots) — catches autofill overwrites, stray
+  // whitespace, or keyboard-layout mistypes that "the password is correct"
+  // can't rule out from the caller's side. The field is switched back to
+  // type="password" immediately after the screenshot.
+  await page.evaluate(() => {
+    const passEl = document.querySelector('input[name="pass"]');
+    if (passEl) passEl.setAttribute('type', 'text');
+  });
+  const preSubmitScreenshot = await debugScreenshot(page, "pre-submit-unmasked");
+  await page.evaluate(() => {
+    const passEl = document.querySelector('input[name="pass"]');
+    if (passEl) passEl.setAttribute('type', 'password');
+  });
+
   await Promise.all([
     page.keyboard.press("Enter"),
     page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
   ]);
-  await new Promise((r) => setTimeout(r, 2000));
 
-  const url = page.url();
-  const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+  // Instagram can take a while to render its "incorrect password" banner
+  // (likely deliberate — it slows down automated brute-force attempts), so a
+  // single check right after a fixed delay can run before the banner shows
+  // up and misreport the outcome as "no session cookie" instead of the real
+  // rejection. Poll instead of guessing a fixed wait: check repeatedly for
+  // whichever outcome (checkpoint / 2FA / rejected / logged in) appears
+  // first, for up to ~12s.
+  const deadline = Date.now() + 12000;
+  let url = page.url();
+  let bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+  while (Date.now() < deadline) {
+    url = page.url();
+    bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+
+    if (/\/challenge\//.test(url) || /suspicious|confirm it'?s you|we detected/i.test(bodyText)) break;
+    if (/two.?factor|enter the code|security code/i.test(bodyText)) break;
+    if (/incorrect|couldn'?t find|wrong password/i.test(bodyText)) break;
+
+    const cookies = await page.cookies();
+    if (cookies.some((c) => c.name === "sessionid")) break;
+
+    await new Promise((r) => setTimeout(r, 500));
+  }
 
   if (/\/challenge\//.test(url) || /suspicious|confirm it'?s you|we detected/i.test(bodyText)) {
     const screenshot = await debugScreenshot(page, "checkpoint");
-    return { success: false, error: "Instagram flagged this login as suspicious (checkpoint challenge). This usually requires manually approving it from a phone that's already logged into the account.", screenshot };
+    return { success: false, error: "Instagram flagged this login as suspicious (checkpoint challenge). This usually requires manually approving it from a phone that's already logged into the account.", screenshot, preSubmitScreenshot };
   }
 
   if (/two.?factor|enter the code|security code/i.test(bodyText)) {
-    return { success: false, requiresTwoFactor: true };
+    return { success: false, requiresTwoFactor: true, preSubmitScreenshot };
   }
 
   if (/incorrect|couldn'?t find|wrong password/i.test(bodyText)) {
     const screenshot = await debugScreenshot(page, "bad-credentials");
-    return { success: false, error: "Instagram rejected the username/password.", screenshot };
+    return { success: false, error: "Instagram rejected the username/password.", screenshot, preSubmitScreenshot };
   }
 
   await dismissPostLoginDialogs(page);
@@ -74,10 +109,10 @@ async function login(page, username, password) {
   const sessionCookie = cookies.find((c) => c.name === "sessionid");
   if (!sessionCookie) {
     const screenshot = await debugScreenshot(page, "no-session-cookie");
-    return { success: false, error: "Login did not produce a session cookie — Instagram's flow may have changed.", screenshot };
+    return { success: false, error: "Login did not produce a session cookie — Instagram's flow may have changed.", screenshot, preSubmitScreenshot };
   }
 
-  return { success: true, cookies };
+  return { success: true, cookies, preSubmitScreenshot };
 }
 
 /**

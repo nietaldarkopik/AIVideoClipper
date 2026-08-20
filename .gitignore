@@ -37,3 +37,13 @@ tools/testdata/node_modules/
 tools/testdata/shots/
 tools/testdata/*_check.png
 tools/testdata/*_check.jpg
+
+# Instagram automation debug screenshots — can contain a plaintext password
+# (see tools/instagram-automation/instagram.js pre-submit-unmasked capture)
+tools/instagram-automation/debug-screenshots/
+
+# Persistent per-account browser profiles (cookies, cache) used to make
+# Instagram automation logins look like a returning device
+tools/instagram-automation/profiles/
+
+node_modules

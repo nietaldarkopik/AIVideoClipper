@@ -5,9 +5,12 @@ namespace App\Jobs;
 use App\Exceptions\JobCancelledException;
 use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\Clip;
+use App\Models\Project;
 use App\Models\ProcessingJob;
 use App\Models\Subtitle;
+use App\Models\VideoBatchItem;
 use App\Services\AI\Contracts\ReframingProvider;
+use App\Services\Social\AutoPublishScheduler;
 use App\Services\Video\AspectRatio;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
@@ -35,6 +38,7 @@ class RenderClipJob implements ShouldQueue
         FFmpegService $ffmpeg,
         SubtitleService $subtitleService,
         ReframingProvider $reframing,
+        AutoPublishScheduler $publishScheduler,
     ): void {
         $clip = Clip::with(['video', 'templateVersion'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
@@ -104,6 +108,7 @@ class RenderClipJob implements ShouldQueue
             if (! empty($config['branding']['watermark_path'])) {
                 $watermarkPath = $disk->path($config['branding']['watermark_path']);
             }
+            $watermarkOpacity = (float) ($config['branding']['watermark_opacity'] ?? 0.8);
 
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(55, 'Rendering video...');
@@ -120,6 +125,7 @@ class RenderClipJob implements ShouldQueue
                 $keyframeArrays,
                 $assPath,
                 $watermarkPath,
+                $watermarkOpacity,
             );
 
             $this->abortIfCancelled($processingJob);
@@ -137,16 +143,16 @@ class RenderClipJob implements ShouldQueue
             ]);
 
             $processingJob->markCompleted('Clip rendered');
-            $this->settleProjectStatus($clip->project_id);
+            $this->settleProjectStatus($clip->project_id, $publishScheduler);
         } catch (JobCancelledException $e) {
             // See the matching catch in AnalyzeVideoJob: already marked cancelled by
             // whoever stopped it, don't overwrite that or retry.
             $clip->update(['status' => Clip::STATUS_FAILED, 'failure_reason' => $e->getMessage()]);
-            $this->settleProjectStatus($clip->project_id);
+            $this->settleProjectStatus($clip->project_id, $publishScheduler);
         } catch (Throwable $e) {
             $clip->update(['status' => Clip::STATUS_FAILED, 'failure_reason' => $e->getMessage()]);
             $processingJob->markFailed($e->getMessage());
-            $this->settleProjectStatus($clip->project_id);
+            $this->settleProjectStatus($clip->project_id, $publishScheduler);
 
             throw $e;
         }
@@ -154,9 +160,14 @@ class RenderClipJob implements ShouldQueue
 
     /**
      * Once every clip for a project has left the queued/rendering state, move the
-     * project out of "rendering" so the frontend stops polling for progress.
+     * project out of "rendering" so the frontend stops polling for progress — and,
+     * for a regular (non-batch) project, auto-schedule publishing for whichever
+     * clips completed, same as the batch autobot already does for its own items.
+     * Skipped for batch-created projects: ProcessBatchItemJob schedules publishing
+     * itself right after its own render loop, so doing it here too would either
+     * race it or double-schedule.
      */
-    private function settleProjectStatus(int $projectId): void
+    private function settleProjectStatus(int $projectId, AutoPublishScheduler $publishScheduler): void
     {
         $stillActive = Clip::where('project_id', $projectId)
             ->whereIn('status', [Clip::STATUS_QUEUED, Clip::STATUS_RENDERING])
@@ -166,9 +177,15 @@ class RenderClipJob implements ShouldQueue
             return;
         }
 
-        $project = \App\Models\Project::find($projectId);
-        if ($project && $project->status === \App\Models\Project::STATUS_RENDERING) {
-            $project->update(['status' => \App\Models\Project::STATUS_COMPLETED]);
+        $project = Project::find($projectId);
+        if (! $project || $project->status !== Project::STATUS_RENDERING) {
+            return;
+        }
+
+        $project->update(['status' => Project::STATUS_COMPLETED]);
+
+        if (! VideoBatchItem::where('project_id', $projectId)->exists()) {
+            $publishScheduler->scheduleForProject($project);
         }
     }
 }

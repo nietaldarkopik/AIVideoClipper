@@ -261,6 +261,64 @@ export interface DashboardStats {
   jobs_failed: number;
 }
 
+export type VideoBatchStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "completed_with_errors"
+  | "failed"
+  | "cancelled";
+
+export type VideoBatchItemStatus =
+  | "pending"
+  | "importing"
+  | "analyzing"
+  | "rendering"
+  | "publishing"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "cancelled";
+
+export interface VideoBatchSettings {
+  clip_mode: "top_3" | "top_5" | "top_10" | "all";
+  template_id: number | null;
+  aspect_ratio: "9:16" | "1:1" | "16:9";
+  subtitle_language: string;
+  subtitles_enabled: boolean;
+  publishing_profile_id: number | null;
+}
+
+export interface VideoBatchItem {
+  id: number;
+  position: number;
+  source_url: string;
+  project_id: number | null;
+  project_title: string | null;
+  status: VideoBatchItemStatus;
+  progress: number;
+  message: string | null;
+  failure_reason: string | null;
+  clips_generated: number;
+  posts_published: number;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface VideoBatch {
+  id: number;
+  name: string | null;
+  status: VideoBatchStatus;
+  settings: VideoBatchSettings;
+  total_items: number;
+  completed_items: number;
+  failed_items: number;
+  items?: VideoBatchItem[];
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
 export interface Paginated<T> {
   data: T[];
   meta?: {

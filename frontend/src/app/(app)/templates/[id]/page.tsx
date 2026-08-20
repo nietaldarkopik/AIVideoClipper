@@ -80,6 +80,15 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
 
   const previewBg = caption.background && (caption.background_opacity ?? 0) > 0 ? caption.background : "transparent";
 
+  // Mirrors SubtitleService::toAss()'s auto-size formula exactly, so "Auto" in
+  // the preview always matches what actually gets burned into the rendered
+  // clip: max(36, videoHeight / 20).
+  const resolution = template.resolution ?? { width: 1080, height: 1920 };
+  const autoFontSize = Math.max(36, Math.round(resolution.height / 20));
+  const effectiveFontSize = caption.font_size ?? autoFontSize;
+  const PREVIEW_WIDTH_PX = 220;
+  const previewScale = PREVIEW_WIDTH_PX / resolution.width;
+
   return (
     <div className="space-y-6">
       <div>
@@ -114,10 +123,15 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <div className="lg:col-span-2">
           <div className="sticky top-6 mx-auto max-w-[220px]">
-            <p className="mb-2 text-center text-xs text-muted">Caption Preview</p>
+            <p className="mb-2 text-center text-xs text-muted">
+              Caption Preview <span className="text-muted/70">({resolution.width}×{resolution.height})</span>
+            </p>
             <div
-              className="relative flex aspect-[9/16] w-full items-end justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 p-4"
-              style={{ textAlign: caption.position === "top" ? "left" : "center" }}
+              className="relative flex w-full items-end justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 p-4"
+              style={{
+                aspectRatio: `${resolution.width} / ${resolution.height}`,
+                textAlign: caption.position === "top" ? "left" : "center",
+              }}
             >
               <div
                 className="w-full"
@@ -132,12 +146,12 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                   style={{
                     fontFamily: caption.font || "Arial",
                     color: caption.color || "#fff",
-                    WebkitTextStroke: `${Math.min(caption.stroke_width ?? 3, 3)}px ${caption.stroke_color || "#000"}`,
+                    WebkitTextStroke: `${Math.max(0.5, (caption.stroke_width ?? 3) * previewScale)}px ${caption.stroke_color || "#000"}`,
                     fontWeight: caption.bold ? 800 : 500,
                     textTransform: caption.uppercase ? "uppercase" : "none",
                     background: previewBg,
                     padding: previewBg !== "transparent" ? "4px 8px" : 0,
-                    fontSize: 18,
+                    fontSize: effectiveFontSize * previewScale,
                     lineHeight: 1.3,
                   }}
                 >
@@ -159,10 +173,40 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
           <Card className="p-5">
             <h3 className="mb-4 text-sm font-semibold">Caption Style</h3>
             <fieldset disabled={!isAdmin} className="space-y-4 disabled:opacity-60">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
                   <Label>Font</Label>
                   <Input value={caption.font ?? ""} onChange={(e) => setCaption({ ...caption, font: e.target.value })} />
+                </div>
+                <div>
+                  <Label>
+                    Font Size{" "}
+                    {caption.font_size == null && (
+                      <span className="font-normal text-muted">(Auto · {autoFontSize}px)</span>
+                    )}
+                  </Label>
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      type="number"
+                      min={12}
+                      max={300}
+                      placeholder={String(autoFontSize)}
+                      value={caption.font_size ?? ""}
+                      onChange={(e) =>
+                        setCaption({ ...caption, font_size: e.target.value === "" ? null : Number(e.target.value) })
+                      }
+                    />
+                    {caption.font_size != null && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setCaption({ ...caption, font_size: null })}
+                      >
+                        Auto
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <Label>Position</Label>

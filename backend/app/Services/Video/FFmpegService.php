@@ -152,6 +152,7 @@ class FFmpegService
         array $cropKeyframes = [],
         ?string $subtitlesAssPath = null,
         ?string $watermarkPath = null,
+        float $watermarkOpacity = 0.8,
     ): void {
         $this->ensureDir($outPath);
 
@@ -175,10 +176,11 @@ class FFmpegService
         ];
 
         if ($watermarkPath && file_exists($watermarkPath)) {
+            $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
             $args = array_merge($args, ['-i', $watermarkPath]);
             $args = array_merge($args, [
                 '-filter_complex',
-                "[0:v]{$videoFilter}[base];[base][1:v]overlay=W-w-24:24",
+                "[1:v]format=rgba,colorchannelmixer=aa={$opacity}[wm];[0:v]{$videoFilter}[base];[base][wm]overlay=W-w-24:24",
             ]);
         } else {
             $args = array_merge($args, ['-vf', $videoFilter]);

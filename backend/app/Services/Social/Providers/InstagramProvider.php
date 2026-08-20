@@ -103,6 +103,7 @@ class InstagramProvider implements SocialProvider
             'cookies' => json_decode($account->refresh_token ?? '[]', true),
             'video_path' => $videoFilePath,
             'caption' => $caption,
+            'username' => $account->username,
         ]);
 
         if ($response->failed()) {

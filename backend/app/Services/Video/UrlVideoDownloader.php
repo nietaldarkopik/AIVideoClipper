@@ -21,6 +21,20 @@ class UrlVideoDownloader
     }
 
     /**
+     * @return list<string> e.g. ['android', 'tv', 'web'] — always at least one
+     * element so callers can always loop once even with no override configured.
+     */
+    private function playerClients(): array
+    {
+        $clients = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) config('services.ytdlp.player_clients', ''))
+        )));
+
+        return $clients ?: [''];
+    }
+
+    /**
      * @return array{path: string, title: ?string, captions: ?array{path: string, language: string}}
      */
     public function download(string $url, string $destinationDir): array
@@ -45,7 +59,7 @@ class UrlVideoDownloader
         // language errors out (e.g. a 429 on the caption endpoint), so bundling
         // them here meant a caption rate-limit could fail an otherwise-healthy
         // video import with no source.mp4 ever hitting disk.
-        $command = [
+        $baseCommand = [
             $this->ytDlpBin,
             '--no-playlist',
             '--ffmpeg-location', $this->ffmpegBin,
@@ -53,7 +67,6 @@ class UrlVideoDownloader
             '--merge-output-format', 'mp4',
             '--print', 'after_move:%(title)s',
             '-o', $outputTemplate,
-            $url,
         ];
 
         // YouTube intermittently 429-rate-limits a server's IP (nothing to do with the
@@ -62,41 +75,71 @@ class UrlVideoDownloader
         // subtitles. A short retry with backoff clears most of these; a hard failure
         // (private video, deleted, invalid URL, etc.) never says "429" and fails fast.
         $backoffSeconds = [15, 45];
-        $maxAttempts = count($backoffSeconds) + 1;
+        $maxAttemptsPerClient = count($backoffSeconds) + 1;
 
-        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-            $result = Process::timeout(900)->run($command);
+        // YouTube increasingly 403s the default client without a Proof-of-Origin
+        // token yt-dlp can't supply — see services.ytdlp.player_clients. Unlike a
+        // 429, retrying the *same* client on a 403 just fails again immediately, so
+        // that error moves on to the next client in the list instead of backing off.
+        $playerClients = $this->playerClients();
+        $videoCandidates = [];
+        $result = null;
+        $lastErrorText = '';
 
-            $videoCandidates = array_filter(
-                glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*') ?: [],
-                fn (string $f) => in_array(strtolower(pathinfo($f, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true)
-            );
+        foreach ($playerClients as $clientPosition => $client) {
+            $command = $client === ''
+                ? [...$baseCommand, $url]
+                : [...$baseCommand, '--extractor-args', "youtube:player_client={$client}", $url];
+            $isLastClient = $clientPosition === array_key_last($playerClients);
 
-            if ($result->successful() || ! empty($videoCandidates)) {
-                if (! $result->successful()) {
-                    logger()->warning('yt-dlp exited non-zero but the video file was found on disk; continuing', [
-                        'url' => $url,
-                        'error' => trim($result->errorOutput() ?: $result->output()),
-                    ]);
+            for ($attempt = 1; $attempt <= $maxAttemptsPerClient; $attempt++) {
+                $result = Process::timeout(900)->run($command);
+
+                $videoCandidates = array_filter(
+                    glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*') ?: [],
+                    fn (string $f) => in_array(strtolower(pathinfo($f, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true)
+                );
+
+                if ($result->successful() || ! empty($videoCandidates)) {
+                    if (! $result->successful()) {
+                        logger()->warning('yt-dlp exited non-zero but the video file was found on disk; continuing', [
+                            'url' => $url,
+                            'error' => trim($result->errorOutput() ?: $result->output()),
+                        ]);
+                    }
+
+                    break 2;
                 }
 
-                break;
+                $lastErrorText = trim($result->errorOutput() ?: $result->output());
+                $isRateLimited = str_contains($lastErrorText, '429') || stripos($lastErrorText, 'Too Many Requests') !== false;
+                $isForbidden = str_contains($lastErrorText, '403') || stripos($lastErrorText, 'Forbidden') !== false;
+
+                if ($isRateLimited && $attempt < $maxAttemptsPerClient) {
+                    logger()->warning('yt-dlp was rate-limited (HTTP 429); retrying import', [
+                        'url' => $url,
+                        'player_client' => $client ?: '(default)',
+                        'attempt' => $attempt,
+                        'retrying_in_seconds' => $backoffSeconds[$attempt - 1],
+                    ]);
+                    sleep($backoffSeconds[$attempt - 1]);
+
+                    continue;
+                }
+
+                if (($isRateLimited || $isForbidden) && ! $isLastClient) {
+                    logger()->warning('yt-dlp was blocked; retrying import with a different player client', [
+                        'url' => $url,
+                        'failed_player_client' => $client ?: '(default)',
+                        'next_player_client' => $playerClients[$clientPosition + 1] ?? null,
+                        'error' => $lastErrorText,
+                    ]);
+
+                    continue 2;
+                }
+
+                throw new RuntimeException('Failed to import video from URL: ' . $lastErrorText);
             }
-
-            $errorText = trim($result->errorOutput() ?: $result->output());
-            $isRateLimited = str_contains($errorText, '429') || stripos($errorText, 'Too Many Requests') !== false;
-
-            if (! $isRateLimited || $attempt === $maxAttempts) {
-                throw new RuntimeException('Failed to import video from URL: ' . $errorText);
-            }
-
-            logger()->warning('yt-dlp was rate-limited (HTTP 429); retrying import', [
-                'url' => $url,
-                'attempt' => $attempt,
-                'retrying_in_seconds' => $backoffSeconds[$attempt - 1],
-            ]);
-
-            sleep($backoffSeconds[$attempt - 1]);
         }
 
         $title = trim($result->output()) ?: null;

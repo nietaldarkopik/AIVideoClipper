@@ -87,6 +87,8 @@ export default function AdminAISettingsPage() {
               <option value="mock">Mock (deterministic filler, no cost)</option>
               <option value="openai">OpenAI (real, paid)</option>
               <option value="ollama">Ollama (real, self-hosted, free)</option>
+              <option value="claude">Claude (real, paid)</option>
+              <option value="gemini">Gemini / Google AI Studio (real, paid)</option>
             </Select>
           </div>
         </div>

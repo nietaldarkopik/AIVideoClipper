@@ -3,11 +3,13 @@
 namespace App\Providers;
 
 use App\Models\Setting;
+use App\Services\AI\Claude\ClaudeContentAnalysisProvider;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
+use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
@@ -90,7 +92,15 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.ollama.model', 'llama3.1'),
                     (int) config('services.ollama.timeout', 180),
                 ),
-                default => throw new InvalidArgumentException("Unknown AI_ANALYSIS_PROVIDER [{$provider}]. Valid values: mock, openai, ollama."),
+                'claude' => new ClaudeContentAnalysisProvider(
+                    (string) config('services.anthropic.api_key'),
+                    (string) config('services.anthropic.model', 'claude-sonnet-5'),
+                ),
+                'gemini' => new GeminiContentAnalysisProvider(
+                    (string) config('services.gemini.api_key'),
+                    (string) config('services.gemini.model', 'gemini-2.5-flash'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_ANALYSIS_PROVIDER [{$provider}]. Valid values: mock, openai, ollama, claude, gemini."),
             };
         });
 

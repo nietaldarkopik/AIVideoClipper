@@ -13,6 +13,7 @@ import {
   CreditCard,
   ShieldCheck,
   Film,
+  Bot,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { LogOut } from "lucide-react";
@@ -22,6 +23,7 @@ import { api } from "@/lib/api";
 const primaryNav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/batches", label: "Batch Autobot", icon: Bot },
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
   { href: "/clips", label: "AI Clips", icon: Scissors },
   { href: "/social-accounts", label: "Social Accounts", icon: Share2 },

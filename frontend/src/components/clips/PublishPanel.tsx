@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { mutate } from "swr";
-import { Share2, Sparkles, ExternalLink, RotateCcw, Plus } from "lucide-react";
+import { Share2, Sparkles, ExternalLink, RotateCcw, Plus, Zap } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -86,6 +86,16 @@ export function PublishPanel({
     }
   }
 
+  async function handlePublishNow(postId: number) {
+    try {
+      await api.post(`/social-posts/${postId}/publish-now`);
+      await mutate(postsKey);
+      toast("Publishing now.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to publish now.", "danger");
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
@@ -163,7 +173,11 @@ export function PublishPanel({
                     {PLATFORM_LABELS[post.platform] ?? post.platform} — {post.social_account?.account_name}
                   </p>
                   <p className="text-muted">
-                    {post.published_at ? formatRelativeTime(post.published_at) : post.error_message ?? "Pending"}
+                    {post.published_at
+                      ? formatRelativeTime(post.published_at)
+                      : post.status === "scheduled" && post.scheduled_at
+                        ? `Scheduled for ${new Date(post.scheduled_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+                        : (post.error_message ?? "Pending")}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -172,6 +186,15 @@ export function PublishPanel({
                     <a href={post.post_url} target="_blank" rel="noreferrer" className="text-accent-2">
                       <ExternalLink className="size-3.5" />
                     </a>
+                  )}
+                  {post.status === "scheduled" && (
+                    <button
+                      onClick={() => handlePublishNow(post.id)}
+                      title="Publish now instead of waiting"
+                      className="text-accent-2 cursor-pointer"
+                    >
+                      <Zap className="size-3.5" />
+                    </button>
                   )}
                   {post.status === "failed" && (
                     <button onClick={() => handleRetry(post.id)} className="text-accent-2 cursor-pointer">

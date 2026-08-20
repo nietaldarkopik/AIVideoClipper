@@ -76,7 +76,7 @@ class AdminController extends Controller
     {
         $data = $request->validate([
             'transcript_model' => ['sometimes', 'string', 'in:mock,openai,whisper_engine'],
-            'clip_scoring_model' => ['sometimes', 'string', 'in:mock,openai,ollama'],
+            'clip_scoring_model' => ['sometimes', 'string', 'in:mock,openai,ollama,claude,gemini'],
             'default_clip_duration' => ['sometimes', 'integer', 'min:5', 'max:180'],
             'default_template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
             'max_clips_per_video' => ['sometimes', 'integer', 'min:1', 'max:50'],

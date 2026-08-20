@@ -19,7 +19,56 @@ swappable mock providers so the whole thing runs with zero API keys.
 
 ## Running it
 
-Four things need to be running at once:
+### Quick start: `start-all`
+
+The easiest way to start everything is the bundled script at the repo root — it
+opens one window per process and auto-detects which optional services you need
+by reading `backend/.env`:
+
+```powershell
+.\start-all.ps1     # PowerShell
+```
+
+```bat
+start-all.bat        :: cmd.exe, if you don't want to run PowerShell scripts
+```
+
+Both scripts are equivalent and always start the six **required** processes
+(Redis, Laravel API, queue worker, batch downloads worker, scheduler, Next.js
+frontend). They then auto-detect three **optional** services and start each
+one only when it looks needed/installed:
+
+| Service | Started automatically when... | Force flags |
+|---|---|---|
+| `whisper-engine` | `backend/.env` has `AI_TRANSCRIPTION_PROVIDER=whisper_engine` | `-WhisperEngine` / `-NoWhisperEngine` |
+| `face-tracker` | `backend/.env` has `AI_REFRAMING_PROVIDER=face_tracker` | `-FaceTracker` / `-NoFaceTracker` |
+| `instagram-automation` | `tools/instagram-automation/node_modules` exists (no `.env` mode switch — Instagram connect/publish always needs it, see `tools/instagram-automation/README.md`) | `-InstagramAutomation` / `-NoInstagramAutomation` |
+
+Pass the matching `-No...` flag to skip a service that would otherwise
+auto-start (e.g. you want whisper-engine's window closed to save RAM), or the
+plain flag to force-start one that wouldn't otherwise qualify. Flags work
+identically on both scripts, e.g.:
+
+```powershell
+.\start-all.ps1 -NoWhisperEngine -InstagramAutomation
+```
+
+```bat
+start-all.bat -NoWhisperEngine -InstagramAutomation
+```
+
+Close a window to stop that individual process, or run `.\stop-all.ps1` /
+`stop-all.bat` to force-stop everything at once — useful when a previous
+session left something running in the background and `start-all` now fails
+with a port-already-in-use error. It identifies processes by the port they
+listen on or their exact command line (never by bare process name), so it
+won't touch unrelated PHP/Node/Redis processes elsewhere on the machine (e.g.
+WAMP's own PHP). Run `stop-all`, then `start-all` again.
+
+### Running processes manually
+
+If you'd rather run things by hand (or in your own terminal multiplexer), six
+things need to be running at once:
 
 ```bash
 # 1. Redis (portable, no install)
@@ -33,6 +82,15 @@ php artisan serve --host=127.0.0.1 --port=8000
 cd backend
 php artisan queue:work redis --queue=default
 
+# 3a. Batch downloads worker (the batch autobot's downloader — required; without
+# it, a created batch just sits there since nothing ever downloads its videos)
+cd backend
+php artisan queue:work redis --queue=batch-downloads
+
+# 3b. Scheduler (auto-fails ProcessingJob rows stuck "running" from a dead worker — required)
+cd backend
+php artisan schedule:work
+
 # 4. Next.js frontend
 cd frontend
 npm run dev
@@ -41,16 +99,26 @@ npm run dev
 Then open http://localhost:3000. PostgreSQL runs as a Windows service already (installed
 via winget) — no separate step needed there.
 
-**Optional 5th process** — if `backend/.env` has `AI_TRANSCRIPTION_PROVIDER=whisper_engine`
-(self-hosted transcription instead of OpenAI), also run:
+**Optional processes** — only needed depending on which providers you've enabled
+in `backend/.env`:
 
 ```bash
-# 5. Whisper engine (self-hosted transcription, only needed if AI_TRANSCRIPTION_PROVIDER=whisper_engine)
+# Whisper engine — self-hosted transcription, only if AI_TRANSCRIPTION_PROVIDER=whisper_engine
 cd tools/whisper-engine
 ./venv/Scripts/python main.py
+
+# Face tracker — self-hosted smart-crop reframing, only if AI_REFRAMING_PROVIDER=face_tracker
+cd tools/face-tracker
+./venv/Scripts/python main.py
+
+# Instagram automation — self-hosted browser login/publish, only needed to connect/publish
+# Instagram accounts (no .env mode switch, unlike the two above — it's always the real thing)
+cd tools/instagram-automation
+npm start
 ```
 
-See `tools/whisper-engine/README.md` for setup.
+See `tools/whisper-engine/README.md`, `tools/face-tracker/README.md`, and
+`tools/instagram-automation/README.md` for setup and configuration of each.
 
 **Login**: `admin@clipper.test` / `password` (admin) or `demo@clipper.test` / `password`
 (regular user). Both were seeded by `php artisan db:seed`.
@@ -70,8 +138,8 @@ If you restart your terminal, `ffmpeg`/`ffprobe`/`yt-dlp` will resolve from PATH
 | Clip rendering (trim, crop, aspect ratio, watermark) | **Real** — FFmpeg |
 | Auto captions incl. word-by-word highlight | **Real** — generated as ASS/SRT and burned in with FFmpeg, from the mock transcript |
 | Templates + versioning | **Real** — full CRUD, immutable versions, 4 seeded system templates |
-| Social account connect | **Mocked** — no OAuth app registrations exist yet; `SocialProvider` interface + per-platform adapter classes (TikTok/YouTube/Instagram/Facebook/Twitter/LinkedIn) are real and ready to swap in real OAuth |
-| Publishing | **Mocked** — queued per-platform jobs with retry/backoff, ~6% simulated failure rate to exercise the retry path; produces a fake post URL |
+| Social account connect | Per-platform: **YouTube** and **Facebook** are real OAuth (registered Google/Meta apps); **Instagram** is real via self-hosted browser automation (username/password login, see `tools/instagram-automation`); **TikTok/Twitter/LinkedIn** are still mocked. All go through the same `SocialProvider` interface (`SocialProviderManager`) |
+| Publishing | Real for YouTube/Facebook/Instagram (actually posts); mocked for TikTok/Twitter/LinkedIn — queued per-platform jobs with retry/backoff, ~6% simulated failure rate to exercise the retry path, produces a fake post URL |
 | Analytics / metrics sync | Interface exists (`fetchMetrics`) but **no UI wired to it** — out of scope this pass |
 | Admin panel | **Real** — stats, users, project list, processing job monitor, AI config knobs |
 

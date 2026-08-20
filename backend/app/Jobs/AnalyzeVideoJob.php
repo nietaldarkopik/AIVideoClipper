@@ -7,18 +7,20 @@ use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\ClipCandidate;
 use App\Models\ProcessingJob;
 use App\Models\Project;
+use App\Models\Setting;
 use App\Models\Transcript;
 use App\Models\Video;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
-use App\Services\AI\DTOs\TranscriptionResult;
+use App\Services\Video\ClipGenerationService;
 use App\Services\Video\FFmpegService;
-use App\Services\Video\SrtParser;
+use App\Services\Video\SrtTranscriptionBuilder;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -29,7 +31,15 @@ class AnalyzeVideoJob implements ShouldQueue
     public int $tries = 2;
     public int $timeout = 1800;
 
-    public function __construct(public int $projectId, public int $videoId)
+    /**
+     * @param  bool  $autoGenerateClips  Whether to auto-pick and render clips once
+     *   candidates are found, with no manual "Generate Clips" click needed. On by
+     *   default for the regular single-project flow. The batch autobot passes
+     *   false here and does its own clip selection + in-process sequential
+     *   rendering afterward (ProcessBatchItemJob) — leaving this on there would
+     *   render every clip twice, once queued from here and once in-process there.
+     */
+    public function __construct(public int $projectId, public int $videoId, public bool $autoGenerateClips = true)
     {
     }
 
@@ -37,6 +47,8 @@ class AnalyzeVideoJob implements ShouldQueue
         FFmpegService $ffmpeg,
         TranscriptionProvider $transcription,
         ContentAnalysisProvider $analysis,
+        SrtTranscriptionBuilder $srtBuilder,
+        ClipGenerationService $clipGeneration,
     ): void {
         $project = Project::findOrFail($this->projectId);
         $video = Video::findOrFail($this->videoId);
@@ -59,7 +71,7 @@ class AnalyzeVideoJob implements ShouldQueue
                 // Real captions already came down with the video (e.g. YouTube) — free,
                 // fast, and no re-transcription needed. Skip audio extraction entirely.
                 $processingJob->markProgress(25, 'Using captions from source...');
-                $result = $this->transcriptionResultFromSrt(
+                $result = $srtBuilder->build(
                     $disk->get($captionsPath),
                     $video->metadata['captions_language'] ?? 'unknown'
                 );
@@ -95,13 +107,38 @@ class AnalyzeVideoJob implements ShouldQueue
                 fn () => $this->isCancelled($processingJob),
             );
 
-            ClipCandidate::where('video_id', $video->id)->delete();
-            foreach ($candidates as $candidate) {
-                ClipCandidate::create($candidate->toModelAttributes($project->id, $video->id));
-            }
+            // All-or-nothing: a provider occasionally returns a candidate that fails
+            // to save (e.g. a DB constraint) partway through the batch. Without the
+            // transaction that leaves a partial candidate set behind — which then
+            // makes any future retry think analysis already finished (candidates
+            // exist) and skip straight to rendering off incomplete data instead of
+            // re-running the analysis that actually failed.
+            DB::transaction(function () use ($video, $project, $candidates) {
+                ClipCandidate::where('video_id', $video->id)->delete();
+                foreach ($candidates as $candidate) {
+                    ClipCandidate::create($candidate->toModelAttributes($project->id, $video->id));
+                }
+            });
 
             $project->update(['status' => Project::STATUS_COMPLETED, 'last_edited_at' => now()]);
             $processingJob->markCompleted(count($candidates) . ' clip candidates found');
+
+            if ($this->autoGenerateClips && count($candidates) > 0) {
+                $clips = $clipGeneration->selectAndCreateClips($project, [
+                    'mode' => 'top_5',
+                    'template_id' => Setting::get('default_template_id'),
+                    'aspect_ratio' => '9:16',
+                    'subtitle_language' => $transcript->language ?: 'en',
+                    'subtitles_enabled' => true,
+                ]);
+
+                if ($clips->isNotEmpty()) {
+                    foreach ($clips as $clip) {
+                        RenderClipJob::dispatch($clip->id);
+                    }
+                    $project->update(['status' => Project::STATUS_RENDERING]);
+                }
+            }
         } catch (JobCancelledException $e) {
             // Already marked ProcessingJob::STATUS_CANCELLED by whoever cancelled it
             // (the /cancel endpoint or the stalled-job watchdog) — don't overwrite
@@ -114,40 +151,5 @@ class AnalyzeVideoJob implements ShouldQueue
 
             throw $e;
         }
-    }
-
-    private function transcriptionResultFromSrt(string $srtContent, string $language): TranscriptionResult
-    {
-        $segments = SrtParser::parse($srtContent);
-
-        $words = [];
-        $fullTextParts = [];
-        foreach ($segments as $seg) {
-            $fullTextParts[] = $seg['text'];
-
-            // Source captions are segment-level only; interpolate even word spacing
-            // within each segment so word-by-word caption highlighting still works.
-            $wordList = preg_split('/\s+/', $seg['text']);
-            $wordCount = max(count($wordList), 1);
-            $perWord = ($seg['end'] - $seg['start']) / $wordCount;
-            foreach ($wordList as $i => $word) {
-                $wStart = $seg['start'] + $i * $perWord;
-                $words[] = [
-                    'word' => $word,
-                    'start' => round($wStart, 2),
-                    'end' => round($wStart + $perWord, 2),
-                    'speaker' => 'A',
-                ];
-            }
-        }
-
-        return new TranscriptionResult(
-            language: $language,
-            fullText: implode(' ', $fullTextParts),
-            segments: $segments,
-            words: $words,
-            speakers: [['id' => 'A', 'label' => 'Speaker A']],
-            provider: 'source_captions',
-        );
     }
 }

@@ -13,6 +13,7 @@ import {
   ArrowLeft,
   Scissors,
   Wand2,
+  RotateCcw,
 } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
@@ -25,6 +26,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { VideoPlayer } from "@/components/projects/VideoPlayer";
 import { ProcessingStatus } from "@/components/projects/ProcessingStatus";
+import { ScheduledPublishing } from "@/components/projects/ScheduledPublishing";
 import { CandidateCard } from "@/components/projects/CandidateCard";
 import { GenerateClipsModal } from "@/components/projects/GenerateClipsModal";
 import { ClipCard } from "@/components/clips/ClipCard";
@@ -46,6 +48,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [generateOpen, setGenerateOpen] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [generatingId, setGeneratingId] = useState<number | null>(null);
+  const [reprocessing, setReprocessing] = useState(false);
 
   const { data: projectRes, isLoading } = useApi<{ data: Project }>(`/projects/${projectId}`, {
     refreshInterval: (latest) =>
@@ -64,8 +67,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const { data: clipsRes } = useApi<Paginated<Clip>>(
     project ? `/clips?project_id=${projectId}&per_page=50` : null,
     {
-      refreshInterval: (latest) =>
-        latest?.data.some((c) => c.status === "queued" || c.status === "rendering") ? 2000 : 0,
+      refreshInterval: (latest?: Paginated<Clip>) =>
+        latest?.data.some((c: Clip) => c.status === "queued" || c.status === "rendering") ? 2000 : 0,
     }
   );
 
@@ -76,6 +79,20 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       toast("Analysis started.", "success");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to start analysis.", "danger");
+    }
+  }
+
+  async function handleReprocess() {
+    setReprocessing(true);
+    try {
+      const res = await api.post<{ data: Project; message?: string }>(`/projects/${projectId}/reprocess`);
+      await mutate(`/projects/${projectId}`);
+      await mutate(`/clips?project_id=${projectId}&per_page=50`);
+      toast(res.message ?? "Reprocessing started.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reprocess.", "danger");
+    } finally {
+      setReprocessing(false);
     }
   }
 
@@ -168,9 +185,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
       {active && <ProcessingStatus projectId={projectId} active={active} />}
 
-      {project.status === "failed" && project.failure_reason && (
-        <div className="rounded-2xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">
-          {project.failure_reason}
+      <ScheduledPublishing projectId={projectId} />
+
+      {project.status === "failed" && (
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">
+          <span>{project.failure_reason || "This project failed."}</span>
+          <Button variant="danger" size="sm" onClick={handleReprocess} loading={reprocessing} className="shrink-0">
+            <RotateCcw className="size-3.5" />
+            Reprocess
+          </Button>
         </div>
       )}
 

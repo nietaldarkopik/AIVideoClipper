@@ -101,6 +101,18 @@ return [
         'chat_model' => env('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
     ],
 
+    'anthropic' => [
+        'api_key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-5'),
+    ],
+
+    'gemini' => [
+        // From Google AI Studio (https://aistudio.google.com/apikey) — separate from
+        // and unrelated to any Google Cloud/Vertex project credentials.
+        'api_key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+    ],
+
     'whisper_engine' => [
         'base_url' => env('WHISPER_ENGINE_URL', 'http://127.0.0.1:8100'),
         // CPU-only inference on a long video can legitimately take a long time
@@ -127,6 +139,27 @@ return [
     'face_tracker' => [
         'base_url' => env('FACE_TRACKER_URL', 'http://127.0.0.1:8200'),
         'timeout' => env('FACE_TRACKER_TIMEOUT', 300),
+    ],
+
+    'ytdlp' => [
+        // YouTube increasingly requires a Proof-of-Origin token for its default
+        // "web" client, which yt-dlp can't obtain on its own — that shows up as a
+        // plain HTTP 403 on an otherwise-valid, public video. The community-standard
+        // workaround is forcing yt-dlp to impersonate a different client that
+        // doesn't need one; which clients still work shifts over time as YouTube
+        // patches this, so it's a comma-separated, tunable list rather than one
+        // hardcoded value. Tried in order — UrlVideoDownloader moves to the next
+        // client on a 403/blocked error instead of retrying the same one.
+        'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'android,tv,web'),
+    ],
+
+    'video_batch' => [
+        // Pause between the batch autobot's downloads (ProcessVideoBatchJob) — each
+        // item still downloads strictly one at a time, but with processing now
+        // overlapping the next download (see that job's docblock), downloads
+        // themselves could otherwise fire back-to-back with zero gap. A small pause
+        // keeps the request cadence looking less bot-like to the source platform.
+        'download_delay_seconds' => env('BATCH_DOWNLOAD_DELAY_SECONDS', 10),
     ],
 
 ];

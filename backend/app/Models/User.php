@@ -72,4 +72,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(PublishingProfile::class);
     }
+
+    public function videoBatches(): HasMany
+    {
+        return $this->hasMany(VideoBatch::class);
+    }
 }

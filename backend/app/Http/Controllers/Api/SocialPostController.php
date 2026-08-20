@@ -22,6 +22,9 @@ class SocialPostController extends Controller
         if ($request->filled('clip_id')) {
             $query->where('clip_id', $request->integer('clip_id'));
         }
+        if ($request->filled('project_id')) {
+            $query->whereHas('clip', fn ($q) => $q->where('project_id', $request->integer('project_id')));
+        }
         if ($request->filled('status')) {
             $query->where('status', $request->string('status'));
         }
@@ -114,6 +117,25 @@ class SocialPostController extends Controller
         $this->authorizePost($request, $socialPost);
 
         $socialPost->update(['status' => SocialPost::STATUS_READY, 'error_message' => null]);
+        PublishClipJob::dispatch($socialPost->id);
+
+        return SocialPostResource::make($socialPost->fresh());
+    }
+
+    /**
+     * Override an auto-scheduled post's staggered delay and publish it right away —
+     * the "publish now if you don't want to wait" escape hatch for auto-scheduled
+     * (batch autobot or regular-project auto-publish) posts.
+     */
+    public function publishNow(Request $request, SocialPost $socialPost)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if (in_array($socialPost->status, [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING], true)) {
+            return response()->json(['message' => 'This post is already published or in progress.'], 422);
+        }
+
+        $socialPost->update(['status' => SocialPost::STATUS_READY, 'scheduled_at' => null, 'error_message' => null]);
         PublishClipJob::dispatch($socialPost->id);
 
         return SocialPostResource::make($socialPost->fresh());

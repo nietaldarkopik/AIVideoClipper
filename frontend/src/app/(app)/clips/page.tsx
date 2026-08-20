@@ -28,8 +28,8 @@ export default function AllClipsPage() {
 
   const key = `/clips?per_page=60${status ? `&status=${status}` : ""}`;
   const { data, isLoading } = useApi<Paginated<Clip>>(key, {
-    refreshInterval: (latest) =>
-      latest?.data.some((c) => c.status === "queued" || c.status === "rendering") ? 2500 : 0,
+    refreshInterval: (latest?: Paginated<Clip>) =>
+      latest?.data.some((c: Clip) => c.status === "queued" || c.status === "rendering") ? 2500 : 0,
   });
 
   function toggle(id: number) {

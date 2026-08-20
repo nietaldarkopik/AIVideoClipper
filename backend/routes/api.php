@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\SocialAccountController;
 use App\Http\Controllers\Api\SocialPostController;
 use App\Http\Controllers\Api\TemplateCategoryController;
 use App\Http\Controllers\Api\TemplateController;
+use App\Http\Controllers\Api\VideoBatchController;
 use App\Http\Controllers\Api\VideoController;
 use App\Http\Controllers\MediaStreamController;
 use Illuminate\Support\Facades\Route;
@@ -41,6 +42,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/projects/{project}', [ProjectController::class, 'update']);
     Route::delete('/projects/{project}', [ProjectController::class, 'destroy']);
     Route::post('/projects/{project}/analyze', [ProjectController::class, 'analyze']);
+    Route::post('/projects/{project}/reprocess', [ProjectController::class, 'reprocess']);
     Route::post('/projects/{project}/generate-clips', [ProjectController::class, 'generateClips']);
     Route::get('/projects/{project}/clip-candidates', [ClipCandidateController::class, 'index']);
     Route::get('/projects/{project}/processing-jobs', [ProcessingJobController::class, 'forProject']);
@@ -48,6 +50,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/projects/{project}/videos', [VideoController::class, 'store']);
 
     Route::get('/videos/{video}', [VideoController::class, 'show']);
+
+    Route::get('/video-batches', [VideoBatchController::class, 'index']);
+    Route::post('/video-batches', [VideoBatchController::class, 'store']);
+    Route::get('/video-batches/{videoBatch}', [VideoBatchController::class, 'show']);
+    Route::post('/video-batches/{videoBatch}/cancel', [VideoBatchController::class, 'cancel']);
+    Route::post('/video-batches/{videoBatch}/items/{item}/retry', [VideoBatchController::class, 'retryItem']);
+    Route::delete('/video-batches/{videoBatch}', [VideoBatchController::class, 'destroy']);
 
     Route::get('/clip-candidates/{clipCandidate}', [ClipCandidateController::class, 'show']);
 
@@ -78,6 +87,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/social-posts', [SocialPostController::class, 'store']);
     Route::get('/social-posts/{socialPost}', [SocialPostController::class, 'show']);
     Route::post('/social-posts/{socialPost}/retry', [SocialPostController::class, 'retry']);
+    Route::post('/social-posts/{socialPost}/publish-now', [SocialPostController::class, 'publishNow']);
     Route::delete('/social-posts/{socialPost}', [SocialPostController::class, 'destroy']);
 
     Route::middleware('admin')->prefix('admin')->group(function () {

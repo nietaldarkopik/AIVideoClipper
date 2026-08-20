@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
+use App\Models\VideoBatchItem;
 use App\Services\Social\SocialProviderManager;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -36,6 +37,14 @@ class PublishClipJob implements ShouldQueue
     public function handle(SocialProviderManager $manager): void
     {
         $post = SocialPost::with(['clip', 'socialAccount'])->findOrFail($this->socialPostId);
+
+        // A "Publish Now" override dispatches a fresh, undelayed job for a post
+        // that may still have its original staggered/delayed dispatch sitting in
+        // the queue — that one will still fire later. Without this guard it would
+        // publish the same post to the platform a second time.
+        if ($post->status === SocialPost::STATUS_PUBLISHED) {
+            return;
+        }
 
         if (! $post->socialAccount || $post->socialAccount->status !== SocialAccount::STATUS_CONNECTED) {
             $post->update([
@@ -74,6 +83,12 @@ class PublishClipJob implements ShouldQueue
             'external_post_id' => $result['external_post_id'] ?? null,
             'error_message' => null,
         ]);
+
+        // Batch autobot publishes are staggered (see ProcessBatchItemJob) and finish
+        // long after the batch item itself is marked "completed" — this is what
+        // keeps that item's posts_published count live instead of frozen at
+        // whatever it was the moment the item stopped scheduling more posts.
+        VideoBatchItem::where('project_id', $post->clip->project_id)->increment('posts_published');
     }
 
     public function failed(?Throwable $exception): void

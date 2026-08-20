@@ -45,8 +45,9 @@ class SocialAccountController extends Controller
     {
         $data = $request->validate([
             'platform' => ['required', Rule::in($this->providers->supportedPlatforms())],
-            'account_name' => ['required', 'string', 'max:255'],
-            'username' => ['nullable', 'string', 'max:255'],
+            'account_name' => ['required_unless:platform,instagram', 'string', 'max:255'],
+            'username' => ['required_if:platform,instagram', 'nullable', 'string', 'max:255'],
+            'password' => ['required_if:platform,instagram', 'nullable', 'string'],
         ]);
 
         $provider = $this->providers->resolve($data['platform']);

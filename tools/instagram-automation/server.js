@@ -34,7 +34,7 @@ app.post("/login", async (req, res) => {
     return res.status(400).json({ success: false, error: "username and password are required." });
   }
 
-  const { browser, page } = await launchPage();
+  const { browser, page } = await launchPage(username);
   try {
     const result = await login(page, username, password);
 
@@ -73,12 +73,12 @@ app.post("/login/verify", async (req, res) => {
 });
 
 app.post("/publish", async (req, res) => {
-  const { cookies, video_path, caption } = req.body || {};
+  const { cookies, video_path, caption, username } = req.body || {};
   if (!cookies || !video_path) {
     return res.status(400).json({ success: false, error: "cookies and video_path are required." });
   }
 
-  const { browser, page } = await launchPage();
+  const { browser, page } = await launchPage(username);
   try {
     const result = await publish(page, cookies, video_path, caption || "");
     return res.json(result);
