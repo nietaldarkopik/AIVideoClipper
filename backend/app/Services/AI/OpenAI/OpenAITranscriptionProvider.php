@@ -3,6 +3,7 @@
 namespace App\Services\AI\OpenAI;
 
 use App\Exceptions\JobCancelledException;
+use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\DTOs\TranscriptionResult;
 use App\Services\Video\FFmpegService;
@@ -22,6 +23,8 @@ use RuntimeException;
  */
 class OpenAITranscriptionProvider implements TranscriptionProvider
 {
+    use LogsAiRequests;
+
     private const CHUNK_SECONDS = 720.0;
 
     public function __construct(
@@ -58,7 +61,7 @@ class OpenAITranscriptionProvider implements TranscriptionProvider
                 $chunkPath = "{$tmpDir}/chunk_{$chunkIndex}.mp3";
                 $this->ffmpeg->transcodeAudioSegment($audioPath, $chunkPath, $offset, $chunkLength);
 
-                $result = $this->transcribeChunk($chunkPath, $language);
+                $result = $this->transcribeChunk($chunkPath, $language, $chunkLength);
                 $detectedLanguage ??= $result['language'] ?? null;
 
                 foreach ($result['segments'] as $seg) {
@@ -110,8 +113,18 @@ class OpenAITranscriptionProvider implements TranscriptionProvider
     /**
      * @return array{language: ?string, segments: array<int, array{start: float, end: float, text: string}>}
      */
-    private function transcribeChunk(string $chunkPath, ?string $language): array
+    private function transcribeChunk(string $chunkPath, ?string $language, float $chunkLength): array
     {
+        // Never log the raw audio bytes attached below — just a description of them.
+        $prompt = sprintf(
+            '[audio chunk: %d bytes, %.1fs] model=%s language=%s',
+            filesize($chunkPath) ?: 0,
+            $chunkLength,
+            $this->model,
+            $language ?? 'auto'
+        );
+        $span = $this->aiLogger()->start('transcription', 'openai', $this->model, $prompt);
+
         $request = Http::withToken($this->apiKey)
             ->timeout(300)
             ->retry(2, 2000)
@@ -126,10 +139,13 @@ class OpenAITranscriptionProvider implements TranscriptionProvider
         $response = $request->post('https://api.openai.com/v1/audio/transcriptions', $payload);
 
         if ($response->failed()) {
+            $span->failure($response->body());
+
             throw new RuntimeException('OpenAI transcription failed: ' . $response->body());
         }
 
         $data = $response->json();
+        $span->success(json_encode(['language' => $data['language'] ?? null, 'segment_count' => count($data['segments'] ?? [])]));
 
         return [
             'language' => $data['language'] ?? null,

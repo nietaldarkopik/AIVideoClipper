@@ -30,6 +30,8 @@ export function NewBatchModal({ open, onClose }: { open: boolean; onClose: () =>
   const [templateId, setTemplateId] = useState("");
   const [aspectRatio, setAspectRatio] = useState("9:16");
   const [publishingProfileId, setPublishingProfileId] = useState("");
+  const [staggerMin, setStaggerMin] = useState("30");
+  const [staggerMax, setStaggerMax] = useState("60");
   const [submitting, setSubmitting] = useState(false);
 
   const urlCount = urlsText.split("\n").map((l) => l.trim()).filter(Boolean).length;
@@ -41,6 +43,8 @@ export function NewBatchModal({ open, onClose }: { open: boolean; onClose: () =>
     setTemplateId("");
     setAspectRatio("9:16");
     setPublishingProfileId("");
+    setStaggerMin("30");
+    setStaggerMax("60");
     onClose();
   }
 
@@ -60,6 +64,8 @@ export function NewBatchModal({ open, onClose }: { open: boolean; onClose: () =>
         template_id: templateId ? Number(templateId) : null,
         aspect_ratio: aspectRatio,
         publishing_profile_id: publishingProfileId ? Number(publishingProfileId) : null,
+        publish_stagger_min_minutes: Number(staggerMin),
+        publish_stagger_max_minutes: Number(staggerMax),
       });
       await mutate((key) => typeof key === "string" && key.startsWith("/video-batches"));
       toast(`Batch started — processing ${urls.length} video${urls.length === 1 ? "" : "s"} one at a time.`, "success");
@@ -138,6 +144,32 @@ export function NewBatchModal({ open, onClose }: { open: boolean; onClose: () =>
               </option>
             ))}
           </Select>
+        </div>
+
+        <div>
+          <Label>Gap between clip publishes (minutes)</Label>
+          <div className="grid grid-cols-2 gap-4">
+            <Input
+              type="number"
+              min={0}
+              max={1440}
+              value={staggerMin}
+              onChange={(e) => setStaggerMin(e.target.value)}
+              placeholder="Min"
+            />
+            <Input
+              type="number"
+              min={0}
+              max={1440}
+              value={staggerMax}
+              onChange={(e) => setStaggerMax(e.target.value)}
+              placeholder="Max"
+            />
+          </div>
+          <p className="mt-1.5 text-xs text-muted">
+            Each clip posts a random number of minutes (between these two) after the last, so
+            posts don&apos;t all land at once.
+          </p>
         </div>
       </div>
 

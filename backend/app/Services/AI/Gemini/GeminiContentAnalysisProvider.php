@@ -3,6 +3,8 @@
 namespace App\Services\AI\Gemini;
 
 use App\Models\Transcript;
+use App\Services\AI\Concerns\LogsAiRequests;
+use App\Services\AI\Concerns\ParsesJsonResponses;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
@@ -23,6 +25,9 @@ use RuntimeException;
  */
 class GeminiContentAnalysisProvider implements ContentAnalysisProvider
 {
+    use LogsAiRequests;
+    use ParsesJsonResponses;
+
     public function __construct(
         private readonly string $apiKey,
         private readonly string $model = 'gemini-2.5-flash',
@@ -65,14 +70,18 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
 
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$this->model}:generateContent";
 
+        $systemPrompt = $this->systemPrompt($maxCandidates);
+        $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
+        $span = $this->aiLogger()->start('content_analysis', 'gemini', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+
         $response = Http::timeout($this->timeoutSeconds)
             ->retry(2, 2000)
             ->withOptions(['version' => 1.1])
             ->withHeaders(['x-goog-api-key' => $this->apiKey])
             ->post($url, [
-                'system_instruction' => ['parts' => [['text' => $this->systemPrompt($maxCandidates)]]],
+                'system_instruction' => ['parts' => [['text' => $systemPrompt]]],
                 'contents' => [
-                    ['role' => 'user', 'parts' => [['text' => $this->userPrompt($transcriptText, $durationSeconds, $transcript->language)]]],
+                    ['role' => 'user', 'parts' => [['text' => $userPrompt]]],
                 ],
                 'generationConfig' => [
                     'responseMimeType' => 'application/json',
@@ -82,11 +91,14 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
             ]);
 
         if ($response->failed()) {
+            $span->failure($response->body());
+
             throw new RuntimeException('Gemini analysis failed: ' . $response->body());
         }
 
         $raw = $response->json('candidates.0.content.parts.0.text');
-        $parsed = json_decode((string) $raw, true);
+        $span->success((string) $raw);
+        $parsed = $this->extractJsonObject((string) $raw);
         $candidates = $parsed['candidates'] ?? null;
 
         if (! is_array($candidates)) {

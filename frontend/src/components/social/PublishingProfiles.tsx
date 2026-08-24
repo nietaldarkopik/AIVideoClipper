@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { mutate } from "swr";
-import { Plus, Star, Trash2 } from "lucide-react";
+import { Plus, Star, Trash2, Pencil } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -17,29 +17,55 @@ export function PublishingProfiles() {
   const { data: profilesRes } = useApi<{ data: PublishingProfile[] }>("/publishing-profiles");
   const { data: accountsRes } = useApi<{ data: SocialAccount[] }>("/social-accounts");
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
+  const [isDefault, setIsDefault] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   function toggle(id: number) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  async function handleCreate() {
+  function openCreate() {
+    setEditingId(null);
+    setName("");
+    setSelected([]);
+    setIsDefault(false);
+    setModalOpen(true);
+  }
+
+  function openEdit(profile: PublishingProfile) {
+    setEditingId(profile.id);
+    setName(profile.name);
+    setSelected(profile.social_accounts.map((a) => a.id));
+    setIsDefault(profile.is_default);
+    setModalOpen(true);
+  }
+
+  function closeModal() {
+    setModalOpen(false);
+  }
+
+  async function handleSubmit() {
     if (!name.trim()) {
       toast("Profile name is required.", "danger");
       return;
     }
     setSubmitting(true);
     try {
-      await api.post("/publishing-profiles", { name, social_account_ids: selected });
+      const payload = { name, social_account_ids: selected, is_default: isDefault };
+      if (editingId) {
+        await api.patch(`/publishing-profiles/${editingId}`, payload);
+        toast("Publishing profile updated.", "success");
+      } else {
+        await api.post("/publishing-profiles", payload);
+        toast("Publishing profile created.", "success");
+      }
       await mutate("/publishing-profiles");
-      toast("Publishing profile created.", "success");
-      setModalOpen(false);
-      setName("");
-      setSelected([]);
+      closeModal();
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : "Failed to create profile.", "danger");
+      toast(err instanceof ApiError ? err.message : "Failed to save profile.", "danger");
     } finally {
       setSubmitting(false);
     }
@@ -65,7 +91,7 @@ export function PublishingProfiles() {
             Group destination accounts so you can publish to all of them in one click.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setModalOpen(true)}>
+        <Button size="sm" variant="outline" onClick={openCreate}>
           <Plus className="size-3.5" />
           New Profile
         </Button>
@@ -87,12 +113,22 @@ export function PublishingProfiles() {
                       .join(", ")}
               </p>
             </div>
-            <button
-              onClick={() => handleDelete(profile.id)}
-              className="rounded-lg p-1.5 text-muted hover:bg-danger/10 hover:text-danger cursor-pointer"
-            >
-              <Trash2 className="size-3.5" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => openEdit(profile)}
+                title="Edit profile"
+                className="rounded-lg p-1.5 text-muted hover:bg-white/5 hover:text-foreground cursor-pointer"
+              >
+                <Pencil className="size-3.5" />
+              </button>
+              <button
+                onClick={() => handleDelete(profile.id)}
+                title="Delete profile"
+                className="rounded-lg p-1.5 text-muted hover:bg-danger/10 hover:text-danger cursor-pointer"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
           </div>
         ))}
         {(profilesRes?.data.length ?? 0) === 0 && (
@@ -102,7 +138,7 @@ export function PublishingProfiles() {
         )}
       </div>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="New Publishing Profile">
+      <Modal open={modalOpen} onClose={closeModal} title={editingId ? "Edit Publishing Profile" : "New Publishing Profile"}>
         <div className="space-y-4">
           <div>
             <Label htmlFor="profile_name">Name</Label>
@@ -127,13 +163,22 @@ export function PublishingProfiles() {
               ))}
             </div>
           </div>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={isDefault}
+              onChange={(e) => setIsDefault(e.target.checked)}
+              className="size-4 rounded accent-accent"
+            />
+            Set as default profile
+          </label>
         </div>
         <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setModalOpen(false)} disabled={submitting}>
+          <Button variant="ghost" onClick={closeModal} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={handleCreate} loading={submitting}>
-            Create
+          <Button onClick={handleSubmit} loading={submitting}>
+            {editingId ? "Save Changes" : "Create"}
           </Button>
         </div>
       </Modal>

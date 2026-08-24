@@ -86,6 +86,20 @@ return [
         'ffmpeg_preset' => env('FFMPEG_PRESET', 'superfast'),
     ],
 
+    'trending' => [
+        // Every non-YouTube platform has no viable free/ToS-safe trending API and
+        // stays mock. YouTube defaults to mock too (zero-setup, like every other
+        // provider in this app) — set youtube_provider=youtube_api and provide
+        // youtube_api_key to switch on real trending data. Get a key at
+        // console.cloud.google.com: enable "YouTube Data API v3" > Credentials >
+        // Create Credentials > API key. This is separate from the OAuth client
+        // (services.google.*) used for real YouTube publishing.
+        'youtube_provider' => env('TRENDING_YOUTUBE_PROVIDER', 'mock'),
+        'youtube_api_key' => env('YOUTUBE_API_KEY'),
+        'cache_ttl' => env('TRENDING_CACHE_TTL', 900),
+        'region_code' => env('TRENDING_REGION_CODE', 'US'),
+    ],
+
     'ai' => [
         'transcription_provider' => env('AI_TRANSCRIPTION_PROVIDER', 'mock'),
         'analysis_provider' => env('AI_ANALYSIS_PROVIDER', 'mock'),
@@ -111,6 +125,18 @@ return [
         // and unrelated to any Google Cloud/Vertex project credentials.
         'api_key' => env('GEMINI_API_KEY'),
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+    ],
+
+    'nine_router' => [
+        // Self-hosted OpenAI-compatible LLM gateway (https://9router.com) — routes
+        // each request across many upstream providers, picking the cheapest one
+        // that meets quality. Default port matches 9Router's own default install.
+        'base_url' => env('NINE_ROUTER_BASE_URL', 'http://localhost:20128/v1'),
+        'api_key' => env('NINE_ROUTER_API_KEY'),
+        // No safe default — every instance's upstream credentials differ. Check
+        // GET {base_url}/models on your own instance for a valid id (e.g.
+        // "cc/claude-sonnet-5"); "auto" is NOT a real model id and will 404.
+        'model' => env('NINE_ROUTER_MODEL'),
     ],
 
     'whisper_engine' => [

@@ -1,6 +1,6 @@
 "use client";
 
-import { Play, Sparkles, CheckCircle2 } from "lucide-react";
+import { Play, Sparkles, CheckCircle2, Video } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -28,11 +28,13 @@ export function CandidateCard({
   candidate,
   onPreview,
   onGenerate,
+  onReact,
   generating,
 }: {
   candidate: ClipCandidate;
   onPreview: () => void;
   onGenerate: () => void;
+  onReact: () => void;
   generating: boolean;
 }) {
   const alreadyGenerated = candidate.status === "generated";
@@ -95,6 +97,10 @@ export function CandidateCard({
         <Button variant="outline" size="sm" className="flex-1" onClick={onPreview}>
           <Play className="size-3.5" />
           Preview
+        </Button>
+        <Button variant="outline" size="sm" className="flex-1" onClick={onReact}>
+          <Video className="size-3.5" />
+          React
         </Button>
         <Button
           size="sm"

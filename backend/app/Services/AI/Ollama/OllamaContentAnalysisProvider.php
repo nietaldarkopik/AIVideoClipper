@@ -4,6 +4,8 @@ namespace App\Services\AI\Ollama;
 
 use App\Exceptions\JobCancelledException;
 use App\Models\Transcript;
+use App\Services\AI\Concerns\LogsAiRequests;
+use App\Services\AI\Concerns\ParsesJsonResponses;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
@@ -28,6 +30,9 @@ use Illuminate\Support\Facades\Log;
  */
 class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 {
+    use LogsAiRequests;
+    use ParsesJsonResponses;
+
     private const CHUNK_SECONDS = 300.0;
 
     private const MAX_CANDIDATES_PER_CHUNK = 2;
@@ -103,6 +108,10 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
         $chunkStart = (float) $chunk[0]['start'];
         $chunkEnd = (float) $chunk[count($chunk) - 1]['end'];
 
+        $systemPrompt = $this->systemPrompt(self::MAX_CANDIDATES_PER_CHUNK);
+        $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $chunkStart, $chunkEnd, $language);
+        $span = $this->aiLogger()->start('content_analysis', 'ollama', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+
         try {
             $response = Http::timeout($this->timeoutSeconds)
                 ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
@@ -111,8 +120,8 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
                     'format' => 'json',
                     'options' => ['temperature' => 0.4],
                     'messages' => [
-                        ['role' => 'system', 'content' => $this->systemPrompt(self::MAX_CANDIDATES_PER_CHUNK)],
-                        ['role' => 'user', 'content' => $this->userPrompt($transcriptText, $durationSeconds, $chunkStart, $chunkEnd, $language)],
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ['role' => 'user', 'content' => $userPrompt],
                     ],
                 ]);
         } catch (ConnectionException|RequestException $e) {
@@ -120,6 +129,7 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
                 'chunk_start' => $chunk[0]['start'] ?? null,
                 'error' => $e->getMessage(),
             ]);
+            $span->failure($e->getMessage());
 
             return [];
         }
@@ -130,12 +140,14 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
                 'status' => $response->status(),
                 'body' => $response->body(),
             ]);
+            $span->failure("HTTP {$response->status()}: {$response->body()}");
 
             return [];
         }
 
         $raw = $this->extractMessageContent($response->body());
-        $parsed = json_decode($raw, true);
+        $span->success($raw);
+        $parsed = $this->extractJsonObject($raw);
         $candidates = $parsed['candidates'] ?? [];
 
         if (! is_array($candidates)) {

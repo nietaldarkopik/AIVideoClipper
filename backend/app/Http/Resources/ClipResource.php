@@ -29,6 +29,7 @@ class ClipResource extends JsonResource
             'subtitle_language' => $this->subtitle_language,
             'subtitles_enabled' => $this->subtitles_enabled,
             'subtitle_config' => $this->subtitle_config,
+            'reaction_layout' => $this->reaction_layout,
             'status' => $this->status,
             'progress' => $this->progress,
             'failure_reason' => $this->failure_reason,

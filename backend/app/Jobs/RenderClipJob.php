@@ -63,18 +63,28 @@ class RenderClipJob implements ShouldQueue
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
 
-            $this->abortIfCancelled($processingJob);
-            $processingJob->markProgress(15, 'Calculating smart crop...');
-            $keyframes = $reframing->detectCropKeyframes(
-                $sourcePath,
-                (float) $clip->start_time,
-                (float) $clip->end_time,
-                (int) $video->width,
-                (int) $video->height,
-                $clip->aspect_ratio
-            );
-            $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
-            $clip->update(['crop_config' => ['mode' => 'smart', 'keyframes' => $keyframeArrays]]);
+            // Split-screen reaction layouts only give the source clip half the frame,
+            // which ReframingProvider::detectCropKeyframes() can't target — it only
+            // understands the three whole-frame aspect ratios. Skip smart-pan crop
+            // for those (FFmpegService falls back to a plain center-crop instead);
+            // PIP layouts still fill the whole frame, so they keep smart-pan as-is.
+            $isSplitReaction = in_array($clip->reaction_layout, ['split_top_bottom', 'split_side_by_side'], true);
+
+            $keyframeArrays = [];
+            if (! $isSplitReaction) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(15, 'Calculating smart crop...');
+                $keyframes = $reframing->detectCropKeyframes(
+                    $sourcePath,
+                    (float) $clip->start_time,
+                    (float) $clip->end_time,
+                    (int) $video->width,
+                    (int) $video->height,
+                    $clip->aspect_ratio
+                );
+                $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
+                $clip->update(['crop_config' => ['mode' => 'smart', 'keyframes' => $keyframeArrays]]);
+            }
 
             $assPath = null;
             if ($clip->subtitles_enabled && $video->transcript) {
@@ -115,18 +125,35 @@ class RenderClipJob implements ShouldQueue
             $clip->update(['progress' => 55]);
 
             $outputRelative = "clips/{$clip->id}/output.mp4";
-            $ffmpeg->renderClip(
-                $sourcePath,
-                $disk->path($outputRelative),
-                (float) $clip->start_time,
-                (float) $clip->end_time,
-                $targetWidth,
-                $targetHeight,
-                $keyframeArrays,
-                $assPath,
-                $watermarkPath,
-                $watermarkOpacity,
-            );
+            if ($clip->webcam_path) {
+                $ffmpeg->renderReactionClip(
+                    $sourcePath,
+                    $disk->path($clip->webcam_path),
+                    $disk->path($outputRelative),
+                    (float) $clip->start_time,
+                    (float) $clip->end_time,
+                    $targetWidth,
+                    $targetHeight,
+                    $clip->reaction_layout,
+                    $keyframeArrays,
+                    $assPath,
+                    $watermarkPath,
+                    $watermarkOpacity,
+                );
+            } else {
+                $ffmpeg->renderClip(
+                    $sourcePath,
+                    $disk->path($outputRelative),
+                    (float) $clip->start_time,
+                    (float) $clip->end_time,
+                    $targetWidth,
+                    $targetHeight,
+                    $keyframeArrays,
+                    $assPath,
+                    $watermarkPath,
+                    $watermarkOpacity,
+                );
+            }
 
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(90, 'Generating thumbnail...');

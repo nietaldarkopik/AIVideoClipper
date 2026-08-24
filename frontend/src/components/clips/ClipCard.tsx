@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Scissors, Copy, Trash2, Download, RefreshCw } from "lucide-react";
 import { mutate } from "swr";
 import { Card } from "@/components/ui/Card";
-import { StatusBadge } from "@/components/ui/Badge";
+import { StatusBadge, Badge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { formatDuration } from "@/lib/format";
 import { api, ApiError } from "@/lib/api";
@@ -64,8 +64,9 @@ export function ClipCard({ clip, mutateKey }: { clip: Clip; mutateKey?: string }
               <Scissors className="size-6 text-muted" />
             </div>
           )}
-          <div className="absolute left-2 top-2">
+          <div className="absolute left-2 top-2 flex gap-1.5">
             <StatusBadge status={clip.status} />
+            {clip.reaction_layout && <Badge tone="accent">Reaction</Badge>}
           </div>
           <div className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[11px] font-medium text-white">
             {formatDuration(clip.duration)}

@@ -7,6 +7,7 @@ import {
   LayoutGrid,
   FolderKanban,
   LayoutTemplate,
+  TrendingUp,
   Scissors,
   Share2,
   Settings,
@@ -14,6 +15,7 @@ import {
   ShieldCheck,
   Film,
   Bot,
+  Rss,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { LogOut } from "lucide-react";
@@ -24,7 +26,9 @@ const primaryNav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/batches", label: "Batch Autobot", icon: Bot },
+  { href: "/channels", label: "Channels", icon: Rss },
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
+  { href: "/trending", label: "Trending", icon: TrendingUp },
   { href: "/clips", label: "AI Clips", icon: Scissors },
   { href: "/social-accounts", label: "Social Accounts", icon: Share2 },
 ];

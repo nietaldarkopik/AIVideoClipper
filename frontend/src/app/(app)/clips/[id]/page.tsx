@@ -3,7 +3,7 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { mutate } from "swr";
-import { ArrowLeft, Save, RefreshCw, Trash2, Copy, Download } from "lucide-react";
+import { ArrowLeft, Save, RefreshCw, Trash2, Copy, Download, Video as VideoIcon } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -14,8 +14,9 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PublishPanel } from "@/components/clips/PublishPanel";
+import { ReactionRecorderModal } from "@/components/reactions/ReactionRecorderModal";
 import { formatDuration } from "@/lib/format";
-import type { Clip, Template } from "@/lib/types";
+import type { Clip, Template, Video } from "@/lib/types";
 
 const ACTIVE = ["queued", "rendering"];
 
@@ -29,6 +30,8 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   });
   const clip = clipRes?.data;
   const { data: templatesRes } = useApi<{ data: Template[] }>("/templates");
+  const { data: videoRes } = useApi<{ data: Video }>(clip ? `/videos/${clip.video_id}` : null);
+  const [reacting, setReacting] = useState(false);
 
   const [form, setForm] = useState<{
     title: string;
@@ -148,6 +151,10 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
             <StatusBadge status={clip.status} />
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setReacting(true)}>
+              <VideoIcon className="size-3.5" />
+              React
+            </Button>
             <Button variant="outline" size="sm" onClick={handleRegenerate}>
               <RefreshCw className="size-3.5" />
               Regenerate
@@ -326,6 +333,16 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
           </Card>
         </div>
       </div>
+
+      <ReactionRecorderModal
+        open={reacting}
+        onClose={() => setReacting(false)}
+        startTime={clip.start_time}
+        endTime={clip.end_time}
+        sourceVideoUrl={videoRes?.data.url ?? null}
+        submitUrl={`/clips/${clip.id}/reaction`}
+        onSuccess={() => mutate(clipKey)}
+      />
     </div>
   );
 }

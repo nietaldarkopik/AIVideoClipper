@@ -14,6 +14,7 @@ use App\Services\AI\Mock\MockContentAnalysisProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
 use App\Services\AI\Mock\MockTranscriptionProvider;
+use App\Services\AI\NineRouter\NineRouterContentAnalysisProvider;
 use App\Services\AI\Ollama\OllamaContentAnalysisProvider;
 use App\Services\AI\Ollama\OllamaSocialMetadataProvider;
 use App\Services\AI\OpenAI\OpenAIContentAnalysisProvider;
@@ -100,7 +101,12 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.gemini.api_key'),
                     (string) config('services.gemini.model', 'gemini-2.5-flash'),
                 ),
-                default => throw new InvalidArgumentException("Unknown AI_ANALYSIS_PROVIDER [{$provider}]. Valid values: mock, openai, ollama, claude, gemini."),
+                'nine_router' => new NineRouterContentAnalysisProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_ANALYSIS_PROVIDER [{$provider}]. Valid values: mock, openai, ollama, claude, gemini, nine_router."),
             };
         });
 

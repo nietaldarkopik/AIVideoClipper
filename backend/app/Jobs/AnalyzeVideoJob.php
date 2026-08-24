@@ -20,6 +20,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
@@ -52,6 +53,10 @@ class AnalyzeVideoJob implements ShouldQueue
     ): void {
         $project = Project::findOrFail($this->projectId);
         $video = Video::findOrFail($this->videoId);
+        // See App\Services\AI\Logging — every AI provider call below reads this back
+        // to tag its ai_request_logs row, without threading ids through every
+        // Contract method signature.
+        Context::add(['project_id' => $project->id, 'video_id' => $video->id]);
         $disk = Storage::disk('media');
         $fullVideoPath = $disk->path($video->disk_path);
 

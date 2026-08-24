@@ -85,6 +85,8 @@ export interface ClipCandidate {
 
 export type ClipStatus = "queued" | "rendering" | "completed" | "failed";
 
+export type ReactionLayout = "pip_bottom_right" | "pip_bottom_left" | "split_top_bottom" | "split_side_by_side";
+
 export interface Clip {
   id: number;
   project_id: number;
@@ -104,6 +106,7 @@ export interface Clip {
   subtitle_language: string;
   subtitles_enabled: boolean;
   subtitle_config: Record<string, unknown> | null;
+  reaction_layout: ReactionLayout | null;
   status: ClipStatus;
   progress: number | null;
   failure_reason: string | null;
@@ -250,6 +253,26 @@ export interface ProcessingJob {
   finished_at: string | null;
 }
 
+export type AiCapability = "content_analysis" | "transcription" | "social_metadata";
+
+export type AiProvider = "ollama" | "openai" | "claude" | "gemini" | "nine_router" | "whisper_engine";
+
+export interface AiRequestLog {
+  id: number;
+  capability: AiCapability;
+  provider: AiProvider;
+  model: string | null;
+  project: { id: number; title: string } | null;
+  video: { id: number; title: string | null } | null;
+  clip: { id: number; title: string | null } | null;
+  prompt: string | null;
+  response: string | null;
+  status: "success" | "failed";
+  error_message: string | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
 export interface DashboardStats {
   total_projects: number;
   total_videos: number;
@@ -287,6 +310,8 @@ export interface VideoBatchSettings {
   subtitle_language: string;
   subtitles_enabled: boolean;
   publishing_profile_id: number | null;
+  publish_stagger_min_minutes: number;
+  publish_stagger_max_minutes: number;
 }
 
 export interface VideoBatchItem {
@@ -317,6 +342,44 @@ export interface VideoBatch {
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+}
+
+export interface ChannelWatch {
+  id: number;
+  platform: "youtube";
+  channel_id: string;
+  channel_title: string | null;
+  channel_url: string;
+  thumbnail_url: string | null;
+  is_active: boolean;
+  settings: VideoBatchSettings;
+  last_video_id: string | null;
+  last_video_published_at: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  created_at: string;
+}
+
+export type TrendingPlatform = "youtube" | "facebook" | "tiktok" | "instagram" | "twitter";
+
+export interface TrendingItem {
+  platform: TrendingPlatform;
+  external_id: string;
+  title: string;
+  source_url: string;
+  thumbnail_url: string | null;
+  author_name: string | null;
+  view_count: number;
+  like_count: number;
+  comment_count: number;
+  published_at: string | null;
+  is_mock: boolean;
+}
+
+export interface TrendingPlatformInfo {
+  key: TrendingPlatform;
+  label: string;
+  is_mocked: boolean;
 }
 
 export interface Paginated<T> {

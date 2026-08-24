@@ -2,16 +2,19 @@
 
 use App\Http\Controllers\Api\Admin\AdminController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\ChannelWatchController;
 use App\Http\Controllers\Api\ClipCandidateController;
 use App\Http\Controllers\Api\ClipController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ProcessingJobController;
 use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\PublishingProfileController;
+use App\Http\Controllers\Api\ReactionController;
 use App\Http\Controllers\Api\SocialAccountController;
 use App\Http\Controllers\Api\SocialPostController;
 use App\Http\Controllers\Api\TemplateCategoryController;
 use App\Http\Controllers\Api\TemplateController;
+use App\Http\Controllers\Api\TrendingController;
 use App\Http\Controllers\Api\VideoBatchController;
 use App\Http\Controllers\Api\VideoController;
 use App\Http\Controllers\MediaStreamController;
@@ -58,7 +61,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/video-batches/{videoBatch}/items/{item}/retry', [VideoBatchController::class, 'retryItem']);
     Route::delete('/video-batches/{videoBatch}', [VideoBatchController::class, 'destroy']);
 
+    Route::apiResource('channel-watches', ChannelWatchController::class)->except(['show']);
+    Route::post('/channel-watches/{channelWatch}/check', [ChannelWatchController::class, 'checkNow']);
+
     Route::get('/clip-candidates/{clipCandidate}', [ClipCandidateController::class, 'show']);
+    Route::post('/clip-candidates/{clipCandidate}/reaction', [ReactionController::class, 'store']);
 
     Route::get('/clips', [ClipController::class, 'index']);
     Route::get('/clips/{clip}', [ClipController::class, 'show']);
@@ -66,12 +73,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/clips/{clip}', [ClipController::class, 'destroy']);
     Route::post('/clips/{clip}/duplicate', [ClipController::class, 'duplicate']);
     Route::post('/clips/{clip}/regenerate', [ClipController::class, 'regenerate']);
+    Route::post('/clips/{clip}/reaction', [ReactionController::class, 'updateClip']);
     Route::post('/clips/{clip}/generate-social-metadata', [ClipController::class, 'generateSocialMetadata']);
     Route::post('/clips/export-zip', [ClipController::class, 'exportZip']);
 
     Route::get('/template-categories', [TemplateCategoryController::class, 'index']);
     Route::get('/templates', [TemplateController::class, 'index']);
     Route::get('/templates/{template}', [TemplateController::class, 'show']);
+
+    Route::get('/trending', [TrendingController::class, 'index']);
+    Route::get('/trending/platforms', [TrendingController::class, 'platforms']);
 
     Route::get('/social-accounts/platforms', [SocialAccountController::class, 'platforms']);
     Route::get('/social-accounts', [SocialAccountController::class, 'index']);
@@ -95,6 +106,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/users', [AdminController::class, 'users']);
         Route::get('/projects', [AdminController::class, 'projects']);
         Route::get('/processing-jobs', [AdminController::class, 'processingJobs']);
+        Route::get('/ai-request-logs', [AdminController::class, 'aiRequestLogs']);
         Route::get('/settings', [AdminController::class, 'settings']);
         Route::patch('/settings', [AdminController::class, 'updateSettings']);
 

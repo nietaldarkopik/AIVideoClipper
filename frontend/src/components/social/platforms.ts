@@ -26,3 +26,14 @@ export const PLATFORMS: SocialPlatform[] = [
   "twitter",
   "linkedin",
 ];
+
+// Platforms with a real OAuth integration wired up on the backend — connecting
+// (or reconnecting) these redirects the browser to the platform's own consent
+// screen instead of showing a form. Add a platform here once its SocialProvider
+// stops extending AbstractMockSocialProvider.
+export const REAL_OAUTH_PLATFORMS = new Set(["youtube", "facebook"]);
+
+// Platforms that connect with a real username/password instead of OAuth (browser
+// automation on the backend — see tools/instagram-automation). No redirect: the
+// existing mock "connect" endpoint is reused, just with different payload fields.
+export const CREDENTIAL_PLATFORMS = new Set(["instagram"]);

@@ -3,6 +3,8 @@
 namespace App\Services\AI\OpenAI;
 
 use App\Models\Transcript;
+use App\Services\AI\Concerns\LogsAiRequests;
+use App\Services\AI\Concerns\ParsesJsonResponses;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
@@ -19,6 +21,9 @@ use RuntimeException;
  */
 class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 {
+    use LogsAiRequests;
+    use ParsesJsonResponses;
+
     public function __construct(
         private readonly string $apiKey,
         private readonly string $model = 'gpt-4o-mini',
@@ -58,6 +63,10 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 
         $maxCandidates = min(8, max(3, (int) round($durationSeconds / 180)));
 
+        $systemPrompt = $this->systemPrompt($maxCandidates);
+        $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
+        $span = $this->aiLogger()->start('content_analysis', 'openai', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+
         $response = Http::withToken($this->apiKey)
             ->timeout(180)
             ->retry(2, 2000)
@@ -69,17 +78,20 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
                 'response_format' => ['type' => 'json_object'],
                 'temperature' => 0.4,
                 'messages' => [
-                    ['role' => 'system', 'content' => $this->systemPrompt($maxCandidates)],
-                    ['role' => 'user', 'content' => $this->userPrompt($transcriptText, $durationSeconds, $transcript->language)],
+                    ['role' => 'system', 'content' => $systemPrompt],
+                    ['role' => 'user', 'content' => $userPrompt],
                 ],
             ]);
 
         if ($response->failed()) {
+            $span->failure($response->body());
+
             throw new RuntimeException('OpenAI analysis failed: ' . $response->body());
         }
 
         $raw = $response->json('choices.0.message.content');
-        $parsed = json_decode((string) $raw, true);
+        $span->success((string) $raw);
+        $parsed = $this->extractJsonObject((string) $raw);
         $candidates = $parsed['candidates'] ?? [];
 
         if (! is_array($candidates)) {

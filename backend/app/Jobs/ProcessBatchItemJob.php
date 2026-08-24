@@ -134,7 +134,12 @@ class ProcessBatchItemJob implements ShouldQueue
             if ($renderedClips->isNotEmpty()) {
                 $item->update(['status' => VideoBatchItem::STATUS_PUBLISHING, 'progress' => 85]);
 
-                $scheduledCount = $publishScheduler->scheduleForProject($project, $settings['publishing_profile_id'] ?? null);
+                $scheduledCount = $publishScheduler->scheduleForProject(
+                    $project,
+                    $settings['publishing_profile_id'] ?? null,
+                    isset($settings['publish_stagger_min_minutes']) ? $settings['publish_stagger_min_minutes'] * 60 : null,
+                    isset($settings['publish_stagger_max_minutes']) ? $settings['publish_stagger_max_minutes'] * 60 : null,
+                );
 
                 if ($scheduledCount > 0) {
                     $lastScheduledAt = SocialPost::whereIn('clip_id', $renderedClips->pluck('id'))

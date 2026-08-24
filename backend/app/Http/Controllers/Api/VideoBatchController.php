@@ -6,9 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\VideoBatchItemResource;
 use App\Http\Resources\VideoBatchResource;
 use App\Jobs\ProcessBatchItemJob;
-use App\Jobs\ProcessVideoBatchJob;
 use App\Models\VideoBatch;
 use App\Models\VideoBatchItem;
+use App\Services\Batch\VideoBatchFactory;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -24,7 +24,7 @@ class VideoBatchController extends Controller
         return VideoBatchResource::collection($batches);
     }
 
-    public function store(Request $request)
+    public function store(Request $request, VideoBatchFactory $batchFactory)
     {
         $data = $request->validate([
             'name' => ['nullable', 'string', 'max:255'],
@@ -36,6 +36,8 @@ class VideoBatchController extends Controller
             'subtitle_language' => ['sometimes', 'string', 'max:10'],
             'subtitles_enabled' => ['sometimes', 'boolean'],
             'publishing_profile_id' => ['nullable', 'exists:publishing_profiles,id'],
+            'publish_stagger_min_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440'],
+            'publish_stagger_max_minutes' => ['sometimes', 'integer', 'min:0', 'max:1440', 'gte:publish_stagger_min_minutes'],
         ]);
 
         $urls = collect($data['urls'])
@@ -54,31 +56,7 @@ class VideoBatchController extends Controller
             }
         }
 
-        $batch = $request->user()->videoBatches()->create([
-            'name' => $data['name'] ?? null,
-            'status' => VideoBatch::STATUS_PENDING,
-            'settings' => [
-                'clip_mode' => $data['clip_mode'] ?? 'top_5',
-                'template_id' => $data['template_id'] ?? null,
-                'aspect_ratio' => $data['aspect_ratio'] ?? '9:16',
-                'subtitle_language' => $data['subtitle_language'] ?? 'en',
-                'subtitles_enabled' => $data['subtitles_enabled'] ?? true,
-                'publishing_profile_id' => $data['publishing_profile_id'] ?? null,
-            ],
-            'total_items' => $urls->count(),
-        ]);
-
-        $urls->each(fn ($url, $index) => $batch->items()->create([
-            'position' => $index,
-            'source_url' => $url,
-            'status' => VideoBatchItem::STATUS_PENDING,
-        ]));
-
-        // Its own dedicated queue/worker (see start-all.ps1/.bat) — this job only
-        // downloads, one item at a time, and needs to keep running independently of
-        // the 'default' worker so a batch's downloads can overlap with that same
-        // batch's own items being processed (see ProcessVideoBatchJob's docblock).
-        ProcessVideoBatchJob::dispatch($batch->id)->onQueue('batch-downloads');
+        $batch = $batchFactory->createFromUrls($request->user(), $urls->all(), $data, $data['name'] ?? null);
 
         return VideoBatchResource::make($batch->load('items'))->response()->setStatusCode(201);
     }

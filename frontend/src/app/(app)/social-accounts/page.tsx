@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { mutate } from "swr";
-import { Plus, Share2, Unlink, RefreshCw } from "lucide-react";
+import { Plus, Share2, Unlink, RefreshCw, LogIn } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -13,14 +13,16 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ConnectAccountModal } from "@/components/social/ConnectAccountModal";
-import { PLATFORM_LABELS } from "@/components/social/platforms";
+import { PLATFORM_LABELS, REAL_OAUTH_PLATFORMS } from "@/components/social/platforms";
 import { formatRelativeTime } from "@/lib/format";
-import type { SocialAccount } from "@/lib/types";
+import type { SocialAccount, SocialPlatform } from "@/lib/types";
 
 function SocialAccountsPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [modalOpen, setModalOpen] = useState(false);
+  const [reconnectPlatform, setReconnectPlatform] = useState<SocialPlatform | undefined>(undefined);
+  const [reconnectingId, setReconnectingId] = useState<number | null>(null);
   const { data, isLoading } = useApi<{ data: SocialAccount[] }>("/social-accounts");
 
   // Lands here after a real OAuth round trip (SocialAccountController::callback
@@ -76,6 +78,36 @@ function SocialAccountsPageInner() {
     }
   }
 
+  // A plain token refresh (handleRefresh above) only works if the stored refresh
+  // token itself is still valid — once the platform has revoked that too (the
+  // common case once status has actually gone to "expired"/"revoked"/"error"),
+  // the only way back is a full login. OAuth platforms can jump straight to the
+  // consent screen for this account's platform; credential/mock platforms need
+  // their form, so those open the modal pre-selected instead.
+  async function handleReconnect(account: SocialAccount) {
+    if (!REAL_OAUTH_PLATFORMS.has(account.platform)) {
+      setReconnectPlatform(account.platform);
+      setModalOpen(true);
+      return;
+    }
+
+    setReconnectingId(account.id);
+    try {
+      const { authorization_url } = await api.get<{ authorization_url: string }>(
+        `/social-accounts/${account.platform}/authorize`
+      );
+      window.location.href = authorization_url;
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to start reconnecting.", "danger");
+      setReconnectingId(null);
+    }
+  }
+
+  function closeModal() {
+    setModalOpen(false);
+    setReconnectPlatform(undefined);
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -83,7 +115,12 @@ function SocialAccountsPageInner() {
           <h1 className="text-xl font-semibold">Social Accounts</h1>
           <p className="mt-1 text-sm text-muted">Connect the accounts you publish clips to.</p>
         </div>
-        <Button onClick={() => setModalOpen(true)}>
+        <Button
+          onClick={() => {
+            setReconnectPlatform(undefined);
+            setModalOpen(true);
+          }}
+        >
           <Plus className="size-4" />
           Connect Account
         </Button>
@@ -101,7 +138,13 @@ function SocialAccountsPageInner() {
           title="No accounts connected"
           description="Connect TikTok, Instagram, YouTube, Facebook, X, or LinkedIn to publish clips directly."
           action={
-            <Button size="sm" onClick={() => setModalOpen(true)}>
+            <Button
+              size="sm"
+              onClick={() => {
+                setReconnectPlatform(undefined);
+                setModalOpen(true);
+              }}
+            >
               <Plus className="size-4" />
               Connect Account
             </Button>
@@ -140,6 +183,17 @@ function SocialAccountsPageInner() {
                       />
                       Auto-publish
                     </label>
+                    {account.status !== "connected" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleReconnect(account)}
+                        loading={reconnectingId === account.id}
+                      >
+                        <LogIn className="size-3.5" />
+                        Reconnect
+                      </Button>
+                    )}
                     <button
                       onClick={() => handleRefresh(account)}
                       title="Refresh token"
@@ -162,7 +216,7 @@ function SocialAccountsPageInner() {
         </div>
       )}
 
-      <ConnectAccountModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      <ConnectAccountModal open={modalOpen} onClose={closeModal} initialPlatform={reconnectPlatform} />
     </div>
   );
 }

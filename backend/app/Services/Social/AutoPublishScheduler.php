@@ -25,6 +25,8 @@ use Illuminate\Support\Collection;
  */
 class AutoPublishScheduler
 {
+    // Defaults used when the caller doesn't have a per-batch/per-channel override
+    // (e.g. a regular, non-batch project — see RenderClipJob::settleProjectStatus).
     public const STAGGER_MIN_SECONDS = 1800;
 
     public const STAGGER_MAX_SECONDS = 3600;
@@ -32,8 +34,12 @@ class AutoPublishScheduler
     /**
      * @return int number of posts newly scheduled by this call
      */
-    public function scheduleForProject(Project $project, ?int $publishingProfileId = null): int
-    {
+    public function scheduleForProject(
+        Project $project,
+        ?int $publishingProfileId = null,
+        ?int $staggerMinSeconds = null,
+        ?int $staggerMaxSeconds = null,
+    ): int {
         $clips = Clip::where('project_id', $project->id)->where('status', Clip::STATUS_COMPLETED)->get();
         $accounts = $this->resolvePublishTargets($project->user, $publishingProfileId);
 
@@ -41,12 +47,18 @@ class AutoPublishScheduler
             return 0;
         }
 
+        $staggerMinSeconds ??= self::STAGGER_MIN_SECONDS;
+        $staggerMaxSeconds ??= self::STAGGER_MAX_SECONDS;
+        // random_int() throws if min > max — a batch/channel with a misconfigured
+        // (or since-changed) min > max shouldn't ever crash publishing over it.
+        $staggerMaxSeconds = max($staggerMinSeconds, $staggerMaxSeconds);
+
         $scheduledCount = 0;
         $scheduledAt = now();
 
         foreach ($clips as $clipIndex => $clip) {
             if ($clipIndex > 0) {
-                $scheduledAt = $scheduledAt->clone()->addSeconds(random_int(self::STAGGER_MIN_SECONDS, self::STAGGER_MAX_SECONDS));
+                $scheduledAt = $scheduledAt->clone()->addSeconds(random_int($staggerMinSeconds, $staggerMaxSeconds));
             }
 
             foreach ($accounts as $account) {

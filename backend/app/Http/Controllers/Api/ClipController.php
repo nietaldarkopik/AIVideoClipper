@@ -8,6 +8,7 @@ use App\Jobs\RenderClipJob;
 use App\Models\Clip;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use ZipArchive;
@@ -108,6 +109,8 @@ class ClipController extends Controller
         ]);
 
         $platforms = $data['platforms'] ?? ['tiktok', 'instagram', 'youtube', 'facebook', 'twitter', 'linkedin'];
+
+        Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
 
         return response()->json(['metadata' => $provider->generateMetadata($clip->load('clipCandidate'), $platforms)]);
     }

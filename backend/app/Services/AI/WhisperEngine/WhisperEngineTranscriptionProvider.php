@@ -3,6 +3,7 @@
 namespace App\Services\AI\WhisperEngine;
 
 use App\Exceptions\JobCancelledException;
+use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\DTOs\TranscriptionResult;
 use App\Services\Video\FFmpegService;
@@ -33,6 +34,8 @@ use RuntimeException;
  */
 class WhisperEngineTranscriptionProvider implements TranscriptionProvider
 {
+    use LogsAiRequests;
+
     public function __construct(
         private readonly FFmpegService $ffmpeg,
         private readonly string $baseUrl,
@@ -146,20 +149,22 @@ class WhisperEngineTranscriptionProvider implements TranscriptionProvider
      */
     private function transcribeChunk(string $audioPath, ?string $language): array
     {
+        $payload = array_filter(['audio_path' => $audioPath, 'language' => $language]);
+        $span = $this->aiLogger()->start('transcription', 'whisper_engine', null, json_encode($payload));
+
         $response = Http::timeout($this->timeoutSeconds)
-            ->post(rtrim($this->baseUrl, '/') . '/transcribe', array_filter([
-                'audio_path' => $audioPath,
-                'language' => $language,
-            ]));
+            ->post(rtrim($this->baseUrl, '/') . '/transcribe', $payload);
 
         if ($response->failed()) {
-            throw new RuntimeException(
-                "Whisper engine transcription failed ({$response->status()}): {$response->body()}. " .
-                "Is the service running at {$this->baseUrl}? (see tools/whisper-engine/README.md)"
-            );
+            $message = "Whisper engine transcription failed ({$response->status()}): {$response->body()}. " .
+                "Is the service running at {$this->baseUrl}? (see tools/whisper-engine/README.md)";
+            $span->failure($message);
+
+            throw new RuntimeException($message);
         }
 
         $data = $response->json();
+        $span->success(json_encode(['language' => $data['language'] ?? null, 'segment_count' => count($data['segments'] ?? [])]));
 
         return [
             'language' => $data['language'] ?? null,

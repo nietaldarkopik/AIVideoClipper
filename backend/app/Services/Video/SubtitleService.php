@@ -4,6 +4,16 @@ namespace App\Services\Video;
 
 class SubtitleService
 {
+    // Below this, a word's own on-screen slice is too short to read and — far
+    // more often — isn't genuine rapid speech at all but a faster-whisper
+    // word-alignment artifact: several consecutive words collapse to
+    // near-identical start/end timestamps (seen concretely as a cluster of
+    // words all within ~0.01-0.5s of each other). Rendered as-is, each gets
+    // its own near-instant ASS cue, which reads as the caption flickering /
+    // jumping back and forth. repairDegenerateTiming() below spreads any such
+    // cluster evenly across its own span instead of trusting the raw timestamps.
+    private const MIN_WORD_SECONDS = 0.12;
+
     /**
      * Build word-level segments (relative to the clip) from absolute transcript words,
      * grouped into short on-screen phrases (chunks) for punchy short-form captions.
@@ -18,15 +28,19 @@ class SubtitleService
             fn ($w) => $w['end'] > $clipStart && $w['start'] < $clipEnd
         ));
 
+        $relative = array_map(fn ($w) => [
+            'word' => $w['word'],
+            'start' => round(max(0, $w['start'] - $clipStart), 2),
+            'end' => round(min($clipEnd - $clipStart, $w['end'] - $clipStart), 2),
+        ], $relevant);
+
+        $relative = $this->repairDegenerateTiming($relative, $clipEnd - $clipStart);
+
         $chunks = [];
         $buffer = [];
 
-        foreach ($relevant as $w) {
-            $buffer[] = [
-                'word' => $w['word'],
-                'start' => round(max(0, $w['start'] - $clipStart), 2),
-                'end' => round(min($clipEnd - $clipStart, $w['end'] - $clipStart), 2),
-            ];
+        foreach ($relative as $w) {
+            $buffer[] = $w;
 
             if (count($buffer) >= $wordsPerChunk) {
                 $chunks[] = $this->finalizeChunk($buffer);
@@ -39,6 +53,45 @@ class SubtitleService
         }
 
         return $chunks;
+    }
+
+    /**
+     * Enforces a minimum, non-overlapping on-screen duration for every word by
+     * scanning left-to-right and pushing any word that would start before the
+     * previous one's (possibly already-extended) end forward just enough. This
+     * resolves literal timestamp overlaps and — far more commonly — repairs
+     * clusters of near-identical timestamps (the faster-whisper alignment
+     * artifact described above) that would otherwise flash by as a stream of
+     * near-instant, flickering captions.
+     *
+     * A cluster's forced delay isn't capped against "the next word's original
+     * start" — there frequently isn't enough room there either, since the
+     * whole degenerate region is compressed. Instead it's left to catch back
+     * up naturally: the next time a word's own raw start already exceeds the
+     * running cursor (i.e. a normal gap/pause in speech), the push-forward
+     * stops propagating on its own. Clamped to $clipRelativeEnd so a long run
+     * of pushes can never spill past the clip's own end.
+     *
+     * @param  array<int, array{word: string, start: float, end: float}>  $words  clip-relative
+     * @return array<int, array{word: string, start: float, end: float}>
+     */
+    private function repairDegenerateTiming(array $words, float $clipRelativeEnd): array
+    {
+        $cursor = 0.0;
+
+        foreach ($words as &$w) {
+            $start = round(max($w['start'], $cursor), 2);
+            $end = round(max($w['end'], $start + self::MIN_WORD_SECONDS), 2);
+            $end = min($end, $clipRelativeEnd);
+            $start = min($start, $end);
+
+            $w['start'] = $start;
+            $w['end'] = $end;
+            $cursor = $end;
+        }
+        unset($w);
+
+        return $words;
     }
 
     private function finalizeChunk(array $buffer): array
@@ -146,9 +199,10 @@ ASS;
 
     private function srtTime(float $seconds): string
     {
-        $h = (int) floor($seconds / 3600);
-        $m = (int) floor(($seconds % 3600) / 60);
-        $s = (int) floor($seconds) % 60;
+        $whole = (int) floor($seconds);
+        $h = intdiv($whole, 3600);
+        $m = intdiv($whole % 3600, 60);
+        $s = $whole % 60;
         $ms = (int) round(($seconds - floor($seconds)) * 1000);
 
         return sprintf('%02d:%02d:%02d,%03d', $h, $m, $s, $ms);
@@ -156,9 +210,10 @@ ASS;
 
     private function assTime(float $seconds): string
     {
-        $h = (int) floor($seconds / 3600);
-        $m = (int) floor(($seconds % 3600) / 60);
-        $s = (int) floor($seconds) % 60;
+        $whole = (int) floor($seconds);
+        $h = intdiv($whole, 3600);
+        $m = intdiv($whole % 3600, 60);
+        $s = $whole % 60;
         $cs = (int) round(($seconds - floor($seconds)) * 100);
 
         return sprintf('%d:%02d:%02d.%02d', $h, $m, $s, $cs);

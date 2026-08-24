@@ -77,4 +77,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(VideoBatch::class);
     }
+
+    public function channelWatches(): HasMany
+    {
+        return $this->hasMany(ChannelWatch::class);
+    }
 }

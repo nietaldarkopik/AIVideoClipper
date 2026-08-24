@@ -4,10 +4,17 @@ namespace App\Services\Video;
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
+use InvalidArgumentException;
 use RuntimeException;
 
 class FFmpegService
 {
+    // Reaction-mode picture-in-picture box: square, this fraction of target width,
+    // pinned to a corner with the same margin renderClip() uses for the watermark.
+    private const PIP_SIZE_RATIO = 0.30;
+
+    private const PIP_MARGIN = 24;
+
     public function __construct(
         private readonly string $ffmpegBin = 'ffmpeg',
         private readonly string $ffprobeBin = 'ffprobe',
@@ -171,8 +178,11 @@ class FFmpegService
 
         $args = [
             $this->ffmpegBin, '-y',
-            '-ss', (string) $start, '-i', $sourceVideoPath,
-            '-t', (string) $duration,
+            // -ss/-t must sit BEFORE their -i to bind to that input. Once a second
+            // -i (the watermark) follows, a trailing -t here would instead bind to
+            // THAT input — silently leaving this source clip untrimmed and reading
+            // to EOF (observed: output ran to the source's full remaining length).
+            '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
         ];
 
         if ($watermarkPath && file_exists($watermarkPath)) {
@@ -181,6 +191,7 @@ class FFmpegService
             $args = array_merge($args, [
                 '-filter_complex',
                 "[1:v]format=rgba,colorchannelmixer=aa={$opacity}[wm];[0:v]{$videoFilter}[base];[base][wm]overlay=W-w-24:24",
+                '-shortest',
             ]);
         } else {
             $args = array_merge($args, ['-vf', $videoFilter]);
@@ -195,6 +206,137 @@ class FFmpegService
 
         $result = Process::timeout(1800)->run($args);
         $this->assertSuccess($result, 'render clip');
+    }
+
+    /**
+     * Render a reaction clip: composite a webcam recording over the source clip
+     * (picture-in-picture, or split-screen) instead of renderClip()'s single-video
+     * path. Both audio tracks are mixed together (reactor commentary + source clip
+     * audio) rather than picking one. See renderClip() for the shared trim/subtitle/
+     * watermark conventions this mirrors.
+     *
+     * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  only meaningful for pip_* layouts — split_* layouts fill their half-frame with a plain cover-crop instead (see class docblock on buildSplitGraph())
+     */
+    public function renderReactionClip(
+        string $sourceVideoPath,
+        string $webcamVideoPath,
+        string $outPath,
+        float $start,
+        float $end,
+        int $targetWidth,
+        int $targetHeight,
+        string $layout,
+        array $cropKeyframes = [],
+        ?string $subtitlesAssPath = null,
+        ?string $watermarkPath = null,
+        float $watermarkOpacity = 0.8,
+    ): void {
+        $this->ensureDir($outPath);
+        $duration = max(0.1, $end - $start);
+
+        [$graph, $outputLabel] = match ($layout) {
+            'pip_bottom_right' => $this->buildPipGraph($cropKeyframes, $duration, $targetWidth, $targetHeight, right: true, bottom: true),
+            'pip_bottom_left' => $this->buildPipGraph($cropKeyframes, $duration, $targetWidth, $targetHeight, right: false, bottom: true),
+            'split_top_bottom' => $this->buildSplitGraph($targetWidth, $targetHeight, vertical: true),
+            'split_side_by_side' => $this->buildSplitGraph($targetWidth, $targetHeight, vertical: false),
+            default => throw new InvalidArgumentException("Unknown reaction layout [{$layout}]."),
+        };
+
+        if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
+            $escaped = $this->escapeFilterPath($subtitlesAssPath);
+            $graph[] = "[{$outputLabel}]ass='{$escaped}'[captioned]";
+            $outputLabel = 'captioned';
+        }
+
+        $args = [
+            $this->ffmpegBin, '-y',
+            // -ss/-t must each sit immediately BEFORE their own -i — with two-plus
+            // inputs, a trailing -t instead binds to the NEXT -i (see renderClip()).
+            '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
+            '-t', (string) $duration, '-i', $webcamVideoPath,
+        ];
+
+        if ($watermarkPath && file_exists($watermarkPath)) {
+            $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
+            $args = array_merge($args, ['-i', $watermarkPath]);
+            $graph[] = "[2:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
+            $graph[] = "[{$outputLabel}][wm]overlay=W-w-24:24[final]";
+            $outputLabel = 'final';
+        }
+
+        $graph[] = '[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=0[aout]';
+
+        $args = array_merge($args, [
+            '-filter_complex', implode(';', $graph),
+            '-map', "[{$outputLabel}]",
+            '-map', '[aout]',
+            // Both real video/audio inputs already share the same -t, but a watermark
+            // PNG's single-frame stream has no real duration of its own and can
+            // otherwise stretch the mux past the trimmed length (see renderClip()).
+            '-shortest',
+            '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            $outPath,
+        ]);
+
+        $result = Process::timeout(1800)->run($args);
+        $this->assertSuccess($result, 'render reaction clip');
+    }
+
+    /**
+     * Picture-in-picture: source clip fills the whole frame (same smart-crop path as
+     * renderClip()), webcam is center-cropped to a square and pinned to a corner.
+     *
+     * @return array{0: string[], 1: string}
+     */
+    private function buildPipGraph(array $cropKeyframes, float $duration, int $targetWidth, int $targetHeight, bool $right, bool $bottom): array
+    {
+        $baseFilter = $this->buildCropExpression($cropKeyframes, $duration) . ",scale={$targetWidth}:{$targetHeight}";
+        $pipSize = (int) round($targetWidth * self::PIP_SIZE_RATIO);
+        $x = $right ? 'W-w-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
+        $y = $bottom ? 'H-h-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
+
+        return [
+            [
+                "[0:v]{$baseFilter}[base]",
+                "[1:v]scale={$pipSize}:{$pipSize}:force_original_aspect_ratio=increase,crop={$pipSize}:{$pipSize}[pip]",
+                "[base][pip]overlay={$x}:{$y}[composited]",
+            ],
+            'composited',
+        ];
+    }
+
+    /**
+     * Split-screen: source clip and webcam each fill half the frame. Neither side
+     * uses the AI smart-pan crop here — ReframingProvider::detectCropKeyframes()
+     * only understands the three whole-frame aspect ratios ('9:16'/'1:1'/'16:9'), not
+     * an arbitrary half-frame region, so both halves get a plain "scale to cover,
+     * then center-crop" fill instead (the standard ffmpeg object-fit:cover idiom) —
+     * good enough for a split layout and needs no source-dimension probing.
+     *
+     * @return array{0: string[], 1: string}
+     */
+    private function buildSplitGraph(int $targetWidth, int $targetHeight, bool $vertical): array
+    {
+        [$regionWidth, $regionHeight] = $vertical
+            ? [$targetWidth, intdiv($targetHeight, 2)]
+            : [intdiv($targetWidth, 2), $targetHeight];
+
+        $cover = "scale={$regionWidth}:{$regionHeight}:force_original_aspect_ratio=increase,crop={$regionWidth}:{$regionHeight}";
+        $stack = $vertical ? 'vstack' : 'hstack';
+        // Vertical: webcam on top, source clip on bottom. Horizontal: source clip on
+        // the left, webcam on the right.
+        $order = $vertical ? '[reaction][base]' : '[base][reaction]';
+
+        return [
+            [
+                "[0:v]{$cover}[base]",
+                "[1:v]{$cover}[reaction]",
+                "{$order}{$stack}[composited]",
+            ],
+            'composited',
+        ];
     }
 
     /**

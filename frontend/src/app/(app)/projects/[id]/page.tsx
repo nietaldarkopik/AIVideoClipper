@@ -2,6 +2,7 @@
 
 import { use, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import {
   Sparkles,
@@ -29,6 +30,7 @@ import { ProcessingStatus } from "@/components/projects/ProcessingStatus";
 import { ScheduledPublishing } from "@/components/projects/ScheduledPublishing";
 import { CandidateCard } from "@/components/projects/CandidateCard";
 import { GenerateClipsModal } from "@/components/projects/GenerateClipsModal";
+import { ReactionRecorderModal } from "@/components/reactions/ReactionRecorderModal";
 import { ClipCard } from "@/components/clips/ClipCard";
 import type { Clip, ClipCandidate, Paginated, Project } from "@/lib/types";
 
@@ -44,11 +46,13 @@ const ACTIVE_STATUSES = [
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const projectId = Number(id);
+  const router = useRouter();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [generateOpen, setGenerateOpen] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
+  const [reactingCandidate, setReactingCandidate] = useState<ClipCandidate | null>(null);
 
   const { data: projectRes, isLoading } = useApi<{ data: Project }>(`/projects/${projectId}`, {
     refreshInterval: (latest) =>
@@ -275,6 +279,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 candidate={candidate}
                 onPreview={() => handlePreview(candidate)}
                 onGenerate={() => handleGenerateOne(candidate.id)}
+                onReact={() => setReactingCandidate(candidate)}
                 generating={generatingId === candidate.id}
               />
             ))}
@@ -305,6 +310,18 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         projectId={projectId}
         candidateIds={selectedCandidate ? [selectedCandidate] : undefined}
       />
+
+      {reactingCandidate && (
+        <ReactionRecorderModal
+          open={!!reactingCandidate}
+          onClose={() => setReactingCandidate(null)}
+          startTime={reactingCandidate.start_time}
+          endTime={reactingCandidate.end_time}
+          sourceVideoUrl={project.video?.url ?? null}
+          submitUrl={`/clip-candidates/${reactingCandidate.id}/reaction`}
+          onSuccess={(clip) => router.push(`/clips/${clip.id}`)}
+        />
+      )}
     </div>
   );
 }

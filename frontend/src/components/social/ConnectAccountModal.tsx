@@ -8,25 +8,37 @@ import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
-import { PLATFORM_LABELS, PLATFORMS } from "@/components/social/platforms";
+import { PLATFORM_LABELS, PLATFORMS, REAL_OAUTH_PLATFORMS, CREDENTIAL_PLATFORMS } from "@/components/social/platforms";
+import type { SocialPlatform } from "@/lib/types";
 
-// Platforms with a real OAuth integration wired up on the backend — connecting
-// these redirects the browser to the platform's own consent screen instead of
-// showing the mock account-name form below. Add a platform here once its
-// SocialProvider stops extending AbstractMockSocialProvider.
-const REAL_OAUTH_PLATFORMS = new Set(["youtube", "facebook"]);
-
-// Platforms that connect with a real username/password instead of OAuth (browser
-// automation on the backend — see tools/instagram-automation). No redirect: the
-// existing mock "connect" endpoint is reused, just with different payload fields.
-const CREDENTIAL_PLATFORMS = new Set(["instagram"]);
-
-export function ConnectAccountModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [platform, setPlatform] = useState(PLATFORMS[0]);
+export function ConnectAccountModal({
+  open,
+  onClose,
+  initialPlatform,
+}: {
+  open: boolean;
+  onClose: () => void;
+  // Set when opened from a specific account's "Reconnect" button — pre-selects
+  // that platform instead of defaulting to the first one in the list.
+  initialPlatform?: SocialPlatform;
+}) {
+  const [platform, setPlatform] = useState(initialPlatform ?? PLATFORMS[0]);
   const [accountName, setAccountName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // Re-select the platform each time the modal opens for a specific account's
+  // "Reconnect" — done during render (not an effect) per React's "adjusting
+  // state when a prop changes" pattern, so it takes effect before this render
+  // paints instead of one tick later.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open && initialPlatform && initialPlatform !== platform) {
+      setPlatform(initialPlatform);
+    }
+  }
 
   const isRealOAuth = REAL_OAUTH_PLATFORMS.has(platform);
   const isCredential = CREDENTIAL_PLATFORMS.has(platform);

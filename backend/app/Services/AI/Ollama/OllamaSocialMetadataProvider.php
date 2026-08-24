@@ -3,12 +3,17 @@
 namespace App\Services\AI\Ollama;
 
 use App\Models\Clip;
+use App\Services\AI\Concerns\LogsAiRequests;
+use App\Services\AI\Concerns\ParsesJsonResponses;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 class OllamaSocialMetadataProvider implements SocialMetadataProvider
 {
+    use LogsAiRequests;
+    use ParsesJsonResponses;
+
     public function __construct(
         private readonly string $baseUrl,
         private readonly string $model,
@@ -26,6 +31,8 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
         );
 
         $platformList = implode(', ', $platforms);
+        $systemPrompt = $this->systemPrompt($platformList);
+        $span = $this->aiLogger()->start('social_metadata', 'ollama', $this->model, $systemPrompt . "\n\n" . $context);
 
         $response = Http::timeout($this->timeoutSeconds)
             ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
@@ -34,19 +41,22 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
                 'format' => 'json',
                 'options' => ['temperature' => 0.6],
                 'messages' => [
-                    ['role' => 'system', 'content' => $this->systemPrompt($platformList)],
+                    ['role' => 'system', 'content' => $systemPrompt],
                     ['role' => 'user', 'content' => $context],
                 ],
             ]);
 
         if ($response->failed()) {
-            throw new RuntimeException(
-                "Ollama social metadata generation failed ({$response->status()}): {$response->body()}. " .
-                "Is Ollama running at {$this->baseUrl} with model \"{$this->model}\" pulled?"
-            );
+            $message = "Ollama social metadata generation failed ({$response->status()}): {$response->body()}. " .
+                "Is Ollama running at {$this->baseUrl} with model \"{$this->model}\" pulled?";
+            $span->failure($message);
+
+            throw new RuntimeException($message);
         }
 
-        $parsed = json_decode($this->extractMessageContent($response->body()), true) ?? [];
+        $raw = $this->extractMessageContent($response->body());
+        $span->success($raw);
+        $parsed = $this->extractJsonObject($raw) ?? [];
         $result = [];
 
         foreach ($platforms as $platform) {

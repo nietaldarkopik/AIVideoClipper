@@ -1,0 +1,58 @@
+<?php
+
+namespace App\Services\Batch;
+
+use App\Jobs\ProcessVideoBatchJob;
+use App\Models\User;
+use App\Models\VideoBatch;
+use App\Models\VideoBatchItem;
+use App\Services\Social\AutoPublishScheduler;
+use Illuminate\Support\Collection;
+
+/**
+ * Creates a VideoBatch + its VideoBatchItem rows and kicks off the batch autobot
+ * pipeline (ProcessVideoBatchJob -> ProcessBatchItemJob -> AutoPublishScheduler).
+ * Extracted from VideoBatchController::store() so App\Services\Channel\ChannelWatchPoller
+ * can queue an auto-detected upload through the exact same path a manually-submitted
+ * batch uses, instead of duplicating the settings-array shape and item-creation loop.
+ */
+class VideoBatchFactory
+{
+    /**
+     * @param  array<int, string>  $urls
+     * @param  array{clip_mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool, publishing_profile_id?: ?int, publish_stagger_min_minutes?: int, publish_stagger_max_minutes?: int}  $settings
+     */
+    public function createFromUrls(User $user, array $urls, array $settings, ?string $name = null): VideoBatch
+    {
+        $urls = Collection::make($urls)->values();
+
+        $batch = $user->videoBatches()->create([
+            'name' => $name,
+            'status' => VideoBatch::STATUS_PENDING,
+            'settings' => [
+                'clip_mode' => $settings['clip_mode'] ?? 'top_5',
+                'template_id' => $settings['template_id'] ?? null,
+                'aspect_ratio' => $settings['aspect_ratio'] ?? '9:16',
+                'subtitle_language' => $settings['subtitle_language'] ?? 'en',
+                'subtitles_enabled' => $settings['subtitles_enabled'] ?? true,
+                'publishing_profile_id' => $settings['publishing_profile_id'] ?? null,
+                // Minutes between each clip's publish, per destination — see
+                // AutoPublishScheduler. Defaults match its own STAGGER_MIN/MAX_SECONDS.
+                'publish_stagger_min_minutes' => $settings['publish_stagger_min_minutes'] ?? AutoPublishScheduler::STAGGER_MIN_SECONDS / 60,
+                'publish_stagger_max_minutes' => $settings['publish_stagger_max_minutes'] ?? AutoPublishScheduler::STAGGER_MAX_SECONDS / 60,
+            ],
+            'total_items' => $urls->count(),
+        ]);
+
+        $urls->each(fn ($url, $index) => $batch->items()->create([
+            'position' => $index,
+            'source_url' => $url,
+            'status' => VideoBatchItem::STATUS_PENDING,
+        ]));
+
+        // Same dedicated queue as the manual-batch path — see VideoBatchController::store().
+        ProcessVideoBatchJob::dispatch($batch->id)->onQueue('batch-downloads');
+
+        return $batch;
+    }
+}

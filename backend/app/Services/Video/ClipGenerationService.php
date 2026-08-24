@@ -17,7 +17,7 @@ use Illuminate\Support\Collection;
 class ClipGenerationService
 {
     /**
-     * @param  array{candidate_ids?: array<int, int>, mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool}  $data
+     * @param  array{candidate_ids?: array<int, int>, mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool, webcam_path?: ?string, reaction_layout?: ?string}  $data
      * @return Collection<int, Clip>
      */
     public function selectAndCreateClips(Project $project, array $data): Collection
@@ -67,6 +67,8 @@ class ClipGenerationService
                 'aspect_ratio' => $data['aspect_ratio'] ?? $template?->aspect_ratio ?? '9:16',
                 'subtitle_language' => $data['subtitle_language'] ?? 'en',
                 'subtitles_enabled' => $data['subtitles_enabled'] ?? true,
+                'webcam_path' => $data['webcam_path'] ?? null,
+                'reaction_layout' => $data['reaction_layout'] ?? null,
                 'status' => Clip::STATUS_QUEUED,
             ]);
 

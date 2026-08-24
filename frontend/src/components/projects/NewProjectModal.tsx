@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
+import { createProjectFromUrl } from "@/lib/createProjectFromUrl";
 import { toast } from "@/store/toast";
 import type { Project } from "@/lib/types";
 
@@ -51,14 +52,6 @@ export function NewProjectModal({ open, onClose }: { open: boolean; onClose: () 
     return project.data;
   }
 
-  async function createProjectFromUrl(sourceUrl: string) {
-    const project = await api.post<{ data: Project }>("/projects", {
-      title: "Imported Video",
-    });
-    await api.post(`/projects/${project.data.id}/videos`, { url: sourceUrl });
-    return project.data;
-  }
-
   async function handleSubmit() {
     setSubmitting(true);
     try {
@@ -86,7 +79,7 @@ export function NewProjectModal({ open, onClose }: { open: boolean; onClose: () 
           return;
         }
         setProgressLabel("Starting import...");
-        const project = await createProjectFromUrl(url.trim());
+        const project = await createProjectFromUrl(url.trim(), "Imported Video");
         await mutate("/projects");
         await mutate("/dashboard");
         toast("Import started.", "success");

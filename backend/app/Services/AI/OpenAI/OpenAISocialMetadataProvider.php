@@ -3,12 +3,17 @@
 namespace App\Services\AI\OpenAI;
 
 use App\Models\Clip;
+use App\Services\AI\Concerns\LogsAiRequests;
+use App\Services\AI\Concerns\ParsesJsonResponses;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 class OpenAISocialMetadataProvider implements SocialMetadataProvider
 {
+    use LogsAiRequests;
+    use ParsesJsonResponses;
+
     public function __construct(
         private readonly string $apiKey,
         private readonly string $model = 'gpt-4o-mini',
@@ -29,6 +34,8 @@ class OpenAISocialMetadataProvider implements SocialMetadataProvider
         );
 
         $platformList = implode(', ', $platforms);
+        $systemPrompt = $this->systemPrompt($platformList);
+        $span = $this->aiLogger()->start('social_metadata', 'openai', $this->model, $systemPrompt . "\n\n" . $context);
 
         $response = Http::withToken($this->apiKey)
             ->timeout(60)
@@ -39,16 +46,20 @@ class OpenAISocialMetadataProvider implements SocialMetadataProvider
                 'response_format' => ['type' => 'json_object'],
                 'temperature' => 0.6,
                 'messages' => [
-                    ['role' => 'system', 'content' => $this->systemPrompt($platformList)],
+                    ['role' => 'system', 'content' => $systemPrompt],
                     ['role' => 'user', 'content' => $context],
                 ],
             ]);
 
         if ($response->failed()) {
+            $span->failure($response->body());
+
             throw new RuntimeException('OpenAI social metadata generation failed: ' . $response->body());
         }
 
-        $parsed = json_decode((string) $response->json('choices.0.message.content'), true) ?? [];
+        $raw = (string) $response->json('choices.0.message.content');
+        $span->success($raw);
+        $parsed = $this->extractJsonObject($raw) ?? [];
         $result = [];
 
         foreach ($platforms as $platform) {

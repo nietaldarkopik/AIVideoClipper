@@ -3,6 +3,7 @@
 namespace App\Services\AI\Claude;
 
 use App\Models\Transcript;
+use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\DTOs\ClipCandidateData;
 use App\Services\AI\DTOs\SceneMarker;
@@ -25,6 +26,8 @@ use RuntimeException;
  */
 class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
 {
+    use LogsAiRequests;
+
     private const TOOL_NAME = 'submit_clip_candidates';
 
     public function __construct(
@@ -67,6 +70,10 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
 
         $maxCandidates = min(8, max(3, (int) round($durationSeconds / 180)));
 
+        $systemPrompt = $this->systemPrompt($maxCandidates);
+        $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
+        $span = $this->aiLogger()->start('content_analysis', 'claude', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+
         $response = Http::withHeaders([
             'x-api-key' => $this->apiKey,
             'anthropic-version' => '2023-06-01',
@@ -77,18 +84,21 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
             ->post('https://api.anthropic.com/v1/messages', [
                 'model' => $this->model,
                 'max_tokens' => 8192,
-                'system' => $this->systemPrompt($maxCandidates),
+                'system' => $systemPrompt,
                 'messages' => [
-                    ['role' => 'user', 'content' => $this->userPrompt($transcriptText, $durationSeconds, $transcript->language)],
+                    ['role' => 'user', 'content' => $userPrompt],
                 ],
                 'tools' => [$this->toolDefinition()],
                 'tool_choice' => ['type' => 'tool', 'name' => self::TOOL_NAME],
             ]);
 
         if ($response->failed()) {
+            $span->failure($response->body());
+
             throw new RuntimeException('Claude analysis failed: ' . $response->body());
         }
 
+        $span->success(json_encode($response->json('content')));
         $toolUse = collect($response->json('content'))->firstWhere('type', 'tool_use');
         $candidates = $toolUse['input']['candidates'] ?? null;
 

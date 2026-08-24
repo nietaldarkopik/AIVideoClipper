@@ -22,7 +22,7 @@ class Clip extends Model
         'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'aspect_ratio',
         'crop_config', 'scenes', 'subtitle_language', 'subtitles_enabled', 'subtitle_config',
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
-        'output_size_bytes', 'rendered_at',
+        'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
     ];
 
     protected $casts = [

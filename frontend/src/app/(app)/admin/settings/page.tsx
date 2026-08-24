@@ -89,6 +89,7 @@ export default function AdminAISettingsPage() {
               <option value="ollama">Ollama (real, self-hosted, free)</option>
               <option value="claude">Claude (real, paid)</option>
               <option value="gemini">Gemini / Google AI Studio (real, paid)</option>
+              <option value="nine_router">9Router (real, self-hosted gateway)</option>
             </Select>
           </div>
         </div>
