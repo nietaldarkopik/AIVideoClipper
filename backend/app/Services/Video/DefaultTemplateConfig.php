@@ -20,9 +20,12 @@ class DefaultTemplateConfig
                 'stroke_width' => 3,
                 'background' => '#000000',
                 'background_opacity' => 0,
+                'background_padding' => 8,
                 'position' => 'bottom',
                 'uppercase' => false,
                 'bold' => true,
+                'italic' => false,
+                'animation' => 'none', // 'none' | 'fade' | 'pop'
                 'highlight_active_word' => true,
                 'words_per_line' => 3,
             ],

@@ -144,6 +144,88 @@ class FFmpegService
     }
 
     /**
+     * Detect silent gaps in [start, start+duration] of $sourcePath via ffmpeg's
+     * silencedetect filter, parsed off its stderr log (it has no structured output
+     * mode). -vn skips video decode entirely since only audio is analyzed here.
+     * Never throws — silencedetect's "success" is just reaching EOF, and a source
+     * with no silence at all is a completely normal result, not a failure.
+     *
+     * @return list<array{start: float, end: float}>  clip-relative
+     */
+    public function detectSilence(
+        string $sourcePath,
+        float $start,
+        float $duration,
+        float $noiseDb = -35,
+        float $minSilenceSeconds = 0.6
+    ): array {
+        $result = Process::timeout(300)->run([
+            $this->ffmpegBin, '-y',
+            '-ss', (string) $start, '-t', (string) $duration, '-i', $sourcePath,
+            '-vn', '-af', "silencedetect=noise={$noiseDb}dB:d={$minSilenceSeconds}",
+            '-f', 'null', '-',
+        ]);
+
+        $intervals = [];
+        $pendingStart = null;
+
+        foreach (explode("\n", $result->errorOutput()) as $line) {
+            if (preg_match('/silence_start:\s*(-?[\d.]+)/', $line, $m)) {
+                $pendingStart = max(0.0, (float) $m[1]);
+            } elseif ($pendingStart !== null && preg_match('/silence_end:\s*(-?[\d.]+)/', $line, $m)) {
+                $intervals[] = ['start' => $pendingStart, 'end' => min((float) $m[1], $duration)];
+                $pendingStart = null;
+            }
+        }
+
+        // A silence that runs right up to the end of the window never gets its own
+        // silence_end line (the input just ends).
+        if ($pendingStart !== null && $pendingStart < $duration) {
+            $intervals[] = ['start' => $pendingStart, 'end' => $duration];
+        }
+
+        return $intervals;
+    }
+
+    /**
+     * Cut $clipStart-relative $keepIntervals out of $sourcePath and concatenate
+     * them into a single silence-free file — a pre-pass ahead of renderClip() (see
+     * SilenceTrimmer). Uses the trim/concat filter pair rather than -ss/-t per
+     * segment so every kept piece comes from one decoded pass of the source.
+     *
+     * @param  list<array{start: float, end: float}>  $keepIntervals  clip-relative
+     */
+    public function extractWithoutSilence(string $sourcePath, string $outPath, float $clipStart, array $keepIntervals): void
+    {
+        $this->ensureDir($outPath);
+
+        $inputArgs = ['-i', $sourcePath];
+        $graph = [];
+        $labels = '';
+
+        foreach (array_values($keepIntervals) as $i => $seg) {
+            $absStart = $clipStart + $seg['start'];
+            $absEnd = $clipStart + $seg['end'];
+            $graph[] = "[0:v]trim=start={$absStart}:end={$absEnd},setpts=PTS-STARTPTS[v{$i}]";
+            $graph[] = "[0:a]atrim=start={$absStart}:end={$absEnd},asetpts=PTS-STARTPTS[a{$i}]";
+            $labels .= "[v{$i}][a{$i}]";
+        }
+
+        $n = count($keepIntervals);
+        $graph[] = "{$labels}concat=n={$n}:v=1:a=1[vout][aout]";
+
+        $outputArgs = [
+            // Re-encoded again by renderClip() right after, so favor quality over
+            // size here to limit how much this intermediate pass compounds loss.
+            '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '18',
+            '-c:a', 'aac', '-b:a', '192k',
+            $outPath,
+        ];
+
+        $this->runWithFilterScript($inputArgs, $graph, ['-map', '[vout]', '-map', '[aout]'], $outputArgs, 'remove silence', 1800);
+    }
+
+    /**
      * Render a clip: trim [start,end], apply a (possibly animated) crop to reach
      * the target aspect ratio/resolution, and optionally burn in an ASS subtitle file.
      *
@@ -164,20 +246,18 @@ class FFmpegService
         $this->ensureDir($outPath);
 
         $duration = max(0.1, $end - $start);
-        $filters = [];
 
-        $filters[] = $this->buildCropExpression($cropKeyframes, $duration);
-        $filters[] = "scale={$targetWidth}:{$targetHeight}";
+        [$graph, $videoLabel] = $this->buildCropSegments('0:v', $cropKeyframes, $duration, 'crop');
+        $graph[] = "[{$videoLabel}]scale={$targetWidth}:{$targetHeight}[scaled]";
+        $videoLabel = 'scaled';
 
         if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
             $escaped = $this->escapeFilterPath($subtitlesAssPath);
-            $filters[] = "ass='{$escaped}'";
+            $graph[] = "[{$videoLabel}]ass='{$escaped}'[captioned]";
+            $videoLabel = 'captioned';
         }
 
-        $videoFilter = implode(',', array_filter($filters));
-
-        $args = [
-            $this->ffmpegBin, '-y',
+        $inputArgs = [
             // -ss/-t must sit BEFORE their -i to bind to that input. Once a second
             // -i (the watermark) follows, a trailing -t here would instead bind to
             // THAT input — silently leaving this source clip untrimmed and reading
@@ -185,27 +265,33 @@ class FFmpegService
             '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
         ];
 
+        $outputArgs = [];
+
         if ($watermarkPath && file_exists($watermarkPath)) {
             $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
-            $args = array_merge($args, ['-i', $watermarkPath]);
-            $args = array_merge($args, [
-                '-filter_complex',
-                "[1:v]format=rgba,colorchannelmixer=aa={$opacity}[wm];[0:v]{$videoFilter}[base];[base][wm]overlay=W-w-24:24",
-                '-shortest',
-            ]);
-        } else {
-            $args = array_merge($args, ['-vf', $videoFilter]);
+            $inputArgs[] = '-i';
+            $inputArgs[] = $watermarkPath;
+            $graph[] = "[1:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
+            $graph[] = "[{$videoLabel}][wm]overlay=W-w-24:24[vout]";
+            $videoLabel = 'vout';
+            $outputArgs[] = '-shortest';
         }
 
-        $args = array_merge($args, [
+        $outputArgs = array_merge($outputArgs, [
             '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
             '-c:a', 'aac', '-b:a', '128k',
             '-movflags', '+faststart',
             $outPath,
         ]);
 
-        $result = Process::timeout(1800)->run($args);
-        $this->assertSuccess($result, 'render clip');
+        $this->runWithFilterScript(
+            $inputArgs,
+            $graph,
+            ['-map', "[{$videoLabel}]", '-map', '0:a?'],
+            $outputArgs,
+            'render clip',
+            1800
+        );
     }
 
     /**
@@ -248,8 +334,7 @@ class FFmpegService
             $outputLabel = 'captioned';
         }
 
-        $args = [
-            $this->ffmpegBin, '-y',
+        $inputArgs = [
             // -ss/-t must each sit immediately BEFORE their own -i — with two-plus
             // inputs, a trailing -t instead binds to the NEXT -i (see renderClip()).
             '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
@@ -258,7 +343,8 @@ class FFmpegService
 
         if ($watermarkPath && file_exists($watermarkPath)) {
             $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
-            $args = array_merge($args, ['-i', $watermarkPath]);
+            $inputArgs[] = '-i';
+            $inputArgs[] = $watermarkPath;
             $graph[] = "[2:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
             $graph[] = "[{$outputLabel}][wm]overlay=W-w-24:24[final]";
             $outputLabel = 'final';
@@ -266,10 +352,7 @@ class FFmpegService
 
         $graph[] = '[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=0[aout]';
 
-        $args = array_merge($args, [
-            '-filter_complex', implode(';', $graph),
-            '-map', "[{$outputLabel}]",
-            '-map', '[aout]',
+        $outputArgs = [
             // Both real video/audio inputs already share the same -t, but a watermark
             // PNG's single-frame stream has no real duration of its own and can
             // otherwise stretch the mux past the trimmed length (see renderClip()).
@@ -278,10 +361,16 @@ class FFmpegService
             '-c:a', 'aac', '-b:a', '128k',
             '-movflags', '+faststart',
             $outPath,
-        ]);
+        ];
 
-        $result = Process::timeout(1800)->run($args);
-        $this->assertSuccess($result, 'render reaction clip');
+        $this->runWithFilterScript(
+            $inputArgs,
+            $graph,
+            ['-map', "[{$outputLabel}]", '-map', '[aout]'],
+            $outputArgs,
+            'render reaction clip',
+            1800
+        );
     }
 
     /**
@@ -292,19 +381,17 @@ class FFmpegService
      */
     private function buildPipGraph(array $cropKeyframes, float $duration, int $targetWidth, int $targetHeight, bool $right, bool $bottom): array
     {
-        $baseFilter = $this->buildCropExpression($cropKeyframes, $duration) . ",scale={$targetWidth}:{$targetHeight}";
+        [$graph, $videoLabel] = $this->buildCropSegments('0:v', $cropKeyframes, $duration, 'crop');
+        $graph[] = "[{$videoLabel}]scale={$targetWidth}:{$targetHeight}[base]";
+
         $pipSize = (int) round($targetWidth * self::PIP_SIZE_RATIO);
         $x = $right ? 'W-w-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
         $y = $bottom ? 'H-h-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
 
-        return [
-            [
-                "[0:v]{$baseFilter}[base]",
-                "[1:v]scale={$pipSize}:{$pipSize}:force_original_aspect_ratio=increase,crop={$pipSize}:{$pipSize}[pip]",
-                "[base][pip]overlay={$x}:{$y}[composited]",
-            ],
-            'composited',
-        ];
+        $graph[] = "[1:v]scale={$pipSize}:{$pipSize}:force_original_aspect_ratio=increase,crop={$pipSize}:{$pipSize}[pip]";
+        $graph[] = "[base][pip]overlay={$x}:{$y}[composited]";
+
+        return [$graph, 'composited'];
     }
 
     /**
@@ -340,56 +427,106 @@ class FFmpegService
     }
 
     /**
-     * Build a per-frame ffmpeg crop expression from crop keyframes. With zero or one
-     * keyframe this is a static crop; with multiple, x/y linearly interpolate between
-     * consecutive keyframes (piecewise lerp via an `if()` chain) so the crop pans
-     * smoothly across each keyframe interval instead of jump-cutting at each one, and
-     * holds the final position after the last keyframe.
+     * Collapses any keyframes that land on the same (or an out-of-order) instant —
+     * silence-removal remapping (see SilenceTrimmer) can in principle produce this
+     * even though callers are expected to have already deduped — keeping the first.
+     * buildCropSegments() needs strictly increasing times since each interval's
+     * span becomes a trim() filter's start/end.
+     *
+     * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes
+     * @return array<int, array{time: float, x: float, y: float, width: float, height: float}>
      */
-    private function buildCropExpression(array $cropKeyframes, float $duration): string
+    private function dedupeCropKeyframes(array $cropKeyframes): array
     {
-        if (empty($cropKeyframes)) {
-            return 'crop=in_w:in_h';
+        $deduped = [];
+        $lastTime = null;
+
+        foreach ($cropKeyframes as $k) {
+            if ($lastTime !== null && (float) $k['time'] <= $lastTime) {
+                continue;
+            }
+            $deduped[] = $k;
+            $lastTime = (float) $k['time'];
         }
 
-        if (count($cropKeyframes) === 1) {
-            $k = $cropKeyframes[0];
-
-            return sprintf('crop=%d:%d:%d:%d', (int) $k['width'], (int) $k['height'], (int) $k['x'], (int) $k['y']);
-        }
-
-        $w = (int) $cropKeyframes[0]['width'];
-        $h = (int) $cropKeyframes[0]['height'];
-
-        // Commas inside the if(...) eval expressions must be escaped: ffmpeg's
-        // filtergraph tokenizer splits on unescaped commas to separate chained
-        // filters, even when they appear inside a function call's argument list.
-        $xExpr = str_replace(',', '\\,', $this->lerpExpression($cropKeyframes, 'x'));
-        $yExpr = str_replace(',', '\\,', $this->lerpExpression($cropKeyframes, 'y'));
-
-        return "crop={$w}:{$h}:{$xExpr}:{$yExpr}";
+        return $deduped;
     }
 
-    private function lerpExpression(array $keyframes, string $field): string
+    /**
+     * Build a filtergraph that pans the crop window across $cropKeyframes without
+     * ever evaluating one large per-frame expression against the whole clip. An
+     * earlier version built a single dynamic crop=... expression covering every
+     * keyframe — first as a nested if() chain, then (after that hit ffmpeg's eval
+     * parser recursion limit on a ~107s clip: "Missing ')' or too many args") as a
+     * flat sum of indicator*value terms. The flat sum still failed on the same
+     * clip, just later (config/eval time instead of parse time) — a left-
+     * associative chain of N terms builds an expression tree of depth O(N)
+     * regardless of whether the top-level operator is nested if()s or +, so it hits
+     * the same underlying evaluator stack limit either way. The only structural fix
+     * is to stop building one expression that scales with keyframe count at all:
+     * each interval is cut out with trim+setpts, cropped with its own trivial
+     * two-point lerp (O(1) regardless of total keyframe count, no branching or
+     * commas needed since trim already isolated exactly this interval), and the
+     * pieces are stitched back together with concat. Scales to any clip length or
+     * keyframe density.
+     *
+     * @param  string  $inputLabel  pad to crop, without brackets (e.g. '0:v')
+     * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  clip-relative
+     * @param  string  $labelPrefix  unique per call site sharing a filtergraph, so pad names never collide (e.g. 'crop' vs 'pipcrop')
+     * @return array{0: string[], 1: string}  [graph lines, output pad label (no brackets)]
+     */
+    private function buildCropSegments(string $inputLabel, array $cropKeyframes, float $duration, string $labelPrefix): array
     {
-        // Builds nested ifs, one per keyframe interval:
-        //   if(lt(t,k1.time), lerp(k0,k1,t), if(lt(t,k2.time), lerp(k1,k2,t), ... kLast.value))
-        // Each interval linearly interpolates between its two keyframes' values, so
-        // the crop pans smoothly instead of snapping at each keyframe. Past the final
-        // keyframe the position just holds. Keyframe times are strictly increasing
-        // (each one only exists because the tracked position changed), so every
-        // interval's time span is > 0 and the division below is always safe.
-        $expr = (string) end($keyframes)[$field];
-        for ($i = count($keyframes) - 1; $i > 0; $i--) {
-            $t0 = $keyframes[$i - 1]['time'];
-            $t1 = $keyframes[$i]['time'];
-            $v0 = $keyframes[$i - 1][$field];
-            $v1 = $keyframes[$i][$field];
-            $lerp = "({$v0}+({$v1}-{$v0})*(t-{$t0})/({$t1}-{$t0}))";
-            $expr = "if(lt(t,{$t1}),{$lerp},{$expr})";
+        $keyframes = $this->dedupeCropKeyframes($cropKeyframes);
+        $outLabel = "{$labelPrefix}out";
+
+        if (empty($keyframes)) {
+            return [["[{$inputLabel}]crop=in_w:in_h[{$outLabel}]"], $outLabel];
         }
 
-        return $expr;
+        if (count($keyframes) === 1) {
+            $k = $keyframes[0];
+            $expr = sprintf('crop=%d:%d:%d:%d', (int) $k['width'], (int) $k['height'], (int) $k['x'], (int) $k['y']);
+
+            return [["[{$inputLabel}]{$expr}[{$outLabel}]"], $outLabel];
+        }
+
+        $w = (int) $keyframes[0]['width'];
+        $h = (int) $keyframes[0]['height'];
+        $graph = [];
+        $segLabels = [];
+        $n = count($keyframes);
+
+        for ($i = 1; $i < $n; $i++) {
+            $t0 = $keyframes[$i - 1]['time'];
+            $t1 = $keyframes[$i]['time'];
+            $x0 = $keyframes[$i - 1]['x'];
+            $x1 = $keyframes[$i]['x'];
+            $y0 = $keyframes[$i - 1]['y'];
+            $y1 = $keyframes[$i]['y'];
+            // trim+setpts resets this segment's own timeline to start at 0, so "t"
+            // here already equals (original_t - t0) — a plain two-point lerp, no
+            // branching needed since trim already picked out exactly this interval.
+            $xExpr = "({$x0}+({$x1}-{$x0})*t/({$t1}-{$t0}))";
+            $yExpr = "({$y0}+({$y1}-{$y0})*t/({$t1}-{$t0}))";
+            $label = "{$labelPrefix}seg{$i}";
+            $graph[] = "[{$inputLabel}]trim=start={$t0}:end={$t1},setpts=PTS-STARTPTS,crop={$w}:{$h}:{$xExpr}:{$yExpr}[{$label}]";
+            $segLabels[] = "[{$label}]";
+        }
+
+        // Holds the final keyframe's position for anything after the last interval.
+        $lastTime = (float) end($keyframes)['time'];
+        if ($lastTime < $duration - 0.001) {
+            $lastX = (int) end($keyframes)['x'];
+            $lastY = (int) end($keyframes)['y'];
+            $label = "{$labelPrefix}segtail";
+            $graph[] = "[{$inputLabel}]trim=start={$lastTime}:end={$duration},setpts=PTS-STARTPTS,crop={$w}:{$h}:{$lastX}:{$lastY}[{$label}]";
+            $segLabels[] = "[{$label}]";
+        }
+
+        $graph[] = implode('', $segLabels) . 'concat=n=' . count($segLabels) . ":v=1:a=0[{$outLabel}]";
+
+        return [$graph, $outLabel];
     }
 
     private function escapeFilterPath(string $path): string
@@ -397,6 +534,37 @@ class FFmpegService
         $path = str_replace('\\', '/', $path);
 
         return str_replace(':', '\\:', $path);
+    }
+
+    /**
+     * Run ffmpeg with a filtergraph passed via -filter_complex_script (a temp file)
+     * instead of inline on the command line. A dynamic smart-crop expression grows
+     * with the clip's keyframe count and can reach several KB — well past the ~8191
+     * character line-length limit cmd.exe silently enforces on Windows, where
+     * Symfony's Process component routes array-form commands through cmd.exe. That
+     * failure mode is silent (non-zero exit, empty stdout/stderr) because the shell
+     * never launches ffmpeg at all, so keeping filtergraphs off the command line
+     * sidesteps the limit entirely rather than relying on expressions staying short.
+     */
+    private function runWithFilterScript(array $inputArgs, array $graphLines, array $mapArgs, array $outputArgs, string $action, int $timeout): void
+    {
+        $scriptPath = tempnam(sys_get_temp_dir(), 'ffgraph_');
+        file_put_contents($scriptPath, implode(";\n", $graphLines));
+
+        try {
+            $args = [
+                $this->ffmpegBin, '-y',
+                ...$inputArgs,
+                '-filter_complex_script', $scriptPath,
+                ...$mapArgs,
+                ...$outputArgs,
+            ];
+
+            $result = Process::timeout($timeout)->run($args);
+            $this->assertSuccess($result, $action);
+        } finally {
+            @unlink($scriptPath);
+        }
     }
 
     private function ensureDir(string $filePath): void

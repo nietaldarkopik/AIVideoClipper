@@ -13,9 +13,14 @@ desktop.ini
 .nova/
 .zed/
 
-# Env files anywhere in the repo
+# Env files anywhere in the repo. The last pattern catches what Windows Explorer
+# names a duplicate by default (e.g. ".env copy", ".env - Copy (2)") — an actual
+# leaked-secrets incident: a stray ".env copy" wasn't covered by ".env.*" (that
+# requires a dot, not a space, before the suffix) and got committed with real
+# credentials in it.
 .env
 .env.*
+.env*[Cc]opy*
 !.env.example
 
 # Logs

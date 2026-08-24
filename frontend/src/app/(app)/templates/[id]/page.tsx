@@ -15,6 +15,15 @@ import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { Template, TemplateConfig } from "@/lib/types";
 
+function hexToRgba(hex: string, opacity: number): string {
+  const clean = hex.replace("#", "");
+  const r = parseInt(clean.slice(0, 2), 16) || 0;
+  const g = parseInt(clean.slice(2, 4), 16) || 0;
+  const b = parseInt(clean.slice(4, 6), 16) || 0;
+
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, opacity))})`;
+}
+
 export default function TemplateDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const templateId = Number(id);
@@ -78,7 +87,8 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
     );
   }
 
-  const previewBg = caption.background && (caption.background_opacity ?? 0) > 0 ? caption.background : "transparent";
+  const backgroundEnabled = !!caption.background && (caption.background_opacity ?? 0) > 0;
+  const previewBg = backgroundEnabled ? hexToRgba(caption.background!, caption.background_opacity ?? 1) : "transparent";
 
   // Mirrors SubtitleService::toAss()'s auto-size formula exactly, so "Auto" in
   // the preview always matches what actually gets burned into the rendered
@@ -88,6 +98,15 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const effectiveFontSize = caption.font_size ?? autoFontSize;
   const PREVIEW_WIDTH_PX = 220;
   const previewScale = PREVIEW_WIDTH_PX / resolution.width;
+  const previewPadding = backgroundEnabled
+    ? Math.max(2, (caption.background_padding ?? 8) * previewScale)
+    : 0;
+  const previewAnimation =
+    caption.animation === "fade"
+      ? "captionPreviewFade 1.4s ease-in-out infinite"
+      : caption.animation === "pop"
+        ? "captionPreviewPop 1.4s ease-in-out infinite"
+        : undefined;
 
   return (
     <div className="space-y-6">
@@ -146,13 +165,22 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                   style={{
                     fontFamily: caption.font || "Arial",
                     color: caption.color || "#fff",
-                    WebkitTextStroke: `${Math.max(0.5, (caption.stroke_width ?? 3) * previewScale)}px ${caption.stroke_color || "#000"}`,
+                    // Matches SubtitleService::toAss(): a background box replaces the
+                    // glyph stroke in the real render (ASS can't draw both at once),
+                    // so the preview drops the stroke too once a box is enabled.
+                    WebkitTextStroke: backgroundEnabled
+                      ? "0px"
+                      : `${Math.max(0.5, (caption.stroke_width ?? 3) * previewScale)}px ${caption.stroke_color || "#000"}`,
                     fontWeight: caption.bold ? 800 : 500,
+                    fontStyle: caption.italic ? "italic" : "normal",
                     textTransform: caption.uppercase ? "uppercase" : "none",
                     background: previewBg,
-                    padding: previewBg !== "transparent" ? "4px 8px" : 0,
+                    padding: backgroundEnabled ? `${previewPadding}px ${previewPadding * 1.5}px` : 0,
+                    borderRadius: backgroundEnabled ? 2 : 0,
                     fontSize: effectiveFontSize * previewScale,
                     lineHeight: 1.3,
+                    display: "inline-block",
+                    animation: previewAnimation,
                   }}
                 >
                   This is the{" "}
@@ -166,6 +194,16 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 </div>
               )}
             </div>
+            <style>{`
+              @keyframes captionPreviewFade {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.15; }
+              }
+              @keyframes captionPreviewPop {
+                0%, 80%, 100% { transform: scale(1); }
+                90% { transform: scale(1.12); }
+              }
+            `}</style>
           </div>
         </div>
 
@@ -274,6 +312,59 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 </div>
               </div>
 
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <Label>Background</Label>
+                  <Input
+                    type="color"
+                    value={caption.background ?? "#000000"}
+                    onChange={(e) => setCaption({ ...caption, background: e.target.value })}
+                    className="h-10 p-1"
+                  />
+                </div>
+                <div>
+                  <Label>Background opacity ({Math.round((caption.background_opacity ?? 0) * 100)}%)</Label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={caption.background_opacity ?? 0}
+                    onChange={(e) => setCaption({ ...caption, background_opacity: Number(e.target.value) })}
+                    className="mt-2.5 w-full accent-accent"
+                  />
+                </div>
+                <div>
+                  <Label>Background padding</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={40}
+                    disabled={!backgroundEnabled}
+                    value={caption.background_padding ?? 8}
+                    onChange={(e) => setCaption({ ...caption, background_padding: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              {backgroundEnabled && (
+                <p className="-mt-2 text-[11px] text-muted">
+                  A background box replaces the text stroke in the rendered clip (ASS captions can only draw one or
+                  the other) — Stroke Color/width above are ignored while this is on.
+                </p>
+              )}
+
+              <div>
+                <Label>Animation</Label>
+                <Select
+                  value={caption.animation ?? "none"}
+                  onChange={(e) => setCaption({ ...caption, animation: e.target.value as "none" | "fade" | "pop" })}
+                >
+                  <option value="none">None</option>
+                  <option value="fade">Fade in/out</option>
+                  <option value="pop">Pop in</option>
+                </Select>
+              </div>
+
               <div className="flex flex-wrap gap-4">
                 <label className="flex items-center gap-2 text-sm">
                   <input
@@ -283,6 +374,15 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                     className="size-4 rounded accent-accent"
                   />
                   Highlight active word
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={!!caption.italic}
+                    onChange={(e) => setCaption({ ...caption, italic: e.target.checked })}
+                    className="size-4 rounded accent-accent"
+                  />
+                  Italic
                 </label>
                 <label className="flex items-center gap-2 text-sm">
                   <input

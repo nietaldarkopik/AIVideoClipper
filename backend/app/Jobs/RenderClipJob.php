@@ -14,6 +14,7 @@ use App\Services\Social\AutoPublishScheduler;
 use App\Services\Video\AspectRatio;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
+use App\Services\Video\SilenceTrimmer;
 use App\Services\Video\SubtitleService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -39,6 +40,7 @@ class RenderClipJob implements ShouldQueue
         SubtitleService $subtitleService,
         ReframingProvider $reframing,
         AutoPublishScheduler $publishScheduler,
+        SilenceTrimmer $silenceTrimmer,
     ): void {
         $clip = Clip::with(['video', 'templateVersion'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
@@ -62,6 +64,29 @@ class RenderClipJob implements ShouldQueue
 
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
+            $clipStart = (float) $clip->start_time;
+            $clipEnd = (float) $clip->end_time;
+            $clipDuration = max(0.1, $clipEnd - $clipStart);
+
+            // Reaction clips mix the source's audio with a separately-recorded
+            // webcam track (renderReactionClip) that isn't silence-trimmed itself —
+            // cutting gaps out of the source alone would drift it out of sync with
+            // that untouched webcam recording, so silence removal only applies to
+            // plain (non-reaction) clips.
+            $keepIntervals = [['start' => 0.0, 'end' => $clipDuration]];
+            if (! $clip->webcam_path) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(10, 'Detecting silence...');
+                $silences = $ffmpeg->detectSilence(
+                    $sourcePath,
+                    $clipStart,
+                    $clipDuration,
+                    SilenceTrimmer::NOISE_THRESHOLD_DB,
+                    SilenceTrimmer::MIN_SILENCE_SECONDS
+                );
+                $keepIntervals = $silenceTrimmer->computeKeepIntervals($silences, $clipDuration);
+            }
+            $hasSilenceCuts = $silenceTrimmer->hasCuts($keepIntervals, $clipDuration);
 
             // Split-screen reaction layouts only give the source clip half the frame,
             // which ReframingProvider::detectCropKeyframes() can't target — it only
@@ -76,14 +101,35 @@ class RenderClipJob implements ShouldQueue
                 $processingJob->markProgress(15, 'Calculating smart crop...');
                 $keyframes = $reframing->detectCropKeyframes(
                     $sourcePath,
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $clipStart,
+                    $clipEnd,
                     (int) $video->width,
                     (int) $video->height,
                     $clip->aspect_ratio
                 );
                 $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
+                if ($hasSilenceCuts) {
+                    $keyframeArrays = $silenceTrimmer->remapKeyframes($keyframeArrays, $keepIntervals);
+                }
                 $clip->update(['crop_config' => ['mode' => 'smart', 'keyframes' => $keyframeArrays]]);
+            }
+
+            // Cut the detected silent gaps out of the source now that both the crop
+            // keyframes (above) and, shortly, the caption words are computed against
+            // — and then remapped off of — the original timeline. Everything past
+            // this point renders against the shortened, silence-free file.
+            $renderSourcePath = $sourcePath;
+            $renderClipStart = $clipStart;
+            $renderClipEnd = $clipEnd;
+            $noSilenceRelative = null;
+            if ($hasSilenceCuts) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(25, 'Removing silence...');
+                $noSilenceRelative = "clips/{$clip->id}/no_silence.mp4";
+                $ffmpeg->extractWithoutSilence($sourcePath, $disk->path($noSilenceRelative), $clipStart, $keepIntervals);
+                $renderSourcePath = $disk->path($noSilenceRelative);
+                $renderClipStart = 0.0;
+                $renderClipEnd = $silenceTrimmer->totalDuration($keepIntervals);
             }
 
             $assPath = null;
@@ -91,10 +137,19 @@ class RenderClipJob implements ShouldQueue
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(35, 'Generating captions...');
 
+                $words = $video->transcript->words ?? [];
+                $captionClipStart = $clipStart;
+                $captionClipEnd = $clipEnd;
+                if ($hasSilenceCuts) {
+                    $words = $silenceTrimmer->remapWords($words, $clipStart, $clipEnd, $keepIntervals);
+                    $captionClipStart = 0.0;
+                    $captionClipEnd = $renderClipEnd;
+                }
+
                 $segments = $subtitleService->buildClipSegments(
-                    $video->transcript->words ?? [],
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $words,
+                    $captionClipStart,
+                    $captionClipEnd,
                     (int) ($captionConfig['words_per_line'] ?? 3)
                 );
 
@@ -127,11 +182,11 @@ class RenderClipJob implements ShouldQueue
             $outputRelative = "clips/{$clip->id}/output.mp4";
             if ($clip->webcam_path) {
                 $ffmpeg->renderReactionClip(
-                    $sourcePath,
+                    $renderSourcePath,
                     $disk->path($clip->webcam_path),
                     $disk->path($outputRelative),
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $renderClipStart,
+                    $renderClipEnd,
                     $targetWidth,
                     $targetHeight,
                     $clip->reaction_layout,
@@ -142,10 +197,10 @@ class RenderClipJob implements ShouldQueue
                 );
             } else {
                 $ffmpeg->renderClip(
-                    $sourcePath,
+                    $renderSourcePath,
                     $disk->path($outputRelative),
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $renderClipStart,
+                    $renderClipEnd,
                     $targetWidth,
                     $targetHeight,
                     $keyframeArrays,
@@ -153,6 +208,10 @@ class RenderClipJob implements ShouldQueue
                     $watermarkPath,
                     $watermarkOpacity,
                 );
+            }
+
+            if ($noSilenceRelative) {
+                $disk->delete($noSilenceRelative);
             }
 
             $this->abortIfCancelled($processingJob);

@@ -89,14 +89,15 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
     }
   }
 
+  // Regenerate re-renders with whatever's already saved on the clip — it doesn't
+  // know about the settings form below, so if it called a bare "regenerate"
+  // endpoint, a pending template/aspect-ratio/etc. change picked in the form would
+  // silently be discarded (the render wouldn't change, and the form would appear
+  // to "revert" next time it reloaded from the server's still-unchanged value).
+  // Routing it through the same save flow as the form's own button means either
+  // button always applies whatever's currently selected.
   async function handleRegenerate() {
-    try {
-      await api.post(`/clips/${clipId}/regenerate`);
-      await mutate(clipKey);
-      toast("Re-render queued.", "success");
-    } catch (err) {
-      toast(err instanceof ApiError ? err.message : "Failed to regenerate.", "danger");
-    }
+    await handleSave();
   }
 
   async function handleDuplicate() {
@@ -155,7 +156,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
               <VideoIcon className="size-3.5" />
               React
             </Button>
-            <Button variant="outline" size="sm" onClick={handleRegenerate}>
+            <Button variant="outline" size="sm" onClick={handleRegenerate} loading={saving}>
               <RefreshCw className="size-3.5" />
               Regenerate
             </Button>

@@ -26,19 +26,33 @@ class SrtTranscriptionBuilder
         foreach ($segments as $seg) {
             $fullTextParts[] = $seg['text'];
 
-            // Source captions are segment-level only; interpolate even word spacing
-            // within each segment so word-by-word caption highlighting still works.
+            // Source captions are segment-level only; distribute each word's slice
+            // of the segment's duration by character length rather than splitting it
+            // evenly. Equal division puts a 2-letter word ("di", "ke") on screen for
+            // exactly as long as an 8-letter one, which — compounded over a whole
+            // segment — visibly drifts the highlighted word away from what's
+            // actually being said at that instant, then snaps back in sync at the
+            // next segment boundary (real cue timing resets there). Weighting by
+            // length is still an approximation, not real forced alignment, but it
+            // tracks natural pacing far better than a flat split. +2 per word is a
+            // floor so very short words (which are spoken with some minimum
+            // duration regardless of letter count) don't get an unreadably thin
+            // sliver of time.
             $wordList = preg_split('/\s+/', $seg['text']);
             $wordCount = max(count($wordList), 1);
-            $perWord = ($seg['end'] - $seg['start']) / $wordCount;
+            $segmentDuration = $seg['end'] - $seg['start'];
+            $weights = array_map(fn (string $w) => mb_strlen($w) + 2, $wordList);
+            $totalWeight = array_sum($weights) ?: $wordCount;
+            $cursor = $seg['start'];
             foreach ($wordList as $i => $word) {
-                $wStart = $seg['start'] + $i * $perWord;
+                $wordDuration = ($weights[$i] / $totalWeight) * $segmentDuration;
                 $words[] = [
                     'word' => $word,
-                    'start' => round($wStart, 2),
-                    'end' => round($wStart + $perWord, 2),
+                    'start' => round($cursor, 2),
+                    'end' => round($cursor + $wordDuration, 2),
                     'speaker' => 'A',
                 ];
+                $cursor += $wordDuration;
             }
         }
 

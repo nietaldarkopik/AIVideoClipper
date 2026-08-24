@@ -148,9 +148,12 @@ export interface TemplateConfig {
     stroke_width?: number;
     background?: string;
     background_opacity?: number;
+    background_padding?: number;
     position?: "top" | "center" | "bottom";
     uppercase?: boolean;
     bold?: boolean;
+    italic?: boolean;
+    animation?: "none" | "fade" | "pop";
     highlight_active_word?: boolean;
     words_per_line?: number;
   };
