@@ -9,6 +9,7 @@ use App\Models\PublishingProfile;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 
 /**
@@ -31,6 +32,17 @@ class AutoPublishScheduler
 
     public const STAGGER_MAX_SECONDS = 3600;
 
+    // Platforms flag rapid-fire posting from one account as spammy/bot-like — this
+    // caps how many posts AutoPublishScheduler will ever queue onto a single social
+    // account for a single calendar day, regardless of how many clips a video (or a
+    // whole batch of videos) produces. Anything past the cap rolls forward to the
+    // next day instead of being dropped — see nextAvailableSlot().
+    public const MAX_POSTS_PER_DAY_PER_ACCOUNT = 5;
+
+    // Clock hour overflow posts land on when they roll onto a fresh day, so a
+    // rollover doesn't post at whatever odd hour the cap happened to be hit.
+    private const OVERFLOW_DAY_START_HOUR = 9;
+
     /**
      * @return int number of posts newly scheduled by this call
      */
@@ -39,6 +51,7 @@ class AutoPublishScheduler
         ?int $publishingProfileId = null,
         ?int $staggerMinSeconds = null,
         ?int $staggerMaxSeconds = null,
+        ?int $maxPostsPerDayPerAccount = null,
     ): int {
         $clips = Clip::where('project_id', $project->id)->where('status', Clip::STATUS_COMPLETED)->get();
         $accounts = $this->resolvePublishTargets($project->user, $publishingProfileId);
@@ -52,15 +65,22 @@ class AutoPublishScheduler
         // random_int() throws if min > max — a batch/channel with a misconfigured
         // (or since-changed) min > max shouldn't ever crash publishing over it.
         $staggerMaxSeconds = max($staggerMinSeconds, $staggerMaxSeconds);
+        // Guaranteed >= 1: a misconfigured 0 (or negative) would make
+        // nextAvailableSlot()'s day-rollover loop spin forever, since a brand new
+        // day always starts at a claimed count of 0.
+        $maxPostsPerDayPerAccount = max(1, $maxPostsPerDayPerAccount ?? self::MAX_POSTS_PER_DAY_PER_ACCOUNT);
 
         $scheduledCount = 0;
-        $scheduledAt = now();
+        // Each account gets its own cursor (not one shared $scheduledAt for every
+        // account, like before this cap existed) — accounts can already be sitting
+        // at a different point in their own daily cap from an earlier
+        // video/batch run, so they can't share a single timeline.
+        $cursors = [];
+        foreach ($accounts as $account) {
+            $cursors[$account->id] = now();
+        }
 
-        foreach ($clips as $clipIndex => $clip) {
-            if ($clipIndex > 0) {
-                $scheduledAt = $scheduledAt->clone()->addSeconds(random_int($staggerMinSeconds, $staggerMaxSeconds));
-            }
-
+        foreach ($clips as $clip) {
             foreach ($accounts as $account) {
                 $post = SocialPost::firstOrCreate(
                     ['clip_id' => $clip->id, 'social_account_id' => $account->id],
@@ -77,13 +97,43 @@ class AutoPublishScheduler
                     continue;
                 }
 
-                $post->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $scheduledAt]);
-                PublishClipJob::dispatch($post->id)->delay($scheduledAt);
+                $slot = $this->nextAvailableSlot($account, $cursors[$account->id], $maxPostsPerDayPerAccount);
+
+                $post->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $slot]);
+                PublishClipJob::dispatch($post->id)->delay($slot);
                 $scheduledCount++;
+
+                $cursors[$account->id] = $slot->clone()->addSeconds(random_int($staggerMinSeconds, $staggerMaxSeconds));
             }
         }
 
         return $scheduledCount;
+    }
+
+    /**
+     * Walks $notBefore forward, day by day, until it lands on a calendar day where
+     * $account hasn't already claimed $maxPerDay slots — counting every post that
+     * actually occupies a slot (scheduled, in-flight, published, or even failed —
+     * a failed attempt still hit the platform around that time) but not ones that
+     * never got that far (still 'ready') or were explicitly freed ('cancelled').
+     */
+    private function nextAvailableSlot(SocialAccount $account, Carbon $notBefore, int $maxPerDay): Carbon
+    {
+        $slot = $notBefore->clone();
+
+        while ($this->claimedSlotsOnDay($account, $slot) >= $maxPerDay) {
+            $slot = $slot->clone()->startOfDay()->addDay()->addHours(self::OVERFLOW_DAY_START_HOUR);
+        }
+
+        return $slot;
+    }
+
+    private function claimedSlotsOnDay(SocialAccount $account, Carbon $day): int
+    {
+        return SocialPost::where('social_account_id', $account->id)
+            ->whereNotIn('status', [SocialPost::STATUS_READY, SocialPost::STATUS_CANCELLED])
+            ->whereDate('scheduled_at', $day->toDateString())
+            ->count();
     }
 
     /**

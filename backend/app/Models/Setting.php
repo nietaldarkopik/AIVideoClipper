@@ -28,6 +28,8 @@ class Setting extends Model
             'ai_model' => 'mock',
             'transcript_model' => config('services.ai.transcription_provider', 'mock'),
             'clip_scoring_model' => config('services.ai.analysis_provider', 'mock'),
+            'reaction_script_model' => config('services.ai.reaction_script_provider', 'mock'),
+            'tts_model' => config('services.ai.tts_provider', 'mock'),
             'default_clip_duration' => (int) config('services.ai.default_clip_duration', 30),
             'default_template_id' => null,
             'max_clips_per_video' => (int) config('services.ai.max_clips_per_video', 10),

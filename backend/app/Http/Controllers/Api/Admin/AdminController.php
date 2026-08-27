@@ -89,8 +89,10 @@ class AdminController extends Controller
     public function updateSettings(Request $request)
     {
         $data = $request->validate([
-            'transcript_model' => ['sometimes', 'string', 'in:mock,openai,whisper_engine'],
+            'transcript_model' => ['sometimes', 'string', 'in:mock,openai,whisper_engine,nine_router'],
             'clip_scoring_model' => ['sometimes', 'string', 'in:mock,openai,ollama,claude,gemini,nine_router'],
+            'reaction_script_model' => ['sometimes', 'string', 'in:mock,openai,ollama,gemini,nine_router'],
+            'tts_model' => ['sometimes', 'string', 'in:mock,openai,nine_router'],
             'default_clip_duration' => ['sometimes', 'integer', 'min:5', 'max:180'],
             'default_template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
             'max_clips_per_video' => ['sometimes', 'integer', 'min:1', 'max:50'],

@@ -6,7 +6,10 @@ use App\Models\Clip;
 use App\Models\ClipCandidate;
 use App\Models\Project;
 use App\Models\Template;
+use App\Services\AI\Contracts\ReactionScriptProvider;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Turns selected AI clip candidates into Clip rows, ready to be rendered.
@@ -16,6 +19,11 @@ use Illuminate\Support\Collection;
  */
 class ClipGenerationService
 {
+    public function __construct(
+        private readonly ReactionScriptProvider $reactionScripts,
+    ) {
+    }
+
     /**
      * @param  array{candidate_ids?: array<int, int>, mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool, webcam_path?: ?string, reaction_layout?: ?string}  $data
      * @return Collection<int, Clip>
@@ -74,9 +82,40 @@ class ClipGenerationService
 
             $candidate->update(['status' => 'generated']);
 
+            $this->attachReactionScript($clip);
+
             $clips->push($clip);
         }
 
         return $clips;
+    }
+
+    /**
+     * Auto-fills the AI reaction intro (see ReactionScriptProvider/RenderClipJob)
+     * right when a clip is created, so the clip editor never needs a manual
+     * "Generate" click for the common case — only TTS narration stays lazy
+     * (synthesized on first render, see RenderClipJob::composeIntroOutro()) since
+     * that costs a real API call per clip and shouldn't block clip creation for a
+     * whole batch. Never fails clip creation itself: a transient AI error here
+     * just leaves reaction_script empty, same as any pre-this-feature clip — the
+     * "Generate Reaction Intro" button in the editor still covers that case.
+     */
+    private function attachReactionScript(Clip $clip): void
+    {
+        try {
+            $result = $this->reactionScripts->generateReactionScript($clip->load(['clipCandidate', 'video.transcript']));
+
+            $clip->update([
+                'reaction_script' => $result->text,
+                'reaction_tone' => $result->tone,
+                'intro_enabled' => true,
+                'outro_enabled' => true,
+            ]);
+        } catch (Throwable $e) {
+            Log::warning('Reaction script auto-generation failed, leaving clip without one', [
+                'clip_id' => $clip->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 }

@@ -13,7 +13,8 @@ import { Card } from "@/components/ui/Card";
 import { Input, Label, Select } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
-import type { Template, TemplateConfig } from "@/lib/types";
+import { LayerEditor } from "@/components/layers/LayerEditor";
+import type { Template, TemplateConfig, TemplateLayer, VideoRegion } from "@/lib/types";
 
 function hexToRgba(hex: string, opacity: number): string {
   const clean = hex.replace("#", "");
@@ -37,6 +38,9 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const [caption, setCaption] = useState<NonNullable<TemplateConfig["caption"]>>({});
   const [watermarkOpacity, setWatermarkOpacity] = useState(0.8);
   const [progressBarEnabled, setProgressBarEnabled] = useState(false);
+  const [layers, setLayers] = useState<TemplateLayer[]>([]);
+  const [videoRegion, setVideoRegion] = useState<VideoRegion | null>(null);
+  const [canvasBackgroundColor, setCanvasBackgroundColor] = useState("#000000");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -45,6 +49,10 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
       setCaption(cfg.caption ?? {});
       setWatermarkOpacity(cfg.branding?.watermark_opacity ?? 0.8);
       setProgressBarEnabled(!!cfg.progress_bar?.enabled);
+      setLayers(cfg.layers ?? []);
+      const region = cfg.video_region;
+      setVideoRegion(region ? { top: region.y, height: region.height } : null);
+      setCanvasBackgroundColor(cfg.canvas_background_color ?? "#000000");
     }
   }, [template]);
 
@@ -53,9 +61,20 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
     try {
       await api.patch(`/admin/templates/${templateId}`, {
         config: {
+          // Bumping to version 2 only affects the NEW version this save creates —
+          // clips already pinned to an earlier template_version_id (version 1 or
+          // below) are untouched, and a v2 config with an empty layers array
+          // renders identically to v1 (see LayerCompositionService/RenderClipJob).
+          version: 2,
           caption,
           branding: { watermark_opacity: watermarkOpacity },
           progress_bar: progressBarEnabled ? { enabled: true, color: caption.highlight_color ?? "#7c5cff" } : null,
+          layers,
+          // The editor only exposes a full-width vertical band (x/width always
+          // 0/1) — see VideoRegion — expanded here to the general shape
+          // FFmpegService::renderClip() reads.
+          video_region: videoRegion ? { x: 0, y: videoRegion.top, width: 1, height: videoRegion.height } : null,
+          canvas_background_color: canvasBackgroundColor,
         },
       });
       await mutate(key);
@@ -427,6 +446,87 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
               </div>
             </fieldset>
             {!isAdmin && <p className="mt-4 text-xs text-muted">Only admins can edit templates.</p>}
+          </Card>
+
+          <Card className="p-5">
+            <h3 className="mb-1 text-sm font-semibold">Video Layout</h3>
+            <p className="mb-4 text-xs text-muted">
+              By default the video fills the whole frame. Switch to a custom area to shrink it into a band and build
+              color bars (via Layers below, using a &quot;Color bar&quot; layer) above/below it — the &quot;news
+              compilation&quot; look, headline bar + inset video + branding bar.
+            </p>
+            <div className="mb-4 flex items-center gap-2 rounded-lg bg-surface-elevated p-0.5 w-fit">
+              <button
+                type="button"
+                disabled={!isAdmin}
+                onClick={() => setVideoRegion(null)}
+                className={
+                  "rounded-md px-2.5 py-1 text-xs cursor-pointer disabled:cursor-not-allowed " +
+                  (videoRegion === null ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                }
+              >
+                Full-bleed video (default)
+              </button>
+              <button
+                type="button"
+                disabled={!isAdmin}
+                onClick={() => setVideoRegion(videoRegion ?? { top: 0.15, height: 0.65 })}
+                className={
+                  "rounded-md px-2.5 py-1 text-xs cursor-pointer disabled:cursor-not-allowed " +
+                  (videoRegion !== null ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                }
+              >
+                Custom video area
+              </button>
+            </div>
+            {videoRegion && (
+              <fieldset disabled={!isAdmin} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label>Video area top ({Math.round(videoRegion.top * 100)}%)</Label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.9}
+                      step={0.01}
+                      value={videoRegion.top}
+                      onChange={(e) => setVideoRegion({ ...videoRegion, top: Number(e.target.value) })}
+                      className="mt-2.5 w-full accent-accent"
+                    />
+                  </div>
+                  <div>
+                    <Label>Video area height ({Math.round(videoRegion.height * 100)}%)</Label>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={1 - videoRegion.top}
+                      step={0.01}
+                      value={videoRegion.height}
+                      onChange={(e) => setVideoRegion({ ...videoRegion, height: Number(e.target.value) })}
+                      className="mt-2.5 w-full accent-accent"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <Label>Canvas background color (shows behind the inset video)</Label>
+                  <Input
+                    type="color"
+                    className="h-10 w-24 p-1"
+                    value={canvasBackgroundColor}
+                    onChange={(e) => setCanvasBackgroundColor(e.target.value)}
+                  />
+                </div>
+              </fieldset>
+            )}
+          </Card>
+
+          <Card className="p-5">
+            <h3 className="mb-1 text-sm font-semibold">Layers</h3>
+            <p className="mb-4 text-xs text-muted">
+              Text, logo, background-audio and progress-bar overlays. Clips using this template can override any
+              layer individually in the clip editor.
+            </p>
+            <LayerEditor layers={layers} onChange={setLayers} disabled={!isAdmin} />
           </Card>
 
           {template.versions && template.versions.length > 0 && (

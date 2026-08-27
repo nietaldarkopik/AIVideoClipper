@@ -24,6 +24,13 @@ class FFmpegService
         // encode time/load without touching visual quality, just a somewhat larger
         // output file. See config('services.media.ffmpeg_preset').
         private readonly string $x264Preset = 'superfast',
+        private readonly LayerCompositionService $layerService = new LayerCompositionService(),
+        // Same font-file fallback as LayerCompositionService (see its constructor
+        // docblock and config('services.media.default_font_file')) — used by
+        // renderCoverSegment()'s own drawtext call, which sits outside the layer
+        // pipeline so it needs its own copy of this rather than reaching into
+        // $layerService for it.
+        private readonly ?string $defaultFontFile = null,
     ) {
     }
 
@@ -230,6 +237,9 @@ class FFmpegService
      * the target aspect ratio/resolution, and optionally burn in an ASS subtitle file.
      *
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  relative to clip start
+     * @param  array<int, array<string, mixed>>  $layers  override-merged template layers (text/image/progress_bar/audio/rect), see LayerCompositionService
+     * @param  (callable(string): string)|null  $resolveLayerPath  resolves a layer's stored relative path to an absolute path; required if $layers references any image/audio layer
+     * @param  ?array{x: float, y: float, width: float, height: float}  $videoRegion  null (default, every template before this feature) fills the whole canvas exactly as before — a smaller region insets the video into that box instead, with $canvasBackgroundColor filling the rest, so template layers (typically a 'rect' + 'text' pair) can build bars around it. Smart-pan crop keyframes and subtitle burn-in are computed against the full canvas either way — see the docblock at the call site inside this method for why.
      */
     public function renderClip(
         string $sourceVideoPath,
@@ -242,6 +252,10 @@ class FFmpegService
         ?string $subtitlesAssPath = null,
         ?string $watermarkPath = null,
         float $watermarkOpacity = 0.8,
+        array $layers = [],
+        ?callable $resolveLayerPath = null,
+        ?array $videoRegion = null,
+        string $canvasBackgroundColor = '#000000',
     ): void {
         $this->ensureDir($outPath);
 
@@ -257,6 +271,34 @@ class FFmpegService
             $videoLabel = 'captioned';
         }
 
+        // Inset the video into a sub-region of the canvas instead of leaving it
+        // full-bleed — smart-pan crop and caption burn-in above are deliberately
+        // left targeting the FULL canvas (unchanged): the region fit below is a
+        // cover-crop (scale increase + crop, same idiom as renderCoverSegment()'s
+        // background and buildSplitGraph()'s halves) of that already-correctly-
+        // framed, already-captioned result, so captions move/scale with the video
+        // through this step rather than needing their own separate repositioning.
+        if ($videoRegion) {
+            // Merged against full-frame defaults so a partially-specified region
+            // in a template's user-editable config (e.g. only {height} given)
+            // doesn't throw on a missing array key or silently zero out a
+            // dimension — same defensiveness as isFullFrameRegion() below.
+            $videoRegion = array_merge(['x' => 0.0, 'y' => 0.0, 'width' => 1.0, 'height' => 1.0], $videoRegion);
+        }
+
+        if ($videoRegion && ! $this->isFullFrameRegion($videoRegion)) {
+            $regionW = max(2, (int) round($targetWidth * $videoRegion['width']));
+            $regionH = max(2, (int) round($targetHeight * $videoRegion['height']));
+            $regionX = (int) round($targetWidth * $videoRegion['x']);
+            $regionY = (int) round($targetHeight * $videoRegion['y']);
+            $bg = $this->normalizeHexColor($canvasBackgroundColor);
+
+            $graph[] = "[{$videoLabel}]scale={$regionW}:{$regionH}:force_original_aspect_ratio=increase,crop={$regionW}:{$regionH}[inset]";
+            $graph[] = "color=c={$bg}:s={$targetWidth}x{$targetHeight}:d={$duration}[canvas]";
+            $graph[] = "[canvas][inset]overlay={$regionX}:{$regionY}[regioncomposited]";
+            $videoLabel = 'regioncomposited';
+        }
+
         $inputArgs = [
             // -ss/-t must sit BEFORE their -i to bind to that input. Once a second
             // -i (the watermark) follows, a trailing -t here would instead bind to
@@ -265,16 +307,49 @@ class FFmpegService
             '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
         ];
 
+        // Template layers (text/logo/progress-bar/background-audio) render between
+        // the caption burn-in above and the watermark overlay below — captions stay
+        // implicitly at the bottom of the stack, watermark implicitly at the top, in
+        // this pass (see LayerCompositionService docblock).
+        $audioLabels = [];
+        $nextInputIndex = 1;
+        $layerTempFiles = [];
+        if (! empty($layers)) {
+            $built = $this->layerService->buildGraph(
+                $layers,
+                $videoLabel,
+                $targetWidth,
+                $targetHeight,
+                $duration,
+                $resolveLayerPath ?? fn (string $p) => $p,
+                $nextInputIndex,
+            );
+            $graph = array_merge($graph, $built['graph']);
+            $inputArgs = array_merge($inputArgs, $built['inputArgs']);
+            $videoLabel = $built['videoLabel'];
+            $audioLabels = $built['audioLabels'];
+            $nextInputIndex += $built['inputCount'];
+            $layerTempFiles = $built['tempFiles'];
+        }
+
         $outputArgs = [];
 
         if ($watermarkPath && file_exists($watermarkPath)) {
             $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
+            $watermarkIndex = $nextInputIndex;
             $inputArgs[] = '-i';
             $inputArgs[] = $watermarkPath;
-            $graph[] = "[1:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
+            $graph[] = "[{$watermarkIndex}:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
             $graph[] = "[{$videoLabel}][wm]overlay=W-w-24:24[vout]";
             $videoLabel = 'vout';
             $outputArgs[] = '-shortest';
+        }
+
+        $audioMapLabel = '0:a?';
+        if (! empty($audioLabels)) {
+            $mixInputs = array_merge(['[0:a]'], $audioLabels);
+            $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ':duration=first:dropout_transition=0[aout]';
+            $audioMapLabel = '[aout]';
         }
 
         $outputArgs = array_merge($outputArgs, [
@@ -284,14 +359,18 @@ class FFmpegService
             $outPath,
         ]);
 
-        $this->runWithFilterScript(
-            $inputArgs,
-            $graph,
-            ['-map', "[{$videoLabel}]", '-map', '0:a?'],
-            $outputArgs,
-            'render clip',
-            1800
-        );
+        try {
+            $this->runWithFilterScript(
+                $inputArgs,
+                $graph,
+                ['-map', "[{$videoLabel}]", '-map', $audioMapLabel],
+                $outputArgs,
+                'render clip',
+                1800
+            );
+        } finally {
+            array_map('unlink', array_filter($layerTempFiles, 'file_exists'));
+        }
     }
 
     /**
@@ -302,6 +381,7 @@ class FFmpegService
      * watermark conventions this mirrors.
      *
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  only meaningful for pip_* layouts — split_* layouts fill their half-frame with a plain cover-crop instead (see class docblock on buildSplitGraph())
+     * @param  array<int, array<string, mixed>>  $layers  override-merged template layers; RenderClipJob filters out any pip_video layer before calling here since reaction_layout already owns PiP for this clip (see class docblock on LayerCompositionService's pip_video case)
      */
     public function renderReactionClip(
         string $sourceVideoPath,
@@ -316,6 +396,8 @@ class FFmpegService
         ?string $subtitlesAssPath = null,
         ?string $watermarkPath = null,
         float $watermarkOpacity = 0.8,
+        array $layers = [],
+        ?callable $resolveLayerPath = null,
     ): void {
         $this->ensureDir($outPath);
         $duration = max(0.1, $end - $start);
@@ -341,16 +423,45 @@ class FFmpegService
             '-t', (string) $duration, '-i', $webcamVideoPath,
         ];
 
+        $audioLabels = [];
+        $nextInputIndex = 2;
+        $layerTempFiles = [];
+        if (! empty($layers)) {
+            $built = $this->layerService->buildGraph(
+                $layers,
+                $outputLabel,
+                $targetWidth,
+                $targetHeight,
+                $duration,
+                $resolveLayerPath ?? fn (string $p) => $p,
+                $nextInputIndex,
+            );
+            $graph = array_merge($graph, $built['graph']);
+            $inputArgs = array_merge($inputArgs, $built['inputArgs']);
+            $outputLabel = $built['videoLabel'];
+            $audioLabels = $built['audioLabels'];
+            $nextInputIndex += $built['inputCount'];
+            $layerTempFiles = $built['tempFiles'];
+        }
+
         if ($watermarkPath && file_exists($watermarkPath)) {
             $opacity = number_format(max(0, min(1, $watermarkOpacity)), 3, '.', '');
+            $watermarkIndex = $nextInputIndex;
             $inputArgs[] = '-i';
             $inputArgs[] = $watermarkPath;
-            $graph[] = "[2:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
+            $graph[] = "[{$watermarkIndex}:v]format=rgba,colorchannelmixer=aa={$opacity}[wm]";
             $graph[] = "[{$outputLabel}][wm]overlay=W-w-24:24[final]";
             $outputLabel = 'final';
         }
 
-        $graph[] = '[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=0[aout]';
+        // duration=shortest exactly reproduces the pre-layers behavior when there
+        // are no template audio layers (both real tracks already share the same -t
+        // trim, so shortest/first are equivalent there anyway); duration=first only
+        // kicks in once a bg-music layer joins the mix, so a shorter music bed can't
+        // truncate the source+webcam audio (see renderClip()'s equivalent case).
+        $mixInputs = array_merge(['[0:a]', '[1:a]'], $audioLabels);
+        $mixDuration = empty($audioLabels) ? 'shortest' : 'first';
+        $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ":duration={$mixDuration}:dropout_transition=0[aout]";
 
         $outputArgs = [
             // Both real video/audio inputs already share the same -t, but a watermark
@@ -363,14 +474,158 @@ class FFmpegService
             $outPath,
         ];
 
-        $this->runWithFilterScript(
-            $inputArgs,
-            $graph,
-            ['-map', "[{$outputLabel}]", '-map', '[aout]'],
-            $outputArgs,
-            'render reaction clip',
-            1800
-        );
+        try {
+            $this->runWithFilterScript(
+                $inputArgs,
+                $graph,
+                ['-map', "[{$outputLabel}]", '-map', '[aout]'],
+                $outputArgs,
+                'render reaction clip',
+                1800
+            );
+        } finally {
+            array_map('unlink', array_filter($layerTempFiles, 'file_exists'));
+        }
+    }
+
+    /**
+     * Render a still-image "cover" segment: a looped image for $duration, optional
+     * narration audio (falls back to a silent track so every segment concatSegments()
+     * joins has a real audio stream), optional centered drawtext overlay. Used for
+     * both the AI reaction intro (image + TTS narration + reaction_script text) and
+     * the static outro card (image + no audio + short caption) — see RenderClipJob.
+     */
+    public function renderCoverSegment(
+        string $imagePath,
+        ?string $audioPath,
+        string $outPath,
+        int $targetWidth,
+        int $targetHeight,
+        float $duration,
+        ?string $overlayText = null,
+    ): void {
+        $this->ensureDir($outPath);
+        $duration = max(0.5, $duration);
+
+        $inputArgs = ['-loop', '1', '-t', (string) $duration, '-i', $imagePath];
+        if ($audioPath && file_exists($audioPath)) {
+            $inputArgs = array_merge($inputArgs, ['-t', (string) $duration, '-i', $audioPath]);
+        } else {
+            $inputArgs = array_merge($inputArgs, ['-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=stereo']);
+        }
+
+        $graph = [];
+        $videoLabel = 'cover';
+        $graph[] = "[0:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight}[{$videoLabel}]";
+
+        $textTempFile = null;
+        if ($overlayText !== null && trim($overlayText) !== '') {
+            // textfile= (raw content, verbatim) instead of text='...' (escaped,
+            // inline) — see LayerCompositionService::buildTextLayer()'s docblock for
+            // why: drawtext's own escaping for a literal ' reliably segfaults this
+            // ffmpeg build once combined with another escaped character (colon,
+            // percent) in the same value, which AI-generated reaction lines hit
+            // constantly (contractions/quotes alongside times or punctuation).
+            $wrapped = wordwrap(trim($overlayText), 28, "\n", true);
+            $textTempFile = tempnam(sys_get_temp_dir(), 'covertext_') . '.txt';
+            file_put_contents($textTempFile, $wrapped);
+
+            $fontSize = max(1, (int) round($targetWidth * 0.06));
+            $params = [
+                "textfile='" . $this->escapeFilterPath($textTempFile) . "'",
+                'expansion=none',
+                "fontsize={$fontSize}",
+                'fontcolor=white',
+                'x=(main_w-text_w)/2',
+                'y=(main_h-text_h)/2',
+                'line_spacing=8',
+                'box=1',
+                'boxcolor=black@0.55',
+                'boxborderw=16',
+            ];
+            // Bare font= (fontconfig name lookup) needs a working fontconfig on the
+            // ffmpeg host, which isn't a safe cross-machine assumption — see
+            // config('services.media.default_font_file')'s docblock. Only reached
+            // when no default_font_file is configured at all.
+            if ($this->defaultFontFile) {
+                $params[] = "fontfile='" . $this->escapeFilterPath($this->defaultFontFile) . "'";
+            }
+            $graph[] = "[{$videoLabel}]drawtext=" . implode(':', $params) . '[covertext]';
+            $videoLabel = 'covertext';
+        }
+
+        $outputArgs = [
+            '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-pix_fmt', 'yuv420p',
+            '-shortest',
+            $outPath,
+        ];
+
+        try {
+            $this->runWithFilterScript(
+                $inputArgs,
+                $graph,
+                ['-map', "[{$videoLabel}]", '-map', '1:a'],
+                $outputArgs,
+                'render cover segment',
+                300
+            );
+        } finally {
+            if ($textTempFile && file_exists($textTempFile)) {
+                unlink($textTempFile);
+            }
+        }
+    }
+
+    /**
+     * Concatenate several already-rendered segments (cover intro/outro + the main
+     * clip output, in order) into one file. Uses the concat FILTER (re-decode +
+     * re-encode), not the concat demuxer's "-c copy" — a cover segment and the main
+     * clip can differ slightly in fps/codec profile even though both come out of
+     * this same service, and the filter tolerates that where the demuxer would
+     * simply refuse to join them. Each input is defensively re-scaled to the target
+     * resolution for the same reason. See RenderClipJob for how this is used.
+     *
+     * @param  list<string>  $segmentPaths  in playback order
+     */
+    public function concatSegments(array $segmentPaths, string $outPath, int $targetWidth, int $targetHeight): void
+    {
+        $this->ensureDir($outPath);
+        $segmentPaths = array_values($segmentPaths);
+        $n = count($segmentPaths);
+
+        if ($n === 0) {
+            throw new InvalidArgumentException('concatSegments() requires at least one segment.');
+        }
+
+        if ($n === 1) {
+            copy($segmentPaths[0], $outPath);
+
+            return;
+        }
+
+        $inputArgs = [];
+        $graph = [];
+        $pairLabels = '';
+
+        foreach ($segmentPaths as $i => $path) {
+            $inputArgs[] = '-i';
+            $inputArgs[] = $path;
+            $graph[] = "[{$i}:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight},setsar=1[v{$i}]";
+            $pairLabels .= "[v{$i}][{$i}:a]";
+        }
+
+        $graph[] = "{$pairLabels}concat=n={$n}:v=1:a=1[vout][aout]";
+
+        $outputArgs = [
+            '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            $outPath,
+        ];
+
+        $this->runWithFilterScript($inputArgs, $graph, ['-map', '[vout]', '-map', '[aout]'], $outputArgs, 'concat segments', 1800);
     }
 
     /**
@@ -537,7 +792,68 @@ class FFmpegService
     }
 
     /**
-     * Run ffmpeg with a filtergraph passed via -filter_complex_script (a temp file)
+     * True when $region covers the entire canvas — i.e. functionally identical to
+     * no region at all. renderClip() skips the inset-compositing pass entirely in
+     * that case rather than doing a needless scale+crop+overlay round-trip.
+     *
+     * @param  array{x: float, y: float, width: float, height: float}  $region
+     */
+    private function isFullFrameRegion(array $region): bool
+    {
+        $eps = 0.001;
+
+        return abs(($region['x'] ?? 0.0)) < $eps
+            && abs(($region['y'] ?? 0.0)) < $eps
+            && abs(($region['width'] ?? 1.0) - 1.0) < $eps
+            && abs(($region['height'] ?? 1.0) - 1.0) < $eps;
+    }
+
+    /**
+     * Same #RRGGBB validation as LayerCompositionService::normalizeColor() (kept
+     * as its own copy rather than shared — see escapeDrawtext()'s equivalent note
+     * on that class) — the canvas background color reaches here from a template's
+     * user-editable config, unquoted in the filter argument, so this is the
+     * injection guard for that field.
+     */
+    private function normalizeHexColor(string $color, string $default = '#000000'): string
+    {
+        if (! preg_match('/^#[0-9a-fA-F]{6}$/', $color)) {
+            return $default;
+        }
+
+        return $color;
+    }
+
+    /**
+     * Pick the option this ffmpeg build uses to read a filtergraph from a file.
+     *
+     * -filter_complex_script was deprecated in ffmpeg 7.0 and *removed* in 8.0, where
+     * passing it aborts with "Unrecognized option 'filter_complex_script'" before any
+     * work starts. Its replacement, the generic "read this option's value from a file"
+     * prefix -/filter_complex, landed in 6.1. Builds differ per machine, so resolve
+     * once per process from the reported version rather than assuming either one.
+     */
+    private function filterScriptOption(): string
+    {
+        static $option = null;
+
+        if ($option !== null) {
+            return $option;
+        }
+
+        $major = 0;
+        $result = Process::timeout(15)->run([$this->ffmpegBin, '-hide_banner', '-version']);
+        if ($result->successful() && preg_match('/ffmpeg version n?(\d+)/i', $result->output(), $m)) {
+            $major = (int) $m[1];
+        }
+
+        // Unparseable version (custom build string, git snapshot): assume a recent
+        // ffmpeg, since -/filter_complex is the form that survives going forward.
+        return $option = ($major === 0 || $major >= 7) ? '-/filter_complex' : '-filter_complex_script';
+    }
+
+    /**
+     * Run ffmpeg with a filtergraph passed in a temp file (see filterScriptOption())
      * instead of inline on the command line. A dynamic smart-crop expression grows
      * with the clip's keyframe count and can reach several KB — well past the ~8191
      * character line-length limit cmd.exe silently enforces on Windows, where
@@ -555,7 +871,7 @@ class FFmpegService
             $args = [
                 $this->ffmpegBin, '-y',
                 ...$inputArgs,
-                '-filter_complex_script', $scriptPath,
+                $this->filterScriptOption(), $scriptPath,
                 ...$mapArgs,
                 ...$outputArgs,
             ];

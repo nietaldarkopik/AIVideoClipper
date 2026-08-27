@@ -87,6 +87,30 @@ export type ClipStatus = "queued" | "rendering" | "completed" | "failed";
 
 export type ReactionLayout = "pip_bottom_right" | "pip_bottom_left" | "split_top_bottom" | "split_side_by_side";
 
+// One cut range in a multi-segment ("jump cut") selection — absolute source-video
+// seconds. clips.segments is a list of these; null/one-entry means "plain trim",
+// matching start_time/end_time exactly (see RenderClipJob::resolveSegments()).
+export interface Segment {
+  start: number;
+  end: number;
+}
+
+// A manual crop keyframe — SOURCE VIDEO PIXEL coordinates (not fractions, unlike
+// template layers), envelope-relative time. Mirrors what ReframingProvider's
+// smart-crop keyframes already look like; see FFmpegService::buildCropSegments().
+export interface CropKeyframe {
+  time: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CropConfig {
+  mode: "smart" | "manual";
+  keyframes: CropKeyframe[];
+}
+
 export interface Clip {
   id: number;
   project_id: number;
@@ -101,12 +125,19 @@ export interface Clip {
   end_time: number;
   duration: number;
   aspect_ratio: "9:16" | "1:1" | "16:9";
-  crop_config: { mode: string; keyframes: unknown[] } | null;
+  crop_config: CropConfig | null;
   scenes: unknown[] | null;
   subtitle_language: string;
   subtitles_enabled: boolean;
   subtitle_config: Record<string, unknown> | null;
+  layer_overrides: LayerOverrides | null;
+  segments: Segment[] | null;
   reaction_layout: ReactionLayout | null;
+  reaction_script: string | null;
+  reaction_tone: "positive" | "satire" | null;
+  intro_enabled: boolean;
+  outro_enabled: boolean;
+  intro_voice: string | null;
   status: ClipStatus;
   progress: number | null;
   failure_reason: string | null;
@@ -138,7 +169,85 @@ export interface TemplateVersion {
   created_at: string;
 }
 
+// A single entry in template_versions.config.layers (config version >= 2) — see
+// LayerCompositionService on the backend for how each type turns into an FFmpeg
+// filter. x/y/width/height are 0..1 fractions of the target resolution.
+export type LayerType = "text" | "image" | "logo" | "pip_video" | "audio" | "progress_bar" | "rect";
+
+export interface LayerTiming {
+  start: number;
+  end: number | null;
+}
+
+export interface TextLayerProps {
+  content?: string;
+  font?: string;
+  font_file?: string;
+  font_size?: number;
+  color?: string;
+  align?: "left" | "center" | "right";
+  stroke_color?: string;
+  stroke_width?: number;
+  background?: string;
+  background_opacity?: number;
+}
+
+export interface ImageLayerProps {
+  image_path?: string;
+}
+
+export interface AudioLayerProps {
+  audio_path?: string;
+  volume?: number;
+  fade_in?: number;
+  fade_out?: number;
+}
+
+export interface ProgressBarLayerProps {
+  color?: string;
+  background_color?: string;
+  height_px?: number;
+  position?: "top" | "bottom";
+}
+
+export interface RectLayerProps {
+  color?: string;
+}
+
+export interface TemplateLayer {
+  id: string;
+  type: LayerType;
+  z_index: number;
+  x?: number;
+  y?: number;
+  width?: number | null;
+  height?: number | null;
+  opacity?: number;
+  timing?: LayerTiming;
+  props?: TextLayerProps | ImageLayerProps | AudioLayerProps | ProgressBarLayerProps | RectLayerProps | Record<string, unknown>;
+}
+
+// Full-width-band shorthand the Template editor UI exposes for
+// FFmpegService::renderClip()'s $videoRegion param — x/width are implicitly 0/1;
+// only the vertical band is user-configurable in this pass. null = full-bleed
+// video (every template before this feature, and the default for a new one).
+export interface VideoRegion {
+  top: number;
+  height: number;
+}
+
+// Per-clip patch over a template's layers — see LayerOverrideMerger on the
+// backend. Keyed by layer id, plus "_new" (clip-only extra layers) and
+// "_removed" (hide a template layer for this clip only).
+export interface LayerOverrides {
+  _new?: TemplateLayer[];
+  _removed?: string[];
+  [layerId: string]: Partial<TemplateLayer> | TemplateLayer[] | string[] | undefined;
+}
+
 export interface TemplateConfig {
+  version?: number;
+  layers?: TemplateLayer[];
   caption?: {
     font?: string;
     font_size?: number | null;
@@ -164,6 +273,12 @@ export interface TemplateConfig {
   };
   progress_bar?: { enabled?: boolean; color?: string; position?: string } | null;
   cta?: Record<string, unknown> | null;
+  // Full x/y/width/height shape FFmpegService::renderClip() actually reads —
+  // null (default) is full-bleed video. The Template editor only exposes the
+  // top/height band shorthand (see VideoRegion) so x/width are always 0/1 from
+  // this UI, but the field stores the general shape for forward-compatibility.
+  video_region?: { x: number; y: number; width: number; height: number } | null;
+  canvas_background_color?: string;
   [key: string]: unknown;
 }
 

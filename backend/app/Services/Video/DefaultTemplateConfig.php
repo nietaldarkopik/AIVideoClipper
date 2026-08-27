@@ -11,6 +11,12 @@ class DefaultTemplateConfig
     public static function config(): array
     {
         return [
+            // Absent/1 = legacy shape (caption + branding only, the only two
+            // sub-objects the renderer has ever read). 2 = layers-aware shape, see
+            // v2Defaults() below and LayerCompositionService — a template stuck on
+            // version 1 (or any config missing this key) always renders with an
+            // empty layer list, so existing templates/clips are unaffected.
+            'version' => 1,
             'caption' => [
                 'font' => 'Arial',
                 'font_size' => null, // null -> FFmpegService/SubtitleService derives from resolution
@@ -36,6 +42,28 @@ class DefaultTemplateConfig
             ],
             'progress_bar' => null,
             'cta' => null,
+            // null = full-bleed video (every template before this key existed, and
+            // every template that doesn't opt in) — set to {x,y,width,height}
+            // fractions to inset the video into a sub-region of the canvas instead,
+            // typically paired with 'rect' + 'text' layers built around it (a
+            // headline bar above, a branding/source bar below). See
+            // FFmpegService::renderClip()'s $videoRegion param.
+            'video_region' => null,
+            'canvas_background_color' => '#000000',
         ];
+    }
+
+    /**
+     * Starting point for a new "layers-aware" template (config version 2). Same
+     * caption/branding baseline as config(), plus an empty layers list a template
+     * author builds up in the editor. See LayerCompositionService for the layer
+     * shape and how config['layers'] is turned into an FFmpeg filtergraph.
+     */
+    public static function v2Defaults(): array
+    {
+        return array_merge(self::config(), [
+            'version' => 2,
+            'layers' => [],
+        ]);
     }
 }

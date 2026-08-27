@@ -6,9 +6,15 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\ClipResource;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
+use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
+use App\Services\AI\Contracts\TextToSpeechProvider;
+use App\Services\Video\DefaultTemplateConfig;
+use App\Services\Video\LayerOverrideMerger;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use ZipArchive;
@@ -62,9 +68,30 @@ class ClipController extends Controller
             'subtitle_language' => ['sometimes', 'string', 'max:10'],
             'subtitle_config' => ['sometimes', 'array'],
             'scenes' => ['sometimes', 'array'],
+            'layer_overrides' => ['sometimes', 'nullable', 'array'],
+            'segments' => ['sometimes', 'nullable', 'array'],
+            'segments.*.start' => ['required_with:segments', 'numeric', 'min:0'],
+            'segments.*.end' => ['required_with:segments', 'numeric', 'min:0'],
+            'crop_config' => ['sometimes', 'nullable', 'array'],
+            'reaction_script' => ['sometimes', 'nullable', 'string'],
+            'intro_enabled' => ['sometimes', 'boolean'],
+            'outro_enabled' => ['sometimes', 'boolean'],
+            'intro_voice' => ['sometimes', 'nullable', 'string', 'max:64'],
         ]);
 
-        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes'];
+        // A hand-edited script or a different voice invalidates whatever TTS audio
+        // is already cached — clearing it here makes RenderClipJob regenerate it
+        // lazily on the next render instead of narrating stale text. Compared
+        // against the clip's current value (not just key-presence) because the
+        // clip editor's "Save & Re-render" always resends reaction_script
+        // unconditionally (same as title/caption/etc.) — keying off presence alone
+        // would null out a perfectly good cached narration on every single save.
+        if ((array_key_exists('reaction_script', $data) && $data['reaction_script'] !== $clip->reaction_script)
+            || (array_key_exists('intro_voice', $data) && $data['intro_voice'] !== $clip->intro_voice)) {
+            $data['intro_audio_path'] = null;
+        }
+
+        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes', 'layer_overrides', 'segments', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice'];
         $needsRerender = ! empty(array_intersect(array_keys($data), $reRenderFields));
 
         if (array_key_exists('template_id', $data)) {
@@ -72,7 +99,17 @@ class ClipController extends Controller
             $data['template_version_id'] = $template?->current_version_id;
         }
 
-        if (isset($data['start_time']) || isset($data['end_time'])) {
+        // Multiple segments: start_time/end_time become the bounding envelope
+        // (min/max, used for display/sorting and as the source-scan window for
+        // silence/crop detection — see RenderClipJob), while duration is the sum of
+        // each segment's own length so it reflects what's actually kept, not the
+        // envelope (which can be longer once there are gaps between segments).
+        if (array_key_exists('segments', $data) && ! empty($data['segments'])) {
+            $segments = collect($data['segments'])->sortBy('start')->values();
+            $data['start_time'] = (float) $segments->first()['start'];
+            $data['end_time'] = (float) $segments->last()['end'];
+            $data['duration'] = max(0.1, $segments->sum(fn ($s) => max(0, $s['end'] - $s['start'])));
+        } elseif (isset($data['start_time']) || isset($data['end_time'])) {
             $start = $data['start_time'] ?? $clip->start_time;
             $end = $data['end_time'] ?? $clip->end_time;
             $data['duration'] = max(0.1, $end - $start);
@@ -86,6 +123,36 @@ class ClipController extends Controller
         }
 
         return ClipResource::make($clip->fresh(['template']));
+    }
+
+    /**
+     * The fully merged, resolved view a client-side editor draws from: template
+     * layers with this clip's layer_overrides already applied, and the merged
+     * caption config. Computed via the exact same merge helpers RenderClipJob
+     * renders from, so this preview can never drift from the real output.
+     */
+    public function previewConfig(Request $request, Clip $clip)
+    {
+        $this->authorizeClip($request, $clip);
+        $clip->load('templateVersion');
+
+        $config = $clip->templateVersion?->config ?? DefaultTemplateConfig::config();
+        $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
+        $layers = LayerOverrideMerger::merge($config['layers'] ?? [], $clip->layer_overrides ?? []);
+        [$width, $height] = \App\Services\Video\AspectRatio::resolution($clip->aspect_ratio);
+
+        return response()->json([
+            'data' => [
+                'resolution' => ['width' => $width, 'height' => $height],
+                'caption' => $captionConfig,
+                'branding' => $config['branding'] ?? [],
+                // Merged (override-applied) view, for the editor to display/edit.
+                'layers' => $layers,
+                // Raw template layers (no overrides), for the editor to diff edited
+                // layers against when computing what to save into layer_overrides.
+                'template_layers' => $config['layers'] ?? [],
+            ],
+        ]);
     }
 
     public function destroy(Request $request, Clip $clip)
@@ -113,6 +180,59 @@ class ClipController extends Controller
         Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
 
         return response()->json(['metadata' => $provider->generateMetadata($clip->load('clipCandidate'), $platforms)]);
+    }
+
+    /**
+     * AI-generated provocative reaction line for the clip's own content, narrated
+     * via TTS — the AI Reaction Intro cover feature (see FFmpegService::
+     * renderCoverSegment()/concatSegments() and RenderClipJob::composeIntroOutro()).
+     * Like generateSocialMetadata(), this only previews/saves the result — it does
+     * NOT dispatch a render; the user reviews/edits the script from the clip editor
+     * and applies it via the normal "Save & Re-render" (update()) flow.
+     */
+    public function generateReactionScript(
+        Request $request,
+        Clip $clip,
+        ReactionScriptProvider $scripts,
+        TextToSpeechProvider $tts,
+    ) {
+        $this->authorizeClip($request, $clip);
+
+        $data = $request->validate([
+            'voice' => ['sometimes', 'nullable', 'string', 'max:64'],
+        ]);
+
+        Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
+
+        $result = $scripts->generateReactionScript($clip->load(['clipCandidate', 'video.transcript']));
+
+        // TTS hits a real external quota/rate-limit often enough that it shouldn't
+        // fail this whole request — the script text is the useful part the user is
+        // waiting on. A failed synthesis here just leaves intro_audio_path empty;
+        // RenderClipJob's own lazy-synthesize fallback (equally resilient) retries
+        // it at render time.
+        $audioRelative = null;
+        try {
+            $disk = Storage::disk('media');
+            $audioRelative = "reactions-intro/{$clip->id}/audio.mp3";
+            $tts->synthesize($result->text, $disk->path($audioRelative), $data['voice'] ?? null);
+        } catch (\Throwable $e) {
+            $audioRelative = null;
+            Log::warning('Reaction intro TTS failed, saving script without narration', [
+                'clip_id' => $clip->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $clip->update([
+            'reaction_script' => $result->text,
+            'reaction_tone' => $result->tone,
+            'intro_voice' => $data['voice'] ?? $clip->intro_voice,
+            'intro_audio_path' => $audioRelative,
+            'intro_enabled' => true,
+        ]);
+
+        return ClipResource::make($clip->fresh());
     }
 
     public function duplicate(Request $request, Clip $clip)

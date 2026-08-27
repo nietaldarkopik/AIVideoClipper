@@ -84,6 +84,16 @@ return [
         // go slower (e.g. 'medium') only if you specifically want smaller files and
         // have CPU headroom to spare.
         'ffmpeg_preset' => env('FFMPEG_PRESET', 'superfast'),
+        // Fallback font FILE for template text layers (LayerCompositionService's
+        // drawtext filter). Bare font *names* (drawtext's font= option) need an
+        // ffmpeg build with a working libfontconfig config, which isn't a safe
+        // assumption cross-platform/cross-machine (observed on Windows: fontconfig
+        // compiled in but "Cannot load default config file" at runtime, even though
+        // the same build's libass — a separate, unrelated font-matching path used
+        // for ASS caption burn-in — works fine via DirectWrite). Pointing at a real
+        // .ttf/.otf sidesteps that entirely; a template layer can still override
+        // per-layer via props.font_file.
+        'default_font_file' => env('DEFAULT_FONT_FILE'),
     ],
 
     'trending' => [
@@ -105,6 +115,12 @@ return [
         'analysis_provider' => env('AI_ANALYSIS_PROVIDER', 'mock'),
         'reframing_provider' => env('AI_REFRAMING_PROVIDER', 'mock'),
         'social_metadata_provider' => env('AI_SOCIAL_METADATA_PROVIDER', 'mock'),
+        // Reaction-intro cover feature: a short provocative one-liner reacting to
+        // the clip's own content (positive/hype if good, satire if not), narrated
+        // over a cover screen before the clip plays — see ReactionScriptProvider.
+        'reaction_script_provider' => env('AI_REACTION_SCRIPT_PROVIDER', 'mock'),
+        // Text-to-speech for that reaction line — see TextToSpeechProvider.
+        'tts_provider' => env('AI_TTS_PROVIDER', 'mock'),
         'max_clips_per_video' => env('MAX_CLIPS_PER_VIDEO', 10),
         'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 30),
     ],
@@ -113,6 +129,8 @@ return [
         'api_key' => env('OPENAI_API_KEY'),
         'transcribe_model' => env('OPENAI_TRANSCRIBE_MODEL', 'whisper-1'),
         'chat_model' => env('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
+        'tts_model' => env('OPENAI_TTS_MODEL', 'tts-1'),
+        'tts_voice' => env('OPENAI_TTS_VOICE', 'alloy'),
     ],
 
     'anthropic' => [
@@ -137,6 +155,23 @@ return [
         // GET {base_url}/models on your own instance for a valid id (e.g.
         // "cc/claude-sonnet-5"); "auto" is NOT a real model id and will 404.
         'model' => env('NINE_ROUTER_MODEL'),
+        // Separate model id for the /audio/transcriptions endpoint — a chat model
+        // id from services.nine_router.model will not work here. Check GET
+        // {base_url}/models for a Whisper-compatible id your instance has
+        // credentials for.
+        'transcribe_model' => env('NINE_ROUTER_TRANSCRIBE_MODEL'),
+        // Model id(s) for the /audio/speech (TTS) endpoint — same caveat as
+        // transcribe_model above. Comma-separated to configure a fallback chain
+        // (e.g. "openai/gpt-4o-mini-tts,gemini/gemini-3.1-flash-tts-preview/Zephyr")
+        // — each upstream credential has its own separate quota, so
+        // NineRouterTextToSpeechProvider tries the next one whenever one is
+        // rate-limited/over quota, only giving up once all of them have failed.
+        'tts_model' => env('NINE_ROUTER_TTS_MODEL'),
+        // Separate model id for reaction-script generation (still a plain chat
+        // completion, same endpoint as `model` above) — lets it target a different
+        // registered provider/credential (e.g. a Gemini entry) than clip scoring
+        // does. Falls back to `model` when unset — see AIServiceProvider.
+        'reaction_script_model' => env('NINE_ROUTER_REACTION_SCRIPT_MODEL'),
     ],
 
     'whisper_engine' => [

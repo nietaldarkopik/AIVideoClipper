@@ -99,13 +99,25 @@ class TemplateController extends Controller
             $nextVersionNumber = $template->versions()->max('version_number') + 1;
             $baseConfig = $template->currentVersion?->config ?? DefaultTemplateConfig::config();
 
+            // array_replace_recursive merges a list (numeric-keyed 'layers' array)
+            // index-by-index, not by layer id — wrong here, since a submitted layers
+            // array is always the FULL list (the template editor's layer panel sends
+            // the whole array on save, same convention as 'caption'), not a partial
+            // patch. Replace it wholesale so editing/reordering/removing a layer
+            // can't corrupt or resurrect stale entries from the base config.
+            $incomingConfig = $data['config'];
+            if (array_key_exists('layers', $incomingConfig)) {
+                $baseConfig['layers'] = $incomingConfig['layers'];
+                unset($incomingConfig['layers']);
+            }
+
             $version = TemplateVersion::create([
                 'template_id' => $template->id,
                 'version_number' => $nextVersionNumber,
                 'label' => $data['label'] ?? ('v' . $nextVersionNumber),
                 'is_published' => true,
                 'created_by' => $request->user()->id,
-                'config' => array_replace_recursive($baseConfig, $data['config']),
+                'config' => array_replace_recursive($baseConfig, $incomingConfig),
             ]);
 
             $template->update(['current_version_id' => $version->id]);

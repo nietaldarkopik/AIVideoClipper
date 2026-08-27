@@ -69,12 +69,14 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/clips', [ClipController::class, 'index']);
     Route::get('/clips/{clip}', [ClipController::class, 'show']);
+    Route::get('/clips/{clip}/preview-config', [ClipController::class, 'previewConfig']);
     Route::patch('/clips/{clip}', [ClipController::class, 'update']);
     Route::delete('/clips/{clip}', [ClipController::class, 'destroy']);
     Route::post('/clips/{clip}/duplicate', [ClipController::class, 'duplicate']);
     Route::post('/clips/{clip}/regenerate', [ClipController::class, 'regenerate']);
     Route::post('/clips/{clip}/reaction', [ReactionController::class, 'updateClip']);
     Route::post('/clips/{clip}/generate-social-metadata', [ClipController::class, 'generateSocialMetadata']);
+    Route::post('/clips/{clip}/generate-reaction-script', [ClipController::class, 'generateReactionScript']);
     Route::post('/clips/export-zip', [ClipController::class, 'exportZip']);
 
     Route::get('/template-categories', [TemplateCategoryController::class, 'index']);

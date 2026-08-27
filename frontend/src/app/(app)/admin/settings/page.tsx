@@ -16,6 +16,8 @@ interface AISettings {
   ai_model: string;
   transcript_model: string;
   clip_scoring_model: string;
+  reaction_script_model: string;
+  tts_model: string;
   default_clip_duration: number;
   default_template_id: number | null;
   max_clips_per_video: number;
@@ -39,6 +41,8 @@ export default function AdminAISettingsPage() {
       await api.patch(key, {
         transcript_model: form.transcript_model,
         clip_scoring_model: form.clip_scoring_model,
+        reaction_script_model: form.reaction_script_model,
+        tts_model: form.tts_model,
         default_clip_duration: form.default_clip_duration,
         max_clips_per_video: form.max_clips_per_video,
         default_template_id: form.default_template_id,
@@ -75,6 +79,7 @@ export default function AdminAISettingsPage() {
               <option value="mock">Mock (deterministic filler, no cost)</option>
               <option value="openai">OpenAI Whisper (real, paid)</option>
               <option value="whisper_engine">Whisper Engine (real, self-hosted, free)</option>
+              <option value="nine_router">9Router (real, self-hosted gateway)</option>
             </Select>
           </div>
           <div>
@@ -90,6 +95,31 @@ export default function AdminAISettingsPage() {
               <option value="claude">Claude (real, paid)</option>
               <option value="gemini">Gemini / Google AI Studio (real, paid)</option>
               <option value="nine_router">9Router (real, self-hosted gateway)</option>
+            </Select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <Label htmlFor="reaction_script_model">Reaction Script Model</Label>
+            <Select
+              id="reaction_script_model"
+              value={form.reaction_script_model}
+              onChange={(e) => setForm({ ...form, reaction_script_model: e.target.value })}
+            >
+              <option value="mock">Mock (deterministic filler, no cost)</option>
+              <option value="openai">OpenAI (real, paid)</option>
+              <option value="ollama">Ollama (real, self-hosted, free)</option>
+              <option value="gemini">Gemini / Google AI Studio (real, paid)</option>
+              <option value="nine_router">9Router (real, self-hosted gateway)</option>
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="tts_model">Text-to-Speech Model</Label>
+            <Select id="tts_model" value={form.tts_model} onChange={(e) => setForm({ ...form, tts_model: e.target.value })}>
+              <option value="mock">Mock (silent placeholder, no cost)</option>
+              <option value="openai">OpenAI TTS (real, paid)</option>
+              <option value="nine_router">9Router (self-hosted gateway — needs a TTS-capable provider registered there)</option>
             </Select>
           </div>
         </div>

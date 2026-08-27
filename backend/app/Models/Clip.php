@@ -21,8 +21,11 @@ class Clip extends Model
         'project_id', 'video_id', 'clip_candidate_id', 'template_id', 'template_version_id',
         'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'aspect_ratio',
         'crop_config', 'scenes', 'subtitle_language', 'subtitles_enabled', 'subtitle_config',
+        'layer_overrides', 'segments',
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
         'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
+        'reaction_script', 'reaction_tone', 'intro_enabled', 'outro_enabled',
+        'intro_voice', 'intro_audio_path',
     ];
 
     protected $casts = [
@@ -30,7 +33,11 @@ class Clip extends Model
         'crop_config' => 'array',
         'scenes' => 'array',
         'subtitle_config' => 'array',
+        'layer_overrides' => 'array',
+        'segments' => 'array',
         'subtitles_enabled' => 'boolean',
+        'intro_enabled' => 'boolean',
+        'outro_enabled' => 'boolean',
         'start_time' => 'float',
         'end_time' => 'float',
         'duration' => 'float',
