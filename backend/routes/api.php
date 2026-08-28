@@ -68,6 +68,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/clip-candidates/{clipCandidate}/reaction', [ReactionController::class, 'store']);
 
     Route::get('/clips', [ClipController::class, 'index']);
+    // Must precede /clips/{clip} — otherwise "search" is swallowed as a {clip} id.
+    Route::get('/clips/search', [ClipController::class, 'search']);
     Route::get('/clips/{clip}', [ClipController::class, 'show']);
     Route::get('/clips/{clip}/preview-config', [ClipController::class, 'previewConfig']);
     Route::patch('/clips/{clip}', [ClipController::class, 'update']);

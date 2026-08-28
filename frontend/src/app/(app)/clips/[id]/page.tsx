@@ -88,6 +88,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
     intro_enabled: boolean;
     outro_enabled: boolean;
     intro_voice: string;
+    reference_url: string | null;
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [splitting, setSplitting] = useState(false);
@@ -111,6 +112,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         intro_enabled: clip.intro_enabled,
         outro_enabled: clip.outro_enabled,
         intro_voice: clip.intro_voice ?? "alloy",
+        reference_url: clip.reference_url ?? null,
       });
     }
   }, [clip, form]);
@@ -169,6 +171,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
       intro_enabled: form.intro_enabled,
       outro_enabled: form.outro_enabled,
       intro_voice: form.intro_voice || null,
+      reference_url: form.reference_url || null,
       ...extra,
     });
   }
@@ -578,6 +581,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
               introEnabled={form.intro_enabled}
               outroEnabled={form.outro_enabled}
               introVoice={form.intro_voice}
+              referenceUrl={form.reference_url}
               onChange={(patch) => setForm((f) => (f ? { ...f, ...patch } : f))}
             />
           </Card>

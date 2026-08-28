@@ -37,6 +37,7 @@ class ClipResource extends JsonResource
             'intro_enabled' => (bool) $this->intro_enabled,
             'outro_enabled' => (bool) $this->outro_enabled,
             'intro_voice' => $this->intro_voice,
+            'reference_url' => $this->reference_url,
             'status' => $this->status,
             'progress' => $this->progress,
             'failure_reason' => $this->failure_reason,

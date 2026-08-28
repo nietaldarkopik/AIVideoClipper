@@ -8,7 +8,7 @@ use App\Services\AI\DTOs\ReactionScriptResult;
 
 class MockReactionScriptProvider implements ReactionScriptProvider
 {
-    public function generateReactionScript(Clip $clip): ReactionScriptResult
+    public function generateReactionScript(Clip $clip, ?string $referenceContent = null): ReactionScriptResult
     {
         $title = $clip->title ?: 'this clip';
         $score = $clip->clipCandidate?->overall_score;

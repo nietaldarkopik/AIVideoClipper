@@ -5,24 +5,34 @@ namespace App\Providers;
 use App\Models\Setting;
 use App\Services\AI\Claude\ClaudeContentAnalysisProvider;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
+use App\Services\AI\Contracts\EmbeddingProvider;
+use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
+use App\Services\AI\Contracts\WebFetchProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
 use App\Services\AI\Gemini\GeminiReactionScriptProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
+use App\Services\AI\Mock\MockEmbeddingProvider;
+use App\Services\AI\Mock\MockImageGenerationProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
 use App\Services\AI\Mock\MockTranscriptionProvider;
+use App\Services\AI\Mock\MockWebFetchProvider;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\Mock\MockReactionScriptProvider;
 use App\Services\AI\Mock\MockTextToSpeechProvider;
 use App\Services\AI\NineRouter\NineRouterContentAnalysisProvider;
+use App\Services\AI\NineRouter\NineRouterEmbeddingProvider;
+use App\Services\AI\NineRouter\NineRouterImageGenerationProvider;
 use App\Services\AI\NineRouter\NineRouterReactionScriptProvider;
+use App\Services\AI\NineRouter\NineRouterSocialMetadataProvider;
 use App\Services\AI\NineRouter\NineRouterTextToSpeechProvider;
 use App\Services\AI\NineRouter\NineRouterTranscriptionProvider;
+use App\Services\AI\NineRouter\NineRouterWebFetchProvider;
 use App\Services\AI\Ollama\OllamaContentAnalysisProvider;
 use App\Services\AI\Ollama\OllamaReactionScriptProvider;
 use App\Services\AI\Ollama\OllamaSocialMetadataProvider;
@@ -155,7 +165,12 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.ollama.model', 'llama3.1'),
                     (int) config('services.ollama.timeout', 60),
                 ),
-                default => throw new InvalidArgumentException("Unknown AI_SOCIAL_METADATA_PROVIDER [{$provider}]. Valid values: mock, openai, ollama."),
+                'nine_router' => new NineRouterSocialMetadataProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_SOCIAL_METADATA_PROVIDER [{$provider}]. Valid values: mock, openai, ollama, nine_router."),
             };
         });
 
@@ -213,6 +228,43 @@ class AIServiceProvider extends ServiceProvider
                     array_values(array_filter(array_map('trim', explode(',', (string) config('services.nine_router.tts_model'))))),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_TTS_PROVIDER [{$provider}]. Valid values: mock, openai, nine_router."),
+            };
+        });
+
+        $this->app->bind(EmbeddingProvider::class, function ($app) {
+            // Env-only, like social_metadata_provider above — no admin-panel toggle.
+            return match ($provider = config('services.ai.embedding_provider', 'mock')) {
+                'mock' => $app->make(MockEmbeddingProvider::class),
+                'nine_router' => new NineRouterEmbeddingProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.embedding_model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_EMBEDDING_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(WebFetchProvider::class, function ($app) {
+            return match ($provider = config('services.ai.web_fetch_provider', 'mock')) {
+                'mock' => $app->make(MockWebFetchProvider::class),
+                'nine_router' => new NineRouterWebFetchProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.web_fetch_model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_WEB_FETCH_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(ImageGenerationProvider::class, function ($app) {
+            return match ($provider = config('services.ai.cover_image_provider', 'mock')) {
+                'mock' => $app->make(MockImageGenerationProvider::class),
+                'nine_router' => new NineRouterImageGenerationProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.image_model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_COVER_IMAGE_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
             };
         });
     }

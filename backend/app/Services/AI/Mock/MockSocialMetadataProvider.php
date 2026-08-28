@@ -7,7 +7,7 @@ use App\Services\AI\Contracts\SocialMetadataProvider;
 
 class MockSocialMetadataProvider implements SocialMetadataProvider
 {
-    public function generateMetadata(Clip $clip, array $platforms): array
+    public function generateMetadata(Clip $clip, array $platforms, ?string $referenceContent = null): array
     {
         $title = $clip->title ?: 'This Changes Everything';
         $hook = $clip->clipCandidate?->hook_text ?? $clip->caption ?? $title;

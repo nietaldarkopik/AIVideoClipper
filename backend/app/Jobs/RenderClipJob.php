@@ -9,6 +9,7 @@ use App\Models\Project;
 use App\Models\ProcessingJob;
 use App\Models\Subtitle;
 use App\Models\VideoBatchItem;
+use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\Social\AutoPublishScheduler;
@@ -46,8 +47,9 @@ class RenderClipJob implements ShouldQueue
         AutoPublishScheduler $publishScheduler,
         SilenceTrimmer $silenceTrimmer,
         TextToSpeechProvider $tts,
+        ImageGenerationProvider $imageGen,
     ): void {
-        $clip = Clip::with(['video', 'templateVersion'])->findOrFail($this->clipId);
+        $clip = Clip::with(['video', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
 
         $processingJob = ProcessingJob::create([
@@ -284,7 +286,7 @@ class RenderClipJob implements ShouldQueue
             if ($clip->intro_enabled || $clip->outro_enabled) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(93, 'Building intro/outro...');
-                $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $disk, $outputRelative, $targetWidth, $targetHeight);
+                $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight);
             }
 
             $clip->update([
@@ -326,6 +328,7 @@ class RenderClipJob implements ShouldQueue
         Clip $clip,
         FFmpegService $ffmpeg,
         TextToSpeechProvider $tts,
+        ImageGenerationProvider $imageGen,
         Filesystem $disk,
         string $outputRelative,
         int $targetWidth,
@@ -354,7 +357,23 @@ class RenderClipJob implements ShouldQueue
                 $introDuration = ($ffmpeg->probeDuration($introAudioPath) ?? 4.0) + 0.3;
 
                 $coverFrameRelative = "clips/{$clip->id}/intro_cover.jpg";
-                $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($coverFrameRelative), 0.0);
+                // Cached like intro_audio_path above — only (re)generated when empty
+                // or missing, cleared by ClipController::update() whenever
+                // reaction_script changes, so a real image-gen provider isn't called
+                // on every re-render (e.g. a caption-only "Save & Re-render").
+                if (! $clip->intro_cover_path || ! $disk->exists($clip->intro_cover_path)) {
+                    $fallbackFrameRelative = "clips/{$clip->id}/intro_cover_fallback.jpg";
+                    $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($fallbackFrameRelative), 0.0);
+                    $imageGen->generateCoverImage(
+                        $this->buildCoverPrompt($clip),
+                        $disk->path($coverFrameRelative),
+                        $disk->path($fallbackFrameRelative)
+                    );
+                    $tmpFiles[] = $disk->path($fallbackFrameRelative);
+                    $clip->update(['intro_cover_path' => $coverFrameRelative]);
+                } else {
+                    $coverFrameRelative = $clip->intro_cover_path;
+                }
 
                 $introSegmentRelative = "clips/{$clip->id}/intro_segment.mp4";
                 $ffmpeg->renderCoverSegment(
@@ -369,7 +388,6 @@ class RenderClipJob implements ShouldQueue
 
                 $introIndex = 0;
                 array_unshift($segments, $disk->path($introSegmentRelative));
-                $tmpFiles[] = $disk->path($coverFrameRelative);
                 $tmpFiles[] = $disk->path($introSegmentRelative);
             } catch (Throwable $e) {
                 Log::warning('Reaction intro build failed, rendering clip without it', [
@@ -414,6 +432,24 @@ class RenderClipJob implements ShouldQueue
         }
 
         return $finalRelative;
+    }
+
+    /**
+     * Short text-to-image prompt for the reaction-intro cover — built from whatever
+     * content context is available. Ignored entirely by MockImageGenerationProvider
+     * (which just reuses the video frame instead), only used by a real
+     * ImageGenerationProvider.
+     */
+    private function buildCoverPrompt(Clip $clip): string
+    {
+        $candidate = $clip->clipCandidate;
+
+        return sprintf(
+            'Eye-catching vertical video cover thumbnail, dramatic and high-contrast, no text or logos. '
+            . 'Illustrates: %s. Mood/type: %s.',
+            $clip->reaction_script ?: ($candidate?->hook_text ?? $clip->title ?: 'a short video clip'),
+            $candidate?->moment_type ?? 'engaging moment'
+        );
     }
 
     /**

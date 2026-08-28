@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import { mutate } from "swr";
-import { Sparkles, Mic } from "lucide-react";
+import { Sparkles, Mic, Link2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
 import { Button } from "@/components/ui/Button";
-import { Label, Select, Textarea } from "@/components/ui/Input";
+import { Input, Label, Select, Textarea } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 import type { Clip } from "@/lib/types";
 
@@ -19,7 +19,16 @@ interface ReactionIntroPanelProps {
   introEnabled: boolean;
   outroEnabled: boolean;
   introVoice: string;
-  onChange: (patch: Partial<{ reaction_script: string; intro_enabled: boolean; outro_enabled: boolean; intro_voice: string }>) => void;
+  referenceUrl: string | null;
+  onChange: (
+    patch: Partial<{
+      reaction_script: string;
+      intro_enabled: boolean;
+      outro_enabled: boolean;
+      intro_voice: string;
+      reference_url: string | null;
+    }>
+  ) => void;
 }
 
 export function ReactionIntroPanel({
@@ -29,6 +38,7 @@ export function ReactionIntroPanel({
   introEnabled,
   outroEnabled,
   introVoice,
+  referenceUrl,
   onChange,
 }: ReactionIntroPanelProps) {
   const [generating, setGenerating] = useState(false);
@@ -38,11 +48,13 @@ export function ReactionIntroPanel({
     try {
       const res = await api.post<{ data: Clip }>(`/clips/${clipId}/generate-reaction-script`, {
         voice: introVoice || undefined,
+        reference_url: referenceUrl || undefined,
       });
       onChange({
         reaction_script: res.data.reaction_script ?? "",
         intro_enabled: res.data.intro_enabled,
         intro_voice: res.data.intro_voice ?? introVoice,
+        reference_url: res.data.reference_url ?? null,
       });
       await mutate(`/clips/${clipId}`);
       toast("Reaction intro generated.", "success");
@@ -67,6 +79,23 @@ export function ReactionIntroPanel({
             {reactionTone}
           </Badge>
         )}
+      </div>
+
+      <div>
+        <Label htmlFor="reference_url">
+          <Link2 className="mr-1 inline size-3" />
+          Reference URL (optional)
+        </Label>
+        <Input
+          id="reference_url"
+          type="url"
+          placeholder="https://example.com/the-article-this-clip-reacts-to"
+          value={referenceUrl ?? ""}
+          onChange={(e) => onChange({ reference_url: e.target.value || null })}
+        />
+        <p className="mt-1 text-[11px] text-muted">
+          Fetched as extra context for the reaction script (and social metadata generation below).
+        </p>
       </div>
 
       <Button variant="secondary" className="w-full" onClick={handleGenerate} loading={generating}>

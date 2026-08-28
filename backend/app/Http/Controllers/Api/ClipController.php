@@ -4,11 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ClipResource;
+use App\Jobs\GenerateClipEmbeddingJob;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
+use App\Services\AI\ClipSearchService;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
+use App\Services\AI\WebContentFetcher;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\LayerOverrideMerger;
 use Illuminate\Http\Request;
@@ -39,6 +42,29 @@ class ClipController extends Controller
             ->paginate($request->integer('per_page', 24));
 
         return ClipResource::collection($clips);
+    }
+
+    /**
+     * Semantic search over the user's clips (title/caption/hashtags/hook/reaction
+     * script), via ClipSearchService's brute-force cosine similarity — see its
+     * docblock for scale caveats. Route must be registered before GET
+     * /clips/{clip} or "search" gets swallowed by that route's {clip} binding.
+     */
+    public function search(Request $request, ClipSearchService $search)
+    {
+        $data = $request->validate([
+            'q' => ['required', 'string', 'min:1', 'max:255'],
+            'project_id' => ['sometimes', 'nullable', 'integer'],
+        ]);
+
+        $results = $search->search(
+            userId: $request->user()->id,
+            isAdmin: $request->user()->isAdmin(),
+            query: $data['q'],
+            projectId: $data['project_id'] ?? null,
+        );
+
+        return ClipResource::collection($results);
     }
 
     public function show(Request $request, Clip $clip)
@@ -77,6 +103,7 @@ class ClipController extends Controller
             'intro_enabled' => ['sometimes', 'boolean'],
             'outro_enabled' => ['sometimes', 'boolean'],
             'intro_voice' => ['sometimes', 'nullable', 'string', 'max:64'],
+            'reference_url' => ['sometimes', 'nullable', 'string', 'max:2048', 'url'],
         ]);
 
         // A hand-edited script or a different voice invalidates whatever TTS audio
@@ -89,6 +116,13 @@ class ClipController extends Controller
         if ((array_key_exists('reaction_script', $data) && $data['reaction_script'] !== $clip->reaction_script)
             || (array_key_exists('intro_voice', $data) && $data['intro_voice'] !== $clip->intro_voice)) {
             $data['intro_audio_path'] = null;
+        }
+
+        // The AI cover image is generated from reaction_script content (see
+        // RenderClipJob::buildCoverPrompt()) — voice doesn't affect it, so only
+        // clear the cache on an actual script change, not a voice change.
+        if (array_key_exists('reaction_script', $data) && $data['reaction_script'] !== $clip->reaction_script) {
+            $data['intro_cover_path'] = null;
         }
 
         $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes', 'layer_overrides', 'segments', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice'];
@@ -116,6 +150,10 @@ class ClipController extends Controller
         }
 
         $clip->update($data);
+
+        if (array_intersect(array_keys($data), ['title', 'caption', 'hashtags']) !== []) {
+            GenerateClipEmbeddingJob::dispatch($clip->id);
+        }
 
         if ($needsRerender) {
             $clip->update(['status' => Clip::STATUS_QUEUED, 'progress' => 0]);
@@ -166,20 +204,36 @@ class ClipController extends Controller
     /**
      * AI-generated per-platform title/caption/description/hashtags/CTA suggestions.
      */
-    public function generateSocialMetadata(Request $request, Clip $clip, SocialMetadataProvider $provider)
-    {
+    public function generateSocialMetadata(
+        Request $request,
+        Clip $clip,
+        SocialMetadataProvider $provider,
+        WebContentFetcher $webFetcher,
+    ) {
         $this->authorizeClip($request, $clip);
 
         $data = $request->validate([
             'platforms' => ['sometimes', 'array'],
             'platforms.*' => ['string', Rule::in(['tiktok', 'youtube', 'instagram', 'facebook', 'twitter', 'linkedin'])],
+            'reference_url' => ['sometimes', 'nullable', 'string', 'max:2048', 'url'],
         ]);
 
         $platforms = $data['platforms'] ?? ['tiktok', 'instagram', 'youtube', 'facebook', 'twitter', 'linkedin'];
+        // Falls back to whatever URL is already saved on the clip (e.g. set from the
+        // reaction-intro panel) so this endpoint benefits from it too without the
+        // caller having to resend it every time.
+        $referenceUrl = array_key_exists('reference_url', $data) ? $data['reference_url'] : $clip->reference_url;
+        $referenceContent = $webFetcher->fetch($referenceUrl);
+
+        if (array_key_exists('reference_url', $data) && $data['reference_url'] !== $clip->reference_url) {
+            $clip->update(['reference_url' => $data['reference_url']]);
+        }
 
         Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
 
-        return response()->json(['metadata' => $provider->generateMetadata($clip->load('clipCandidate'), $platforms)]);
+        return response()->json([
+            'metadata' => $provider->generateMetadata($clip->load('clipCandidate'), $platforms, $referenceContent),
+        ]);
     }
 
     /**
@@ -195,16 +249,23 @@ class ClipController extends Controller
         Clip $clip,
         ReactionScriptProvider $scripts,
         TextToSpeechProvider $tts,
+        WebContentFetcher $webFetcher,
     ) {
         $this->authorizeClip($request, $clip);
 
         $data = $request->validate([
             'voice' => ['sometimes', 'nullable', 'string', 'max:64'],
+            'reference_url' => ['sometimes', 'nullable', 'string', 'max:2048', 'url'],
         ]);
+
+        // Falls back to whatever URL is already saved on the clip, so a URL set once
+        // survives subsequent "Regenerate" clicks without having to resend it.
+        $referenceUrl = array_key_exists('reference_url', $data) ? $data['reference_url'] : $clip->reference_url;
+        $referenceContent = $webFetcher->fetch($referenceUrl);
 
         Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
 
-        $result = $scripts->generateReactionScript($clip->load(['clipCandidate', 'video.transcript']));
+        $result = $scripts->generateReactionScript($clip->load(['clipCandidate', 'video.transcript']), $referenceContent);
 
         // TTS hits a real external quota/rate-limit often enough that it shouldn't
         // fail this whole request — the script text is the useful part the user is
@@ -229,6 +290,7 @@ class ClipController extends Controller
             'reaction_tone' => $result->tone,
             'intro_voice' => $data['voice'] ?? $clip->intro_voice,
             'intro_audio_path' => $audioRelative,
+            'reference_url' => array_key_exists('reference_url', $data) ? $data['reference_url'] : $clip->reference_url,
             'intro_enabled' => true,
         ]);
 

@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services\AI\OpenAI;
+namespace App\Services\AI\NineRouter;
 
 use App\Models\Clip;
 use App\Services\AI\Concerns\LogsAiRequests;
@@ -9,21 +9,32 @@ use App\Services\AI\Contracts\SocialMetadataProvider;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
-class OpenAISocialMetadataProvider implements SocialMetadataProvider
+/**
+ * Real social metadata generation via a self-hosted 9Router instance — same
+ * OpenAI-compatible /chat/completions call as NineRouterContentAnalysisProvider
+ * and NineRouterReactionScriptProvider (which this mirrors), just a different
+ * prompt.
+ */
+class NineRouterSocialMetadataProvider implements SocialMetadataProvider
 {
     use LogsAiRequests;
     use ParsesJsonResponses;
 
     public function __construct(
-        private readonly string $apiKey,
-        private readonly string $model = 'gpt-4o-mini',
+        private readonly string $baseUrl,
+        private readonly ?string $apiKey = null,
+        // No universal default — see NineRouterContentAnalysisProvider's docblock.
+        private readonly string $model = '',
     ) {
     }
 
     public function generateMetadata(Clip $clip, array $platforms, ?string $referenceContent = null): array
     {
-        if (empty($this->apiKey)) {
-            throw new RuntimeException('OPENAI_API_KEY is not set — required for AI_SOCIAL_METADATA_PROVIDER=openai.');
+        if (empty($this->model)) {
+            throw new RuntimeException(
+                'NINE_ROUTER_MODEL is not set. Check GET ' . rtrim($this->baseUrl, '/') .
+                '/models for the model ids your 9Router instance actually has credentials for.'
+            );
         }
 
         $context = sprintf(
@@ -38,26 +49,31 @@ class OpenAISocialMetadataProvider implements SocialMetadataProvider
 
         $platformList = implode(', ', $platforms);
         $systemPrompt = $this->systemPrompt($platformList);
-        $span = $this->aiLogger()->start('social_metadata', 'openai', $this->model, $systemPrompt . "\n\n" . $context);
+        $span = $this->aiLogger()->start('social_metadata', 'nine_router', $this->model, $systemPrompt . "\n\n" . $context);
 
-        $response = Http::withToken($this->apiKey)
-            ->timeout(60)
+        $request = Http::timeout(60)
             ->retry(2, 1500)
-            ->withOptions(['version' => 1.1])
-            ->post('https://api.openai.com/v1/chat/completions', [
-                'model' => $this->model,
-                'response_format' => ['type' => 'json_object'],
-                'temperature' => 0.6,
-                'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
-                    ['role' => 'user', 'content' => $context],
-                ],
-            ]);
+            ->withOptions(['version' => 1.1]);
+
+        if ($this->apiKey) {
+            $request = $request->withToken($this->apiKey);
+        }
+
+        $response = $request->post(rtrim($this->baseUrl, '/') . '/chat/completions', [
+            'model' => $this->model,
+            'stream' => false,
+            'response_format' => ['type' => 'json_object'],
+            'temperature' => 0.6,
+            'messages' => [
+                ['role' => 'system', 'content' => $systemPrompt],
+                ['role' => 'user', 'content' => $context],
+            ],
+        ]);
 
         if ($response->failed()) {
             $span->failure($response->body());
 
-            throw new RuntimeException('OpenAI social metadata generation failed: ' . $response->body());
+            throw new RuntimeException('9Router social metadata generation failed: ' . $response->body());
         }
 
         $raw = (string) $response->json('choices.0.message.content');

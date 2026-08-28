@@ -21,7 +21,7 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
     ) {
     }
 
-    public function generateMetadata(Clip $clip, array $platforms): array
+    public function generateMetadata(Clip $clip, array $platforms, ?string $referenceContent = null): array
     {
         $context = sprintf(
             "Clip title: %s\nHook / caption: %s\nExisting hashtags: %s",
@@ -29,6 +29,9 @@ class OllamaSocialMetadataProvider implements SocialMetadataProvider
             $clip->clipCandidate?->hook_text ?? $clip->caption ?? '(none)',
             implode(' ', $clip->hashtags ?? [])
         );
+        if (filled($referenceContent)) {
+            $context .= "\n\nReference source (from a URL the user supplied — use it for extra context/facts):\n{$referenceContent}";
+        }
 
         $platformList = implode(', ', $platforms);
         $systemPrompt = $this->systemPrompt($platformList);

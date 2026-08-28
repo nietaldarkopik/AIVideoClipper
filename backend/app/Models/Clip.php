@@ -25,7 +25,8 @@ class Clip extends Model
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
         'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
         'reaction_script', 'reaction_tone', 'intro_enabled', 'outro_enabled',
-        'intro_voice', 'intro_audio_path',
+        'intro_voice', 'intro_audio_path', 'embedding', 'embedding_model',
+        'reference_url', 'intro_cover_path',
     ];
 
     protected $casts = [
@@ -35,6 +36,7 @@ class Clip extends Model
         'subtitle_config' => 'array',
         'layer_overrides' => 'array',
         'segments' => 'array',
+        'embedding' => 'array',
         'subtitles_enabled' => 'boolean',
         'intro_enabled' => 'boolean',
         'outro_enabled' => 'boolean',

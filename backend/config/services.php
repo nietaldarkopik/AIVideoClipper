@@ -106,6 +106,16 @@ return [
         // (services.google.*) used for real YouTube publishing.
         'youtube_provider' => env('TRENDING_YOUTUBE_PROVIDER', 'mock'),
         'youtube_api_key' => env('YOUTUBE_API_KEY'),
+        // TikTok/Instagram/Facebook/Twitter still have no official trending API, but
+        // can approximate one via 9Router web search (domain-filtered to each
+        // platform) — set to nine_router_search + configure
+        // services.nine_router.web_search_model to switch one on. Best-effort: a
+        // search result isn't guaranteed to be a single yt-dlp-downloadable post the
+        // way the curated mock seed list is — see AbstractNineRouterSearchTrendingProvider.
+        'tiktok_provider' => env('TRENDING_TIKTOK_PROVIDER', 'mock'),
+        'instagram_provider' => env('TRENDING_INSTAGRAM_PROVIDER', 'mock'),
+        'facebook_provider' => env('TRENDING_FACEBOOK_PROVIDER', 'mock'),
+        'twitter_provider' => env('TRENDING_TWITTER_PROVIDER', 'mock'),
         'cache_ttl' => env('TRENDING_CACHE_TTL', 900),
         'region_code' => env('TRENDING_REGION_CODE', 'US'),
     ],
@@ -121,6 +131,14 @@ return [
         'reaction_script_provider' => env('AI_REACTION_SCRIPT_PROVIDER', 'mock'),
         // Text-to-speech for that reaction line — see TextToSpeechProvider.
         'tts_provider' => env('AI_TTS_PROVIDER', 'mock'),
+        // Vector embeddings for clip semantic search — see ClipSearchService.
+        'embedding_provider' => env('AI_EMBEDDING_PROVIDER', 'mock'),
+        // URL -> markdown/text fetch, used as extra context for reaction-script /
+        // social-metadata generation — see WebContentFetcher.
+        'web_fetch_provider' => env('AI_WEB_FETCH_PROVIDER', 'mock'),
+        // AI-generated background for the reaction intro cover — see
+        // RenderClipJob::composeIntroOutro().
+        'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
         'max_clips_per_video' => env('MAX_CLIPS_PER_VIDEO', 10),
         'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 30),
     ],
@@ -172,6 +190,17 @@ return [
         // registered provider/credential (e.g. a Gemini entry) than clip scoring
         // does. Falls back to `model` when unset — see AIServiceProvider.
         'reaction_script_model' => env('NINE_ROUTER_REACTION_SCRIPT_MODEL'),
+        // Model id for the /embeddings endpoint — check GET {base_url}/models/embedding.
+        'embedding_model' => env('NINE_ROUTER_EMBEDDING_MODEL'),
+        // Model id for the /web/fetch endpoint (a provider name, e.g. "jina-reader") —
+        // check GET {base_url}/models/web (kind=="webFetch").
+        'web_fetch_model' => env('NINE_ROUTER_WEB_FETCH_MODEL'),
+        // Model id for the /web/search endpoint (a provider name, e.g. "tavily") — used
+        // by the trending non-YouTube platforms, check GET {base_url}/models/web
+        // (kind=="webSearch"). See TrendingServiceProvider.
+        'web_search_model' => env('NINE_ROUTER_WEB_SEARCH_MODEL'),
+        // Model id for the /images/generations endpoint — check GET {base_url}/models/image.
+        'image_model' => env('NINE_ROUTER_IMAGE_MODEL'),
     ],
 
     'whisper_engine' => [

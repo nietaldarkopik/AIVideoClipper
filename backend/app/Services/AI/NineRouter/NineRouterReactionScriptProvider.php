@@ -31,7 +31,7 @@ class NineRouterReactionScriptProvider implements ReactionScriptProvider
     ) {
     }
 
-    public function generateReactionScript(Clip $clip): ReactionScriptResult
+    public function generateReactionScript(Clip $clip, ?string $referenceContent = null): ReactionScriptResult
     {
         if (empty($this->model)) {
             throw new RuntimeException(
@@ -40,7 +40,7 @@ class NineRouterReactionScriptProvider implements ReactionScriptProvider
             );
         }
 
-        $context = $this->buildContext($clip);
+        $context = $this->buildContext($clip, $referenceContent);
         $systemPrompt = $this->systemPrompt();
         $span = $this->aiLogger()->start('reaction_script', 'nine_router', $this->model, $systemPrompt . "\n\n" . $context);
 
@@ -83,12 +83,12 @@ class NineRouterReactionScriptProvider implements ReactionScriptProvider
         return new ReactionScriptResult($text, $tone);
     }
 
-    private function buildContext(Clip $clip): string
+    private function buildContext(Clip $clip, ?string $referenceContent = null): string
     {
         $candidate = $clip->clipCandidate;
         $transcriptExcerpt = $this->transcriptExcerpt($clip);
 
-        return sprintf(
+        $context = sprintf(
             "Clip title: %s\nHook: %s\nExplanation: %s\nMoment type: %s\nOverall score (1-100): %s\nWhy it was picked: %s\nTranscript of this clip:\n%s",
             $clip->title ?: '(none)',
             $candidate?->hook_text ?? $clip->caption ?? '(none)',
@@ -98,6 +98,12 @@ class NineRouterReactionScriptProvider implements ReactionScriptProvider
             implode('; ', $candidate?->reasons ?? []) ?: '(none)',
             $transcriptExcerpt !== '' ? $transcriptExcerpt : '(no transcript available)'
         );
+
+        if (filled($referenceContent)) {
+            $context .= "\n\nReference source (from a URL the user supplied — use it for extra context/facts):\n{$referenceContent}";
+        }
+
+        return $context;
     }
 
     private function transcriptExcerpt(Clip $clip): string

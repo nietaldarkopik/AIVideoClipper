@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Scissors, Download, X } from "lucide-react";
+import { Scissors, Download, X, Search } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { ApiError, apiOrigin } from "@/lib/api";
 import { toast } from "@/store/toast";
 import { useAuthStore } from "@/store/auth";
 import { Button } from "@/components/ui/Button";
-import { Select } from "@/components/ui/Input";
+import { Input, Select } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ClipCard } from "@/components/clips/ClipCard";
@@ -25,12 +25,27 @@ export default function AllClipsPage() {
   const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
 
-  const key = `/clips?per_page=60${status ? `&status=${status}` : ""}`;
+  const isSearching = search.trim() !== "";
+  const key = isSearching
+    ? `/clips/search?q=${encodeURIComponent(search.trim())}`
+    : `/clips?per_page=60${status ? `&status=${status}` : ""}`;
   const { data, isLoading } = useApi<Paginated<Clip>>(key, {
     refreshInterval: (latest?: Paginated<Clip>) =>
-      latest?.data.some((c: Clip) => c.status === "queued" || c.status === "rendering") ? 2500 : 0,
+      !isSearching && latest?.data.some((c: Clip) => c.status === "queued" || c.status === "rendering") ? 2500 : 0,
   });
+
+  function handleSearchSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSearch(searchInput);
+  }
+
+  function clearSearch() {
+    setSearchInput("");
+    setSearch("");
+  }
 
   function toggle(id: number) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -75,7 +90,28 @@ export default function AllClipsPage() {
           <p className="mt-1 text-sm text-muted">Every clip generated across all your projects.</p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={status} onChange={(e) => setStatus(e.target.value)} className="w-auto">
+          <form onSubmit={handleSearchSubmit} className="flex items-center gap-1.5">
+            <Input
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search clips by content..."
+              className="w-56"
+            />
+            <Button type="submit" size="sm" variant="secondary">
+              <Search className="size-3.5" />
+            </Button>
+            {isSearching && (
+              <Button type="button" size="sm" variant="ghost" onClick={clearSearch}>
+                <X className="size-3.5" />
+              </Button>
+            )}
+          </form>
+          <Select
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="w-auto"
+            disabled={isSearching}
+          >
             {STATUS_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
@@ -84,6 +120,12 @@ export default function AllClipsPage() {
           </Select>
         </div>
       </div>
+
+      {isSearching && (
+        <p className="text-xs text-muted">
+          Showing semantic search results for &quot;{search}&quot; — status filter is ignored while searching.
+        </p>
+      )}
 
       {selected.length > 0 && (
         <div className="flex items-center justify-between rounded-xl border border-accent/30 bg-accent/5 px-4 py-2.5">
@@ -108,7 +150,15 @@ export default function AllClipsPage() {
           ))}
         </div>
       ) : data.data.length === 0 ? (
-        <EmptyState icon={<Scissors className="size-6" />} title="No clips yet" description="Generate clips from a project to see them here." />
+        <EmptyState
+          icon={<Scissors className="size-6" />}
+          title={isSearching ? "No matching clips" : "No clips yet"}
+          description={
+            isSearching
+              ? "Try a different search, or check back after new clips finish embedding."
+              : "Generate clips from a project to see them here."
+          }
+        />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           {data.data.map((clip) => (

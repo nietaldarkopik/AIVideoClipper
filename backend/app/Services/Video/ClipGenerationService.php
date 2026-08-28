@@ -2,6 +2,7 @@
 
 namespace App\Services\Video;
 
+use App\Jobs\GenerateClipEmbeddingJob;
 use App\Models\Clip;
 use App\Models\ClipCandidate;
 use App\Models\Project;
@@ -83,6 +84,7 @@ class ClipGenerationService
             $candidate->update(['status' => 'generated']);
 
             $this->attachReactionScript($clip);
+            GenerateClipEmbeddingJob::dispatch($clip->id);
 
             $clips->push($clip);
         }

@@ -138,6 +138,7 @@ export interface Clip {
   intro_enabled: boolean;
   outro_enabled: boolean;
   intro_voice: string | null;
+  reference_url: string | null;
   status: ClipStatus;
   progress: number | null;
   failure_reason: string | null;

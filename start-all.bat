@@ -85,6 +85,9 @@ if defined FORCE_INSTAGRAM (
 
 echo Starting clipper-tools...
 
+rem 0. 9router
+start "clipper: 9router" cmd /k "9router"
+
 rem 1. Redis
 start "clipper: redis" cmd /k "cd /d "%ROOT%\tools\redis" && redis-server.exe redis.conf"
 
