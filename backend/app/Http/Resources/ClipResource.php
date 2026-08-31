@@ -30,6 +30,9 @@ class ClipResource extends JsonResource
             'subtitle_language' => $this->subtitle_language,
             'subtitles_enabled' => $this->subtitles_enabled,
             'subtitle_config' => $this->subtitle_config,
+            'custom_subtitle_format' => $this->custom_subtitle_path
+                ? strtolower(pathinfo($this->custom_subtitle_path, PATHINFO_EXTENSION))
+                : null,
             'layer_overrides' => $this->layer_overrides,
             'reaction_layout' => $this->reaction_layout,
             'reaction_script' => $this->reaction_script,

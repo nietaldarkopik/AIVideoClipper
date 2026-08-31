@@ -75,6 +75,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/clips/{clip}', [ClipController::class, 'update']);
     Route::delete('/clips/{clip}', [ClipController::class, 'destroy']);
     Route::post('/clips/{clip}/duplicate', [ClipController::class, 'duplicate']);
+    Route::post('/clips/{clip}/subtitle', [ClipController::class, 'uploadSubtitle']);
+    Route::delete('/clips/{clip}/subtitle', [ClipController::class, 'removeSubtitle']);
     Route::post('/clips/{clip}/regenerate', [ClipController::class, 'regenerate']);
     Route::post('/clips/{clip}/reaction', [ReactionController::class, 'updateClip']);
     Route::post('/clips/{clip}/generate-social-metadata', [ClipController::class, 'generateSocialMetadata']);

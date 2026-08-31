@@ -148,6 +148,7 @@ class AIServiceProvider extends ServiceProvider
                 'face_tracker' => new FaceTrackerReframingProvider(
                     (string) config('services.face_tracker.base_url'),
                     (int) config('services.face_tracker.timeout', 300),
+                    (string) config('services.media.ffmpeg_bin', 'ffmpeg'),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_REFRAMING_PROVIDER [{$provider}]. Valid values: mock, face_tracker."),
             };

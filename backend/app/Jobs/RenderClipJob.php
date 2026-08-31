@@ -18,6 +18,7 @@ use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
 use App\Services\Video\LayerOverrideMerger;
 use App\Services\Video\SilenceTrimmer;
+use App\Services\Video\SrtParser;
 use App\Services\Video\SubtitleService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Filesystem\Filesystem;
@@ -72,6 +73,17 @@ class RenderClipJob implements ShouldQueue
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
 
+            // A user-supplied caption file is assumed timed against this clip's own
+            // (uncut) duration, not the original source video, and a raw .ass's
+            // override tags can't be generically remapped the way transcript word
+            // timestamps can — so when one is present, silence removal is skipped
+            // entirely for this render (same treatment as a reaction clip's webcam
+            // track below) rather than risk silently desyncing captions we can't
+            // safely retime.
+            $customSubtitlePath = $clip->custom_subtitle_path && $disk->exists($clip->custom_subtitle_path)
+                ? $disk->path($clip->custom_subtitle_path)
+                : null;
+
             $segments = $this->resolveSegments($clip);
             $clipStart = (float) $segments[0]['start'];
             $clipEnd = (float) $segments[count($segments) - 1]['end'];
@@ -95,7 +107,7 @@ class RenderClipJob implements ShouldQueue
             // remapKeyframes() already expect, so nothing downstream needs to know
             // segments exist at all.
             $keepIntervals = [];
-            if (! $clip->webcam_path) {
+            if (! $clip->webcam_path && ! $customSubtitlePath) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(10, 'Detecting silence...');
                 foreach ($segments as $segment) {
@@ -183,7 +195,37 @@ class RenderClipJob implements ShouldQueue
             }
 
             $assPath = null;
-            if ($clip->subtitles_enabled && $video->transcript) {
+            if ($customSubtitlePath) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(35, 'Using custom captions...');
+
+                $ext = strtolower(pathinfo($customSubtitlePath, PATHINFO_EXTENSION));
+
+                if ($ext === 'ass') {
+                    // Carries its own style (fonts, colors, positions) — burned in
+                    // exactly as provided, template caption settings don't apply.
+                    $assPath = $customSubtitlePath;
+                } elseif ($ext === 'srt') {
+                    // Plain .srt has no style of its own — run it through the same
+                    // template pipeline (color/size/position/background/animation)
+                    // as transcript-generated captions so it still looks
+                    // professional. No per-word timestamps exist in an .srt, so
+                    // 'words' stays empty per segment; toAss() already handles that
+                    // by rendering the whole line styled but without per-word
+                    // highlight, exactly like a segment with highlighting disabled.
+                    $customSegments = array_map(fn (array $seg) => [
+                        'start' => $seg['start'],
+                        'end' => $seg['end'],
+                        'text' => $seg['text'],
+                        'words' => [],
+                    ], SrtParser::parse(file_get_contents($customSubtitlePath)));
+
+                    $ass = $subtitleService->toAss($customSegments, $captionConfig, $targetWidth, $targetHeight);
+                    $assRelative = "subtitles/{$clip->id}/custom.ass";
+                    $disk->put($assRelative, $ass);
+                    $assPath = $disk->path($assRelative);
+                }
+            } elseif ($clip->subtitles_enabled && $video->transcript) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(35, 'Generating captions...');
 

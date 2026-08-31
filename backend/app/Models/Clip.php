@@ -21,7 +21,7 @@ class Clip extends Model
         'project_id', 'video_id', 'clip_candidate_id', 'template_id', 'template_version_id',
         'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'aspect_ratio',
         'crop_config', 'scenes', 'subtitle_language', 'subtitles_enabled', 'subtitle_config',
-        'layer_overrides', 'segments',
+        'custom_subtitle_path', 'layer_overrides', 'segments',
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
         'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
         'reaction_script', 'reaction_tone', 'intro_enabled', 'outro_enabled',

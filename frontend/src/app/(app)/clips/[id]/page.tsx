@@ -14,6 +14,8 @@ import {
   Undo2,
   Redo2,
   Scissors,
+  Upload,
+  X,
 } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
@@ -93,7 +95,9 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   const [saving, setSaving] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [uploadingSubtitle, setUploadingSubtitle] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const subtitleInputRef = useRef<HTMLInputElement>(null);
 
   const history = useClipEditorHistory({ segments: [], layers: [], cropMode: "smart", cropKeyframe: null });
   const [historyReady, setHistoryReady] = useState(false);
@@ -200,6 +204,36 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   // button always applies whatever's currently selected.
   async function handleRegenerate() {
     await handleSave();
+  }
+
+  async function handleUploadSubtitle(file: File) {
+    setUploadingSubtitle(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      await api.post(`${clipKey}/subtitle`, form);
+      await mutate(clipKey);
+      toast("Custom captions attached — re-rendering.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to upload captions.", "danger");
+    } finally {
+      setUploadingSubtitle(false);
+      if (subtitleInputRef.current) subtitleInputRef.current.value = "";
+    }
+  }
+
+  async function handleRemoveSubtitle() {
+    if (!confirm("Remove the custom captions? The clip will go back to auto-generated captions on the next render.")) return;
+    setUploadingSubtitle(true);
+    try {
+      await api.del(`${clipKey}/subtitle`);
+      await mutate(clipKey);
+      toast("Custom captions removed — re-rendering.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to remove captions.", "danger");
+    } finally {
+      setUploadingSubtitle(false);
+    }
   }
 
   async function handleDuplicate() {
@@ -564,6 +598,47 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                     className="size-4 rounded accent-accent"
                   />
                 </div>
+              </div>
+
+              <div className="rounded-xl bg-surface-elevated px-3.5 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Custom Captions</p>
+                    <p className="text-xs text-muted">
+                      {clip.custom_subtitle_format
+                        ? clip.custom_subtitle_format === "ass"
+                          ? "Using your .ass file's own style"
+                          : "Using your .srt, styled by the template above"
+                        : "Upload a .srt or .ass to override auto-generated captions"}
+                    </p>
+                  </div>
+                  {clip.custom_subtitle_format ? (
+                    <Button variant="outline" size="sm" onClick={handleRemoveSubtitle} loading={uploadingSubtitle}>
+                      <X className="size-3.5" />
+                      Remove
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => subtitleInputRef.current?.click()}
+                      loading={uploadingSubtitle}
+                    >
+                      <Upload className="size-3.5" />
+                      Upload
+                    </Button>
+                  )}
+                </div>
+                <input
+                  ref={subtitleInputRef}
+                  type="file"
+                  accept=".srt,.ass"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleUploadSubtitle(file);
+                  }}
+                />
               </div>
 
               <Button className="w-full" onClick={handleSave} loading={saving}>
