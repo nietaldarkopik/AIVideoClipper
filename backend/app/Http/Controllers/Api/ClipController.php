@@ -164,6 +164,60 @@ class ClipController extends Controller
     }
 
     /**
+     * Attach a user-supplied .srt/.ass caption file to a clip — RenderClipJob uses
+     * it instead of generating captions from the transcript on the next render (an
+     * .ass keeps its own embedded style as-is, a plain .srt gets styled through the
+     * template pipeline). See RenderClipJob::handle() for how each is consumed.
+     */
+    public function uploadSubtitle(Request $request, Clip $clip)
+    {
+        $this->authorizeClip($request, $clip);
+
+        $data = $request->validate([
+            'file' => ['required', 'file', 'max:2048', function ($attribute, $value, $fail) {
+                $ext = strtolower($value->getClientOriginalExtension());
+                if (! in_array($ext, ['srt', 'ass'], true)) {
+                    $fail('The file must be a .srt or .ass caption file.');
+                }
+            }],
+        ]);
+
+        $file = $data['file'];
+        $ext = strtolower($file->getClientOriginalExtension());
+        $relativePath = Storage::disk('media')->putFileAs("subtitles/{$clip->id}", $file, "custom.{$ext}");
+
+        $clip->update([
+            'custom_subtitle_path' => $relativePath,
+            'status' => Clip::STATUS_QUEUED,
+            'progress' => 0,
+        ]);
+        RenderClipJob::dispatch($clip->id);
+
+        return ClipResource::make($clip->fresh(['template']));
+    }
+
+    /**
+     * Revert to transcript-generated captions (or none) on the next render.
+     */
+    public function removeSubtitle(Request $request, Clip $clip)
+    {
+        $this->authorizeClip($request, $clip);
+
+        if ($clip->custom_subtitle_path) {
+            Storage::disk('media')->delete($clip->custom_subtitle_path);
+        }
+
+        $clip->update([
+            'custom_subtitle_path' => null,
+            'status' => Clip::STATUS_QUEUED,
+            'progress' => 0,
+        ]);
+        RenderClipJob::dispatch($clip->id);
+
+        return ClipResource::make($clip->fresh(['template']));
+    }
+
+    /**
      * The fully merged, resolved view a client-side editor draws from: template
      * layers with this clip's layer_overrides already applied, and the merged
      * caption config. Computed via the exact same merge helpers RenderClipJob

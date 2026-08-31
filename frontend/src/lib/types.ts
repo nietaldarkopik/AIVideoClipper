@@ -130,6 +130,7 @@ export interface Clip {
   subtitle_language: string;
   subtitles_enabled: boolean;
   subtitle_config: Record<string, unknown> | null;
+  custom_subtitle_format: "srt" | "ass" | null;
   layer_overrides: LayerOverrides | null;
   segments: Segment[] | null;
   reaction_layout: ReactionLayout | null;
