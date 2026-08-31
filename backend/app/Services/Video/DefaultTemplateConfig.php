@@ -50,6 +50,14 @@ class DefaultTemplateConfig
             // FFmpegService::renderClip()'s $videoRegion param.
             'video_region' => null,
             'canvas_background_color' => '#000000',
+            // 'none' (every template before this key existed) renders identically
+            // to before — see FFmpegService::buildEffectFilter(). 'zoom_in' |
+            // 'zoom_out' | 'ken_burns' | 'shake' otherwise; intensity is 0..0.5.
+            'effects' => ['type' => 'none', 'intensity' => 0.15],
+            // 'cut' (every template before this key existed) joins intro/main/outro
+            // segments exactly as before — see FFmpegService::concatSegments().
+            // 'fade' crossfades across each segment boundary instead.
+            'transition' => ['type' => 'cut', 'duration' => 0.4],
         ];
     }
 

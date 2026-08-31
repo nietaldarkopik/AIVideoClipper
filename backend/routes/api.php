@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChannelWatchController;
 use App\Http\Controllers\Api\ClipCandidateController;
 use App\Http\Controllers\Api\ClipController;
+use App\Http\Controllers\Api\ContentBriefController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ProcessingJobController;
 use App\Http\Controllers\Api\ProjectController;
@@ -88,6 +89,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/trending', [TrendingController::class, 'index']);
     Route::get('/trending/platforms', [TrendingController::class, 'platforms']);
 
+    Route::get('/content-briefs', [ContentBriefController::class, 'index']);
+    Route::post('/content-briefs', [ContentBriefController::class, 'store']);
+    Route::get('/content-briefs/{contentBrief}', [ContentBriefController::class, 'show']);
+    Route::post('/content-briefs/{contentBrief}/regenerate-script', [ContentBriefController::class, 'regenerateScript']);
+    Route::delete('/content-briefs/{contentBrief}', [ContentBriefController::class, 'destroy']);
+
     Route::get('/social-accounts/platforms', [SocialAccountController::class, 'platforms']);
     Route::get('/social-accounts', [SocialAccountController::class, 'index']);
     Route::post('/social-accounts/connect', [SocialAccountController::class, 'connect']);
@@ -100,7 +107,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/social-posts', [SocialPostController::class, 'index']);
     Route::post('/social-posts', [SocialPostController::class, 'store']);
+    Route::post('/social-posts/bulk-reschedule', [SocialPostController::class, 'bulkReschedule']);
     Route::get('/social-posts/{socialPost}', [SocialPostController::class, 'show']);
+    Route::patch('/social-posts/{socialPost}', [SocialPostController::class, 'update']);
+    Route::post('/social-posts/{socialPost}/regenerate-schedule', [SocialPostController::class, 'regenerateSchedule']);
     Route::post('/social-posts/{socialPost}/retry', [SocialPostController::class, 'retry']);
     Route::post('/social-posts/{socialPost}/publish-now', [SocialPostController::class, 'publishNow']);
     Route::delete('/social-posts/{socialPost}', [SocialPostController::class, 'destroy']);
@@ -121,6 +131,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/templates', [TemplateController::class, 'store']);
         Route::patch('/templates/{template}', [TemplateController::class, 'update']);
         Route::post('/templates/{template}/duplicate', [TemplateController::class, 'duplicate']);
+        Route::post('/templates/{template}/generate-thumbnail', [TemplateController::class, 'generateThumbnail']);
         Route::post('/templates/{template}/archive', [TemplateController::class, 'archive']);
         Route::delete('/templates/{template}', [TemplateController::class, 'destroy']);
     });

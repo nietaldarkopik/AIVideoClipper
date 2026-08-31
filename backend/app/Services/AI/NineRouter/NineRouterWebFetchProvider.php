@@ -55,7 +55,11 @@ class NineRouterWebFetchProvider implements WebFetchProvider
             throw new RuntimeException('9Router web fetch failed: ' . $response->body());
         }
 
-        $text = (string) $response->json('data.content.text', '');
+        // 9Router's actual /v1/web/fetch response is flat ({provider, url, title,
+        // content: {format, text, length}, metadata, usage, metrics}) — verified
+        // live 2026-08-30 against a real instance. No "data" wrapper, despite
+        // AbstractNineRouterSearchTrendingProvider's docblock claiming otherwise.
+        $text = (string) $response->json('content.text', '');
         $span->success($text);
 
         return $text;

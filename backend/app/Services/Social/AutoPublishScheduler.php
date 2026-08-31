@@ -116,16 +116,107 @@ class AutoPublishScheduler
      * actually occupies a slot (scheduled, in-flight, published, or even failed —
      * a failed attempt still hit the platform around that time) but not ones that
      * never got that far (still 'ready') or were explicitly freed ('cancelled').
+     * Public so SocialPostController::regenerateSchedule() can recompute a single
+     * post's slot the exact same way — after a channel swap (the old slot was
+     * picked for a different account's queue) or to bump a post to the soonest
+     * non-spammy slot without bypassing the stagger/day-cap rules entirely (that's
+     * what publish-now is for).
+     *
+     * @param  ?int  $windowStartHour  0-23; both null (default, every caller before this feature) means no daily posting-hours restriction at all — a slot can land at any hour, exactly as before.
+     * @param  ?int  $windowEndHour  1-24 (24 = midnight, i.e. the window runs to the end of the day)
      */
-    private function nextAvailableSlot(SocialAccount $account, Carbon $notBefore, int $maxPerDay): Carbon
-    {
+    public function nextAvailableSlot(
+        SocialAccount $account,
+        Carbon $notBefore,
+        int $maxPerDay,
+        ?int $windowStartHour = null,
+        ?int $windowEndHour = null,
+    ): Carbon {
         $slot = $notBefore->clone();
+        $rolloverHour = $windowStartHour ?? self::OVERFLOW_DAY_START_HOUR;
 
-        while ($this->claimedSlotsOnDay($account, $slot) >= $maxPerDay) {
-            $slot = $slot->clone()->startOfDay()->addDay()->addHours(self::OVERFLOW_DAY_START_HOUR);
+        while (true) {
+            if ($windowStartHour !== null && $windowEndHour !== null && $windowStartHour < $windowEndHour) {
+                $slot = $this->clampToWindow($slot, $windowStartHour, $windowEndHour);
+            }
+
+            if ($this->claimedSlotsOnDay($account, $slot) < $maxPerDay) {
+                return $slot;
+            }
+
+            $slot = $slot->clone()->startOfDay()->addDay()->addHours($rolloverHour);
+        }
+    }
+
+    /**
+     * Pushes $slot forward into [$startHour, $endHour) on its own day if it's
+     * too early, or to $startHour the NEXT day if it's at/past $endHour — never
+     * pulls a slot backward in time. Only called with an already-validated
+     * $startHour < $endHour (see nextAvailableSlot()).
+     */
+    private function clampToWindow(Carbon $slot, int $startHour, int $endHour): Carbon
+    {
+        if ($slot->hour < $startHour) {
+            return $slot->clone()->startOfDay()->addHours($startHour);
+        }
+        if ($slot->hour >= $endHour) {
+            return $slot->clone()->startOfDay()->addDay()->addHours($startHour);
         }
 
         return $slot;
+    }
+
+    /**
+     * Bulk-reschedule an arbitrary set of EXISTING posts, staggered per social
+     * account with a random gap in [$staggerMinSeconds, $staggerMaxSeconds] and
+     * the same day-cap/rollover rules as scheduleForProject() — the "Reschedule
+     * All" action on the Scheduler page. Unlike scheduleForProject() this
+     * redistributes posts that already exist instead of creating new ones, so
+     * it's grouped by social_account_id up front rather than iterating
+     * clips x accounts. Relative order within each account is preserved (by
+     * current scheduled_at, falling back to created_at for posts that were
+     * never scheduled) so a bulk reshuffle doesn't change which clip goes out
+     * first for a given channel — only when.
+     *
+     * @param  Collection<int, SocialPost>  $posts
+     * @param  ?int  $windowStartHour  see nextAvailableSlot() — null (default) means no daily posting-hours restriction
+     * @return int number of posts rescheduled
+     */
+    public function rescheduleBulk(
+        Collection $posts,
+        int $staggerMinSeconds = self::STAGGER_MIN_SECONDS,
+        int $staggerMaxSeconds = self::STAGGER_MAX_SECONDS,
+        int $maxPostsPerDayPerAccount = self::MAX_POSTS_PER_DAY_PER_ACCOUNT,
+        ?int $windowStartHour = null,
+        ?int $windowEndHour = null,
+    ): int {
+        $staggerMaxSeconds = max($staggerMinSeconds, $staggerMaxSeconds);
+        $maxPostsPerDayPerAccount = max(1, $maxPostsPerDayPerAccount);
+
+        $rescheduledCount = 0;
+        foreach ($posts->groupBy('social_account_id') as $accountPosts) {
+            $account = $accountPosts->first()?->socialAccount;
+            if (! $account) {
+                continue;
+            }
+
+            $ordered = $accountPosts->sortBy(fn (SocialPost $p) => $p->scheduled_at ?? $p->created_at);
+            $cursor = now();
+
+            foreach ($ordered as $post) {
+                $slot = $this->nextAvailableSlot($account, $cursor, $maxPostsPerDayPerAccount, $windowStartHour, $windowEndHour);
+
+                $post->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $slot]);
+                // Stale original delayed job (if any) is a guarded no-op — see
+                // PublishClipJob::handle()'s scheduled_at->isFuture() check.
+                PublishClipJob::dispatch($post->id)->delay($slot);
+                $rescheduledCount++;
+
+                $cursor = $slot->clone()->addSeconds(random_int($staggerMinSeconds, $staggerMaxSeconds));
+            }
+        }
+
+        return $rescheduledCount;
     }
 
     private function claimedSlotsOnDay(SocialAccount $account, Carbon $day): int

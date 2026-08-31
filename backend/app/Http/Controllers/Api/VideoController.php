@@ -20,7 +20,7 @@ class VideoController extends Controller
 
         $data = $request->validate([
             'file' => ['required_without:url', 'file', 'mimetypes:video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo', 'max:5242880'],
-            'url' => ['required_without:file', 'nullable', 'url'],
+            'url' => ['required_without:file', 'nullable', 'url', 'max:8192'],
         ]);
 
         if ($request->hasFile('file')) {

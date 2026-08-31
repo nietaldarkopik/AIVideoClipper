@@ -280,6 +280,20 @@ export interface TemplateConfig {
   // this UI, but the field stores the general shape for forward-compatibility.
   video_region?: { x: number; y: number; width: number; height: number } | null;
   canvas_background_color?: string;
+  // See FFmpegService::buildEffectFilter() — 'none' (default) leaves the frame
+  // untouched; the others crop+scale a continuous zoom/drift/jitter formula onto
+  // the base video, applied before captions/layers/watermark.
+  effects?: {
+    type?: "none" | "zoom_in" | "zoom_out" | "ken_burns" | "shake";
+    intensity?: number;
+  };
+  // See FFmpegService::concatSegments() — only matters when a clip actually has
+  // an intro/outro segment to join; 'cut' (default) is a hard cut, 'fade'
+  // crossfades video+audio across the boundary over `duration` seconds.
+  transition?: {
+    type?: "cut" | "fade";
+    duration?: number;
+  };
   [key: string]: unknown;
 }
 
@@ -342,6 +356,15 @@ export type SocialPostStatus =
 export interface SocialPost {
   id: number;
   clip_id: number;
+  clip: {
+    id: number;
+    title: string | null;
+    thumbnail_url: string | null;
+    url: string | null;
+    duration: number;
+    project_id: number;
+    project_title: string | null;
+  } | null;
   platform: SocialPlatform;
   social_account: SocialAccount | null;
   title: string | null;
@@ -499,6 +522,61 @@ export interface TrendingPlatformInfo {
   key: TrendingPlatform;
   label: string;
   is_mocked: boolean;
+}
+
+export type ContentBriefStatus =
+  | "pending"
+  | "searching"
+  | "fetching_sources"
+  | "generating_script"
+  | "finding_videos"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ContentBriefSource {
+  title: string;
+  url: string;
+  snippet: string | null;
+  published_at: string | null;
+  content_excerpt: string | null;
+}
+
+export interface ContentBriefCandidateVideo {
+  title: string;
+  url: string;
+  platform: string | null;
+  thumbnail_url: string | null;
+}
+
+export interface ContentBriefNarrativeSection {
+  heading: string;
+  narration_text: string;
+  duration_estimate_seconds: number;
+}
+
+export interface ContentBrief {
+  id: number;
+  topic: string;
+  region_code: string | null;
+  source_platform: string | null;
+  source_trending_title: string | null;
+  source_trending_url: string | null;
+  status: ContentBriefStatus;
+  progress: number;
+  message: string | null;
+  failure_reason: string | null;
+  sources: ContentBriefSource[];
+  candidate_videos: ContentBriefCandidateVideo[];
+  narrative_title: string | null;
+  narrative_hook: string | null;
+  narrative_sections: ContentBriefNarrativeSection[];
+  narrative_full_script: string | null;
+  narrative_suggested_description: string | null;
+  narrative_suggested_hashtags: string[];
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
 }
 
 export interface Paginated<T> {

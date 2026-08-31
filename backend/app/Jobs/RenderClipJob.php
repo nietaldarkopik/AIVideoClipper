@@ -67,6 +67,8 @@ class RenderClipJob implements ShouldQueue
 
             $config = $clip->templateVersion?->config ?? DefaultTemplateConfig::config();
             $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
+            $effectConfig = array_merge(DefaultTemplateConfig::config()['effects'], $config['effects'] ?? []);
+            $transitionConfig = array_merge(DefaultTemplateConfig::config()['transition'], $config['transition'] ?? []);
             [$targetWidth, $targetHeight] = AspectRatio::resolution($clip->aspect_ratio);
 
             $video = $clip->video;
@@ -230,6 +232,27 @@ class RenderClipJob implements ShouldQueue
             $layers = LayerOverrideMerger::merge($config['layers'] ?? [], $clip->layer_overrides ?? []);
             $resolveLayerPath = fn (string $relative) => $disk->path($relative);
 
+            // config['progress_bar'] is a legacy top-level toggle that predates the
+            // layers system (still written by the template editor's "Progress bar"
+            // checkbox and a couple of seeded templates) — it was never actually
+            // read anywhere in the render pipeline, so enabling it silently did
+            // nothing. Translate it into an equivalent progress_bar layer here so
+            // it renders, unless the template/clip already has one via Layers
+            // (avoid drawing two bars).
+            if (! empty($config['progress_bar']['enabled']) && ! $this->hasProgressBarLayer($layers)) {
+                $layers[] = [
+                    'id' => 'legacy-progress-bar',
+                    'type' => 'progress_bar',
+                    'z_index' => 999,
+                    'props' => [
+                        'color' => $config['progress_bar']['color'] ?? '#7C5CFF',
+                        'background_color' => $config['progress_bar']['background_color'] ?? '#000000',
+                        'height_px' => $config['progress_bar']['height_px'] ?? 6,
+                        'position' => $config['progress_bar']['position'] ?? 'bottom',
+                    ],
+                ];
+            }
+
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(55, 'Rendering video...');
             $clip->update(['progress' => 55]);
@@ -251,6 +274,7 @@ class RenderClipJob implements ShouldQueue
                     $watermarkOpacity,
                     $layers,
                     $resolveLayerPath,
+                    $effectConfig,
                 );
             } else {
                 $ffmpeg->renderClip(
@@ -268,6 +292,7 @@ class RenderClipJob implements ShouldQueue
                     $resolveLayerPath,
                     $config['video_region'] ?? null,
                     (string) ($config['canvas_background_color'] ?? '#000000'),
+                    $effectConfig,
                 );
             }
 
@@ -286,7 +311,7 @@ class RenderClipJob implements ShouldQueue
             if ($clip->intro_enabled || $clip->outro_enabled) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(93, 'Building intro/outro...');
-                $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight);
+                $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight, $transitionConfig);
             }
 
             $clip->update([
@@ -333,6 +358,7 @@ class RenderClipJob implements ShouldQueue
         string $outputRelative,
         int $targetWidth,
         int $targetHeight,
+        array $transitionConfig = ['type' => 'cut', 'duration' => 0.4],
     ): string {
         $segments = [$disk->path($outputRelative)];
         $introIndex = null;
@@ -425,7 +451,7 @@ class RenderClipJob implements ShouldQueue
         }
 
         $finalRelative = "clips/{$clip->id}/output_final.mp4";
-        $ffmpeg->concatSegments($segments, $disk->path($finalRelative), $targetWidth, $targetHeight);
+        $ffmpeg->concatSegments($segments, $disk->path($finalRelative), $targetWidth, $targetHeight, $transitionConfig);
 
         foreach ($tmpFiles as $tmp) {
             @unlink($tmp);
@@ -478,6 +504,20 @@ class RenderClipJob implements ShouldQueue
             ->all();
 
         return $segments ?: [['start' => (float) $clip->start_time, 'end' => (float) $clip->end_time]];
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $layers
+     */
+    private function hasProgressBarLayer(array $layers): bool
+    {
+        foreach ($layers as $layer) {
+            if (($layer['type'] ?? null) === 'progress_bar') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

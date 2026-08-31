@@ -10,7 +10,9 @@ use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
+use App\Services\AI\Contracts\VideoNarrativeProvider;
 use App\Services\AI\Contracts\WebFetchProvider;
+use App\Services\AI\Contracts\WebSearchProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
 use App\Services\AI\Gemini\GeminiReactionScriptProvider;
@@ -20,7 +22,9 @@ use App\Services\AI\Mock\MockImageGenerationProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
 use App\Services\AI\Mock\MockTranscriptionProvider;
+use App\Services\AI\Mock\MockVideoNarrativeProvider;
 use App\Services\AI\Mock\MockWebFetchProvider;
+use App\Services\AI\Mock\MockWebSearchProvider;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\Mock\MockReactionScriptProvider;
@@ -32,7 +36,9 @@ use App\Services\AI\NineRouter\NineRouterReactionScriptProvider;
 use App\Services\AI\NineRouter\NineRouterSocialMetadataProvider;
 use App\Services\AI\NineRouter\NineRouterTextToSpeechProvider;
 use App\Services\AI\NineRouter\NineRouterTranscriptionProvider;
+use App\Services\AI\NineRouter\NineRouterVideoNarrativeProvider;
 use App\Services\AI\NineRouter\NineRouterWebFetchProvider;
+use App\Services\AI\NineRouter\NineRouterWebSearchProvider;
 use App\Services\AI\Ollama\OllamaContentAnalysisProvider;
 use App\Services\AI\Ollama\OllamaReactionScriptProvider;
 use App\Services\AI\Ollama\OllamaSocialMetadataProvider;
@@ -75,6 +81,7 @@ class AIServiceProvider extends ServiceProvider
             return new UrlVideoDownloader(
                 ytDlpBin: config('services.media.ytdlp_bin', 'yt-dlp'),
                 ffmpegBin: config('services.media.ffmpeg_bin', 'ffmpeg'),
+                proxy: config('services.ytdlp.proxy'),
             );
         });
 
@@ -253,6 +260,30 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.nine_router.web_fetch_model'),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_WEB_FETCH_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(WebSearchProvider::class, function ($app) {
+            return match ($provider = config('services.ai.web_search_provider', 'mock')) {
+                'mock' => $app->make(MockWebSearchProvider::class),
+                'nine_router' => new NineRouterWebSearchProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) config('services.nine_router.web_search_model'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_WEB_SEARCH_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(VideoNarrativeProvider::class, function ($app) {
+            return match ($provider = config('services.ai.video_narrative_provider', 'mock')) {
+                'mock' => $app->make(MockVideoNarrativeProvider::class),
+                'nine_router' => new NineRouterVideoNarrativeProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) (config('services.nine_router.video_narrative_model') ?: config('services.nine_router.model')),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_VIDEO_NARRATIVE_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
             };
         });
 

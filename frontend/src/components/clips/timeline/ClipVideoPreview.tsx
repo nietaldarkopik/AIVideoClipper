@@ -1,9 +1,16 @@
 "use client";
 
 import { RefObject } from "react";
-import type { AudioLayerProps, ImageLayerProps, ProgressBarLayerProps, TemplateLayer, TextLayerProps } from "@/lib/types";
+import type {
+  AudioLayerProps,
+  ImageLayerProps,
+  ProgressBarLayerProps,
+  RectLayerProps,
+  TemplateLayer,
+  TextLayerProps,
+} from "@/lib/types";
 
-function isActiveAt(layer: TemplateLayer, t: number): boolean {
+export function isActiveAt(layer: TemplateLayer, t: number): boolean {
   const start = layer.timing?.start ?? 0;
   const end = layer.timing?.end;
   return t >= start && (end == null || t <= end);
@@ -69,10 +76,29 @@ export function ClipVideoPreview({
   );
 }
 
-function LayerOverlay({ layer, currentTime, duration }: { layer: TemplateLayer; currentTime: number; duration: number }) {
+export function LayerOverlay({ layer, currentTime, duration }: { layer: TemplateLayer; currentTime: number; duration: number }) {
   const x = (layer.x ?? 0.5) * 100;
   const y = (layer.y ?? 0.5) * 100;
   const opacity = layer.opacity ?? 1;
+
+  if (layer.type === "rect") {
+    // Top-left positioned, same convention as LayerCompositionService::buildRectLayer()
+    // (drawbox x/y are the box's top-left corner, not a center like 'text'/'image').
+    const props = (layer.props as RectLayerProps) ?? {};
+    return (
+      <div
+        className="absolute"
+        style={{
+          left: `${x}%`,
+          top: `${y}%`,
+          width: `${(layer.width ?? 1) * 100}%`,
+          height: `${(layer.height ?? 0.1) * 100}%`,
+          background: props.color || "#000000",
+          opacity,
+        }}
+      />
+    );
+  }
 
   if (layer.type === "text") {
     const props = (layer.props as TextLayerProps) ?? {};
@@ -95,11 +121,13 @@ function LayerOverlay({ layer, currentTime, duration }: { layer: TemplateLayer; 
   }
 
   if (layer.type === "image" || layer.type === "logo") {
+    // Top-left positioned, same convention as LayerCompositionService::buildImageLayer()
+    // (ffmpeg's overlay=x:y anchors the overlay's top-left corner, not a center).
     const props = (layer.props as ImageLayerProps) ?? {};
     if (!props.image_path) return null;
     return (
       <div
-        className="absolute -translate-x-1/2 -translate-y-1/2"
+        className="absolute"
         style={{ left: `${x}%`, top: `${y}%`, width: layer.width ? `${layer.width * 100}%` : "20%", opacity }}
       >
         <div className="flex aspect-square w-full items-center justify-center rounded bg-white/10 text-[9px] text-muted">

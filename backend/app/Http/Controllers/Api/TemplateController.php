@@ -6,10 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\TemplateResource;
 use App\Models\Template;
 use App\Models\TemplateVersion;
+use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\Video\DefaultTemplateConfig;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Throwable;
 
 class TemplateController extends Controller
 {
@@ -149,6 +153,46 @@ class TemplateController extends Controller
         }
 
         return TemplateResource::make($copy->load(['category', 'currentVersion']))->response()->setStatusCode(201);
+    }
+
+    /**
+     * Admin only: (re)generate a template's cover thumbnail via ImageGenerationProvider
+     * — the same provider the AI reaction-intro-cover feature uses (see
+     * RenderClipJob::composeIntroOutro()), just with no source clip frame to fall
+     * back on, so the prompt is built from the template's own name/description/
+     * category instead. Synchronous (not a queued job): a single image-gen call is
+     * fast and needs no progress UI, unlike a full clip render.
+     */
+    public function generateThumbnail(Template $template, ImageGenerationProvider $imageGen)
+    {
+        $disk = Storage::disk('media');
+        $relative = "templates/{$template->id}/thumbnail.jpg";
+
+        try {
+            $prompt = $this->buildThumbnailPrompt($template);
+            $imageGen->generateCoverImage($prompt, $disk->path($relative));
+            $template->update(['thumbnail_path' => $relative]);
+        } catch (Throwable $e) {
+            Log::warning('Template thumbnail generation failed', [
+                'template_id' => $template->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Cover generation failed: ' . $e->getMessage()], 422);
+        }
+
+        return TemplateResource::make($template->fresh(['category', 'currentVersion']));
+    }
+
+    private function buildThumbnailPrompt(Template $template): string
+    {
+        return sprintf(
+            'Eye-catching %s video template cover thumbnail, dramatic and high-contrast, no text or logos. '
+            . 'Style: %s. Category: %s.',
+            $template->aspect_ratio === '16:9' ? 'horizontal' : ($template->aspect_ratio === '1:1' ? 'square' : 'vertical'),
+            $template->description ?: $template->name,
+            $template->category?->name ?? 'general short-form content',
+        );
     }
 
     public function archive(Template $template)

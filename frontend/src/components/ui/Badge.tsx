@@ -55,6 +55,10 @@ const STATUS_TONE: Record<string, Tone> = {
   skipped: "muted",
   running: "accent",
   completed_with_errors: "warning",
+  searching: "accent",
+  fetching_sources: "accent",
+  generating_script: "accent",
+  finding_videos: "accent",
 };
 
 export function StatusBadge({ status }: { status: string }) {

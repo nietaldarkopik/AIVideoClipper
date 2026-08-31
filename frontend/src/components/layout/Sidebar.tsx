@@ -10,12 +10,14 @@ import {
   TrendingUp,
   Scissors,
   Share2,
+  CalendarClock,
   Settings,
   CreditCard,
   ShieldCheck,
   Film,
   Bot,
   Rss,
+  Lightbulb,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { LogOut } from "lucide-react";
@@ -29,8 +31,10 @@ const primaryNav = [
   { href: "/channels", label: "Channels", icon: Rss },
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
   { href: "/trending", label: "Trending", icon: TrendingUp },
+  { href: "/content-briefs", label: "Riset Konten", icon: Lightbulb },
   { href: "/clips", label: "AI Clips", icon: Scissors },
   { href: "/social-accounts", label: "Social Accounts", icon: Share2 },
+  { href: "/scheduler", label: "Scheduler", icon: CalendarClock },
 ];
 
 const secondaryNav = [

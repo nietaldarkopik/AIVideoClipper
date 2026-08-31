@@ -38,6 +38,18 @@ class PublishClipJob implements ShouldQueue
     {
         $post = SocialPost::with(['clip', 'socialAccount'])->findOrFail($this->socialPostId);
 
+        // Stale delayed job left over from before this post was rescheduled to a
+        // LATER time (see SocialPostController::update()) — a fresh delayed job
+        // matching the current scheduled_at was already dispatched separately, so
+        // this older one must stay quiet instead of publishing early. Combined
+        // with the STATUS_PUBLISHED guard below (which covers the opposite
+        // direction: rescheduled EARLIER, so the old job fires after the new one
+        // already published), reschedules are safe in both directions without any
+        // job-cancellation mechanism.
+        if ($post->status === SocialPost::STATUS_SCHEDULED && $post->scheduled_at && $post->scheduled_at->isFuture()) {
+            return;
+        }
+
         // A "Publish Now" override dispatches a fresh, undelayed job for a post
         // that may still have its original staggered/delayed dispatch sitting in
         // the queue — that one will still fire later. Without this guard it would

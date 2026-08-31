@@ -75,9 +75,9 @@ abstract class AbstractNineRouterSearchTrendingProvider implements TrendingProvi
                 return [];
             }
 
-            // Unlike /v1/web/fetch's response (wrapped in {data: {...}}), /v1/search's
-            // documented shape is a flat top-level object — {provider, query, results,
-            // answer, usage, metrics, errors}, no "data" wrapper.
+            // Flat top-level object — {provider, query, results, answer, usage,
+            // metrics, errors}, no "data" wrapper. (/v1/web/fetch is flat too —
+            // see NineRouterWebFetchProvider.)
             $results = $response->json('results', []);
             $span->success('results: ' . count($results ?? []));
         } catch (Throwable $e) {

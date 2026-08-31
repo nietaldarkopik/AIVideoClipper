@@ -240,6 +240,7 @@ class FFmpegService
      * @param  array<int, array<string, mixed>>  $layers  override-merged template layers (text/image/progress_bar/audio/rect), see LayerCompositionService
      * @param  (callable(string): string)|null  $resolveLayerPath  resolves a layer's stored relative path to an absolute path; required if $layers references any image/audio layer
      * @param  ?array{x: float, y: float, width: float, height: float}  $videoRegion  null (default, every template before this feature) fills the whole canvas exactly as before — a smaller region insets the video into that box instead, with $canvasBackgroundColor filling the rest, so template layers (typically a 'rect' + 'text' pair) can build bars around it. Smart-pan crop keyframes and subtitle burn-in are computed against the full canvas either way — see the docblock at the call site inside this method for why.
+     * @param  ?array{type?: string, intensity?: float}  $effect  null/'none' (default, every template before this feature) leaves the frame untouched — see buildEffectFilter() docblock.
      */
     public function renderClip(
         string $sourceVideoPath,
@@ -256,6 +257,7 @@ class FFmpegService
         ?callable $resolveLayerPath = null,
         ?array $videoRegion = null,
         string $canvasBackgroundColor = '#000000',
+        ?array $effect = null,
     ): void {
         $this->ensureDir($outPath);
 
@@ -264,6 +266,12 @@ class FFmpegService
         [$graph, $videoLabel] = $this->buildCropSegments('0:v', $cropKeyframes, $duration, 'crop');
         $graph[] = "[{$videoLabel}]scale={$targetWidth}:{$targetHeight}[scaled]";
         $videoLabel = 'scaled';
+
+        // Effect applies to the base video only — deliberately before caption/
+        // layers/watermark below, same tier as the smart-pan crop above, so burned-
+        // in text and branding never get zoomed/shaken along with the footage.
+        [$effectGraph, $videoLabel] = $this->buildEffectFilter($videoLabel, $effect, $targetWidth, $targetHeight, $duration);
+        $graph = array_merge($graph, $effectGraph);
 
         if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
             $escaped = $this->escapeFilterPath($subtitlesAssPath);
@@ -382,6 +390,7 @@ class FFmpegService
      *
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  only meaningful for pip_* layouts — split_* layouts fill their half-frame with a plain cover-crop instead (see class docblock on buildSplitGraph())
      * @param  array<int, array<string, mixed>>  $layers  override-merged template layers; RenderClipJob filters out any pip_video layer before calling here since reaction_layout already owns PiP for this clip (see class docblock on LayerCompositionService's pip_video case)
+     * @param  ?array{type?: string, intensity?: float}  $effect  applied to the whole composited PiP/split frame, same as renderClip() — see buildEffectFilter()
      */
     public function renderReactionClip(
         string $sourceVideoPath,
@@ -398,6 +407,7 @@ class FFmpegService
         float $watermarkOpacity = 0.8,
         array $layers = [],
         ?callable $resolveLayerPath = null,
+        ?array $effect = null,
     ): void {
         $this->ensureDir($outPath);
         $duration = max(0.1, $end - $start);
@@ -409,6 +419,9 @@ class FFmpegService
             'split_side_by_side' => $this->buildSplitGraph($targetWidth, $targetHeight, vertical: false),
             default => throw new InvalidArgumentException("Unknown reaction layout [{$layout}]."),
         };
+
+        [$effectGraph, $outputLabel] = $this->buildEffectFilter($outputLabel, $effect, $targetWidth, $targetHeight, $duration);
+        $graph = array_merge($graph, $effectGraph);
 
         if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
             $escaped = $this->escapeFilterPath($subtitlesAssPath);
@@ -588,8 +601,9 @@ class FFmpegService
      * resolution for the same reason. See RenderClipJob for how this is used.
      *
      * @param  list<string>  $segmentPaths  in playback order
+     * @param  ?array{type?: string, duration?: float}  $transition  null/'cut' (default, every call before this feature) joins segments with a hard cut via the concat filter, byte-for-byte the same as before. 'fade' instead chains xfade/acrossfade pairs across each boundary — see the per-pair duration clamp below for why a segment shorter than the configured duration doesn't break the offset math.
      */
-    public function concatSegments(array $segmentPaths, string $outPath, int $targetWidth, int $targetHeight): void
+    public function concatSegments(array $segmentPaths, string $outPath, int $targetWidth, int $targetHeight, ?array $transition = null): void
     {
         $this->ensureDir($outPath);
         $segmentPaths = array_values($segmentPaths);
@@ -607,15 +621,60 @@ class FFmpegService
 
         $inputArgs = [];
         $graph = [];
-        $pairLabels = '';
 
         foreach ($segmentPaths as $i => $path) {
             $inputArgs[] = '-i';
             $inputArgs[] = $path;
             $graph[] = "[{$i}:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight},setsar=1[v{$i}]";
-            $pairLabels .= "[v{$i}][{$i}:a]";
         }
 
+        $transitionType = $transition['type'] ?? 'cut';
+        $transitionDuration = (float) ($transition['duration'] ?? 0.4);
+
+        if ($transitionType === 'fade' && $transitionDuration > 0) {
+            // xfade needs each segment's real duration up front to compute where
+            // (in the growing output timeline) each crossfade should begin.
+            $durations = array_map(fn (string $p) => max(0.1, $this->probeDuration($p) ?? 0.1), $segmentPaths);
+
+            $videoLabel = 'v0';
+            $audioLabel = '0:a';
+            $cumulative = $durations[0];
+
+            for ($i = 1; $i < $n; $i++) {
+                // Clamp against both neighboring segments (and whatever's
+                // accumulated so far) so a short intro/outro card never sends
+                // offset negative or crossfades past a segment's own length.
+                $pairDuration = min($transitionDuration, $durations[$i - 1], $durations[$i], $cumulative);
+                $pairDuration = max(0.05, $pairDuration);
+                $offset = max(0.0, $cumulative - $pairDuration);
+                $durationStr = number_format($pairDuration, 3, '.', '');
+                $offsetStr = number_format($offset, 3, '.', '');
+
+                $vOut = "vx{$i}";
+                $aOut = "ax{$i}";
+                $graph[] = "[{$videoLabel}][v{$i}]xfade=transition=fade:duration={$durationStr}:offset={$offsetStr}[{$vOut}]";
+                $graph[] = "[{$audioLabel}][{$i}:a]acrossfade=d={$durationStr}[{$aOut}]";
+                $videoLabel = $vOut;
+                $audioLabel = $aOut;
+                $cumulative = $cumulative + $durations[$i] - $pairDuration;
+            }
+
+            $outputArgs = [
+                '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-movflags', '+faststart',
+                $outPath,
+            ];
+
+            $this->runWithFilterScript($inputArgs, $graph, ['-map', "[{$videoLabel}]", '-map', "[{$audioLabel}]"], $outputArgs, 'concat segments (fade)', 1800);
+
+            return;
+        }
+
+        $pairLabels = '';
+        foreach ($segmentPaths as $i => $path) {
+            $pairLabels .= "[v{$i}][{$i}:a]";
+        }
         $graph[] = "{$pairLabels}concat=n={$n}:v=1:a=1[vout][aout]";
 
         $outputArgs = [
@@ -782,6 +841,135 @@ class FFmpegService
         $graph[] = implode('', $segLabels) . 'concat=n=' . count($segLabels) . ":v=1:a=0[{$outLabel}]";
 
         return [$graph, $outLabel];
+    }
+
+    /**
+     * Applies a formula-driven visual effect (zoom in/out, Ken Burns, shake) to
+     * an already-scaled $targetWidth x $targetHeight video pad.
+     *
+     * @param  ?array{type?: string, intensity?: float}  $effect  null or type 'none' (every clip/template before this feature) is a no-op — returns $videoLabel unchanged.
+     * @return array{0: string[], 1: string}
+     */
+    private function buildEffectFilter(string $videoLabel, ?array $effect, int $targetWidth, int $targetHeight, float $duration): array
+    {
+        $type = $effect['type'] ?? 'none';
+        if (! is_string($type) || $type === 'none') {
+            return [[], $videoLabel];
+        }
+
+        // Clamped well short of 1.0 so the crop window never shrinks to nothing
+        // (or, for shake, never eats so much margin the source looks over-cropped).
+        $intensity = max(0.02, min(0.5, (float) ($effect['intensity'] ?? 0.15)));
+
+        return match ($type) {
+            'zoom_in' => $this->buildZoomSegments($videoLabel, $targetWidth, $targetHeight, $duration, $intensity, zoomIn: true, drift: false),
+            'zoom_out' => $this->buildZoomSegments($videoLabel, $targetWidth, $targetHeight, $duration, $intensity, zoomIn: false, drift: false),
+            'ken_burns' => $this->buildZoomSegments($videoLabel, $targetWidth, $targetHeight, $duration, $intensity, zoomIn: true, drift: true),
+            'shake' => [$this->shakeCropLines($videoLabel, $targetWidth, $targetHeight, $intensity), 'effected'],
+            default => [[], $videoLabel],
+        };
+    }
+
+    /**
+     * Zoom in (crop window shrinks toward center over the clip, reads as moving
+     * closer) or zoom out (reverse), optionally with a slow diagonal drift on top
+     * (Ken Burns). Built as a sequence of small, DISCRETELY-cropped-then-rescaled
+     * segments joined by concat() — same trim+setpts+concat idiom as
+     * buildCropSegments() — rather than one crop filter with a time-varying w/h
+     * expression: ffmpeg's crop filter only ever evaluates x/y per frame; w/h are
+     * evaluated exactly once at filter init and can't reference `t` at all
+     * (confirmed against this app's ffmpeg build — referencing `t` in crop's w/h
+     * either hard-errors or silently freezes at whatever NaN-propagated-through-
+     * min() happened to settle on, since `t` is undefined at that one evaluation).
+     * Each segment instead gets its own PHP-computed, constant crop box sampled
+     * at the segment's midpoint. The step count is capped so this stays cheap
+     * even on a long clip; a ~0.3s step is fine-grained enough to read as a
+     * smooth zoom rather than a visible staircase.
+     *
+     * @return array{0: string[], 1: string}
+     */
+    private function buildZoomSegments(string $videoLabel, int $w, int $h, float $duration, float $intensity, bool $zoomIn, bool $drift): array
+    {
+        $duration = max(0.1, $duration);
+        $steps = (int) max(3, min(40, round($duration / 0.3)));
+        $graph = [];
+        $segLabels = [];
+        $splitLabels = [];
+
+        for ($i = 0; $i < $steps; $i++) {
+            $splitLabels[] = "sp{$i}";
+        }
+
+        // An EXPLICIT split into $steps distinctly-labeled pads, not $steps trim
+        // filters all reading the same [$videoLabel] pad directly — the implicit
+        // auto-fanout ffmpeg inserts for a multiply-referenced label was observed
+        // to mis-configure under this exact shape (many trims off one label, real
+        // decoded H.264 input, upstream -ss) on this app's ffmpeg build: later
+        // segments' crop received the ORIGINAL pre-scale source dimensions
+        // instead of $w x $h, failing with "Invalid too big or non positive size"
+        // even though the generated graph text was correct. An explicit split
+        // sidesteps whatever internal reconfiguration path that auto-fanout hits.
+        $graph[] = "[{$videoLabel}]split={$steps}" . implode('', array_map(fn ($l) => "[{$l}]", $splitLabels));
+
+        foreach ($splitLabels as $i => $inLabel) {
+            $t0 = $duration * $i / $steps;
+            $t1 = $i === $steps - 1 ? $duration : $duration * ($i + 1) / $steps;
+            $mid = ($t0 + $t1) / 2;
+            $p = min($mid / $duration, 1.0);
+            $scale = $zoomIn ? (1 - $intensity * $p) : (1 - $intensity * (1 - $p));
+            $scale = max(0.5, min(1.0, $scale));
+
+            $cropW = max(2, (int) round($w * $scale));
+            $cropH = max(2, (int) round($h * $scale));
+            $x = (int) round(($w - $cropW) / 2);
+            $y = (int) round(($h - $cropH) / 2);
+
+            if ($drift) {
+                $x = max(0, min($w - $cropW, $x + (int) round($w * $intensity * 0.5 * $p)));
+                $y = max(0, min($h - $cropH, $y + (int) round($h * $intensity * 0.3 * $p)));
+            }
+
+            $label = "zoomseg{$i}";
+            // setsar=1 is required, not cosmetic: each segment's crop box has a
+            // slightly different aspect ratio (rounded integer pixels), so scale=
+            // alone leaves each segment with a slightly different auto-computed
+            // SAR even though their pixel dimensions all match $w x $h — concat
+            // then refuses to join them ("Input link parameters do not match").
+            $graph[] = "[{$inLabel}]trim=start={$t0}:end={$t1},setpts=PTS-STARTPTS,crop={$cropW}:{$cropH}:{$x}:{$y},scale={$w}:{$h},setsar=1[{$label}]";
+            $segLabels[] = "[{$label}]";
+        }
+
+        $graph[] = implode('', $segLabels) . 'concat=n=' . count($segLabels) . ':v=1:a=0[effected]';
+
+        return [$graph, 'effected'];
+    }
+
+    /**
+     * Subtle handheld-camera jitter: a FIXED (not time-varying — see
+     * buildZoomSegments() docblock for why crop's w/h can't vary with `t`) shrink
+     * leaves permanent margin room for the crop window to oscillate within via
+     * sin/cos on x/y, which crop genuinely does re-evaluate per frame. Amplitude
+     * is kept to 45%/35% of that margin (not 50%) as a small floating-point
+     * safety buffer against the sin/cos extremes landing exactly on the crop's
+     * own edge.
+     *
+     * @return string[]
+     */
+    private function shakeCropLines(string $videoLabel, int $w, int $h, float $intensity): array
+    {
+        $margin = min(0.3, $intensity * 1.5);
+        $cropW = max(2, (int) round($w * (1 - $margin)));
+        $cropH = max(2, (int) round($h * (1 - $margin)));
+        $ampX = number_format($margin * 0.45, 4, '.', '');
+        $ampY = number_format($margin * 0.35, 4, '.', '');
+
+        $x = "(({$w}-{$cropW})/2+{$w}*{$ampX}*sin(t*14))";
+        $y = "(({$h}-{$cropH})/2+{$h}*{$ampY}*cos(t*11))";
+
+        return [
+            "[{$videoLabel}]crop=w={$cropW}:h={$cropH}:x='{$x}':y='{$y}'[shaken]",
+            "[shaken]scale={$w}:{$h}[effected]",
+        ];
     }
 
     private function escapeFilterPath(string $path): string

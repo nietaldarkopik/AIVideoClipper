@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { mutate } from "swr";
-import { Eye, Heart, MessageCircle, Scissors } from "lucide-react";
+import { Eye, Heart, MessageCircle, Scissors, Lightbulb } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -73,10 +73,27 @@ export function TrendingCard({ item }: { item: TrendingItem }) {
           </span>
         </div>
 
-        <Button onClick={handleCreateProject} loading={creating} className="mt-4 w-full" size="sm">
-          <Scissors className="size-3.5" />
-          Create Clip Project
-        </Button>
+        <div className="mt-4 flex gap-2">
+          <Button onClick={handleCreateProject} loading={creating} className="flex-1" size="sm">
+            <Scissors className="size-3.5" />
+            Create Clip Project
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() =>
+              router.push(
+                `/content-briefs?topic=${encodeURIComponent(item.title)}` +
+                  `&source_platform=${item.platform}` +
+                  `&source_trending_title=${encodeURIComponent(item.title)}` +
+                  `&source_trending_url=${encodeURIComponent(item.source_url)}`
+              )
+            }
+          >
+            <Lightbulb className="size-3.5" />
+            Riset Konten
+          </Button>
+        </div>
       </div>
     </Card>
   );

@@ -17,7 +17,18 @@ class UrlVideoDownloader
     public function __construct(
         private readonly string $ytDlpBin = 'yt-dlp',
         private readonly string $ffmpegBin = 'ffmpeg',
+        // Routes every yt-dlp request through this proxy when set (yt-dlp --proxy
+        // syntax, e.g. "http://user:pass@host:port" or "socks5://host:port") — an
+        // IP block from a platform (observed: TikTok blocking this server's IP
+        // outright, independent of the video/account requested) can't be fixed by
+        // updating yt-dlp; only a different egress IP gets past it.
+        private readonly ?string $proxy = null,
     ) {
+    }
+
+    private function proxyArgs(): array
+    {
+        return $this->proxy ? ['--proxy', $this->proxy] : [];
     }
 
     /**
@@ -67,6 +78,14 @@ class UrlVideoDownloader
             '--merge-output-format', 'mp4',
             '--print', 'after_move:%(title)s',
             '-o', $outputTemplate,
+            // Mimics a real Chrome TLS/HTTP fingerprint (via curl_cffi) instead of
+            // yt-dlp's default client signature — several sites' anti-bot systems
+            // (TikTok, and Cloudflare-protected generic pages) block the default
+            // signature outright regardless of IP, even though a real browser from
+            // the exact same IP/network is never challenged. No observed downside
+            // on sites that don't need it (verified against YouTube).
+            '--impersonate', 'chrome',
+            ...$this->proxyArgs(),
         ];
 
         // YouTube intermittently 429-rate-limits a server's IP (nothing to do with the
@@ -193,6 +212,8 @@ class UrlVideoDownloader
                 '--sub-langs', $lang,
                 '--convert-subs', 'srt',
                 '-o', $outputTemplate,
+                '--impersonate', 'chrome',
+                ...$this->proxyArgs(),
                 $url,
             ];
 

@@ -82,4 +82,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(ChannelWatch::class);
     }
+
+    public function contentBriefs(): HasMany
+    {
+        return $this->hasMany(ContentBrief::class);
+    }
 }

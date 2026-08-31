@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Support\Media;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -12,6 +13,15 @@ class SocialPostResource extends JsonResource
         return [
             'id' => $this->id,
             'clip_id' => $this->clip_id,
+            'clip' => $this->whenLoaded('clip', fn () => [
+                'id' => $this->clip->id,
+                'title' => $this->clip->title,
+                'thumbnail_url' => Media::url($this->clip->thumbnail_path),
+                'url' => Media::url($this->clip->output_path),
+                'duration' => (float) $this->clip->duration,
+                'project_id' => $this->clip->project_id,
+                'project_title' => $this->clip->project?->title,
+            ]),
             'platform' => $this->platform,
             'social_account' => SocialAccountResource::make($this->whenLoaded('socialAccount')),
             'title' => $this->title,

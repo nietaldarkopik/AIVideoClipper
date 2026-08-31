@@ -136,6 +136,12 @@ return [
         // URL -> markdown/text fetch, used as extra context for reaction-script /
         // social-metadata generation — see WebContentFetcher.
         'web_fetch_provider' => env('AI_WEB_FETCH_PROVIDER', 'mock'),
+        // Multi-result web search for the trending -> content-brief research
+        // pipeline — see WebSearchProvider / GenerateContentBriefJob.
+        'web_search_provider' => env('AI_WEB_SEARCH_PROVIDER', 'mock'),
+        // Long-form Indonesian video narrative/script generation from gathered
+        // research — see VideoNarrativeProvider / GenerateContentBriefJob.
+        'video_narrative_provider' => env('AI_VIDEO_NARRATIVE_PROVIDER', 'mock'),
         // AI-generated background for the reaction intro cover — see
         // RenderClipJob::composeIntroOutro().
         'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
@@ -196,9 +202,14 @@ return [
         // check GET {base_url}/models/web (kind=="webFetch").
         'web_fetch_model' => env('NINE_ROUTER_WEB_FETCH_MODEL'),
         // Model id for the /web/search endpoint (a provider name, e.g. "tavily") — used
-        // by the trending non-YouTube platforms, check GET {base_url}/models/web
-        // (kind=="webSearch"). See TrendingServiceProvider.
+        // by the trending non-YouTube platforms and by WebSearchProvider (content-brief
+        // research), check GET {base_url}/models/web (kind=="webSearch"). See
+        // TrendingServiceProvider and AIServiceProvider.
         'web_search_model' => env('NINE_ROUTER_WEB_SEARCH_MODEL'),
+        // Separate model id for long-form video narrative generation (still a plain
+        // chat completion, same endpoint as `model` above). Falls back to `model`
+        // when unset — see AIServiceProvider.
+        'video_narrative_model' => env('NINE_ROUTER_VIDEO_NARRATIVE_MODEL'),
         // Model id for the /images/generations endpoint — check GET {base_url}/models/image.
         'image_model' => env('NINE_ROUTER_IMAGE_MODEL'),
     ],
@@ -241,6 +252,12 @@ return [
         // hardcoded value. Tried in order — UrlVideoDownloader moves to the next
         // client on a 403/blocked error instead of retrying the same one.
         'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'android,tv,web'),
+        // Routes every yt-dlp request (video + captions) through this proxy when
+        // set — yt-dlp's own --proxy syntax, e.g. "http://user:pass@host:port" or
+        // "socks5://host:port". Needed when a platform blocks this server's IP
+        // outright (observed with TikTok — no yt-dlp version fixes that, only a
+        // different egress IP does); leave unset to download directly as before.
+        'proxy' => env('YTDLP_PROXY'),
     ],
 
     'video_batch' => [

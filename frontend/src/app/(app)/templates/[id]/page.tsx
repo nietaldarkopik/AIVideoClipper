@@ -1,9 +1,9 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { mutate } from "swr";
-import { ArrowLeft, Save, History, Archive } from "lucide-react";
+import { ArrowLeft, Save, History, Archive, Sparkles } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { useAuthStore } from "@/store/auth";
 import { api, ApiError } from "@/lib/api";
@@ -14,7 +14,15 @@ import { Input, Label, Select } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { LayerEditor } from "@/components/layers/LayerEditor";
+import { LayerOverlay } from "@/components/clips/timeline/ClipVideoPreview";
 import type { Template, TemplateConfig, TemplateLayer, VideoRegion } from "@/lib/types";
+
+// Bundled looping placeholder clip (frontend/public/sample-preview.mp4) so the
+// template builder's preview shows real moving footage — including how a zoom/
+// shake effect actually reads in motion — instead of a static gradient. Content-
+// neutral (an abstract animated gradient, not real footage) since there's no
+// per-template source video at this stage of editing.
+const SAMPLE_PREVIEW_VIDEO = "/sample-preview.mp4";
 
 function hexToRgba(hex: string, opacity: number): string {
   const clean = hex.replace("#", "");
@@ -41,7 +49,16 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const [layers, setLayers] = useState<TemplateLayer[]>([]);
   const [videoRegion, setVideoRegion] = useState<VideoRegion | null>(null);
   const [canvasBackgroundColor, setCanvasBackgroundColor] = useState("#000000");
+  const [effectType, setEffectType] = useState<NonNullable<TemplateConfig["effects"]>["type"]>("none");
+  const [effectIntensity, setEffectIntensity] = useState(0.15);
+  const [transitionType, setTransitionType] = useState<NonNullable<TemplateConfig["transition"]>["type"]>("cut");
+  const [transitionDuration, setTransitionDuration] = useState(0.4);
   const [saving, setSaving] = useState(false);
+  const [generatingCover, setGeneratingCover] = useState(false);
+
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(6);
 
   useEffect(() => {
     if (template?.current_version?.config) {
@@ -53,6 +70,10 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
       const region = cfg.video_region;
       setVideoRegion(region ? { top: region.y, height: region.height } : null);
       setCanvasBackgroundColor(cfg.canvas_background_color ?? "#000000");
+      setEffectType(cfg.effects?.type ?? "none");
+      setEffectIntensity(cfg.effects?.intensity ?? 0.15);
+      setTransitionType(cfg.transition?.type ?? "cut");
+      setTransitionDuration(cfg.transition?.duration ?? 0.4);
     }
   }, [template]);
 
@@ -75,6 +96,8 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
           // FFmpegService::renderClip() reads.
           video_region: videoRegion ? { x: 0, y: videoRegion.top, width: 1, height: videoRegion.height } : null,
           canvas_background_color: canvasBackgroundColor,
+          effects: { type: effectType, intensity: effectIntensity },
+          transition: { type: transitionType, duration: transitionDuration },
         },
       });
       await mutate(key);
@@ -83,6 +106,19 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
       toast(err instanceof ApiError ? err.message : "Failed to save template.", "danger");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleGenerateCover() {
+    setGeneratingCover(true);
+    try {
+      await api.post(`/admin/templates/${templateId}/generate-thumbnail`);
+      await mutate(key);
+      toast("Cover generated.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to generate cover.", "danger");
+    } finally {
+      setGeneratingCover(false);
     }
   }
 
@@ -127,6 +163,29 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
         ? "captionPreviewPop 1.4s ease-in-out infinite"
         : undefined;
 
+  // Approximates FFmpegService::buildEffectFilter() (zoom in/out over the clip,
+  // Ken Burns = zoom + diagonal drift, shake = small jitter) as a CSS animation
+  // on the preview <video> so an effect choice actually reads as motion here
+  // instead of only showing up once the clip is rendered. Timed to the sample
+  // clip's own loop length so it doesn't visibly reset mid-loop.
+  const effectSpan = Math.max(2, Math.min(10, previewDuration || 6));
+  let effectKeyframes = "";
+  let effectAnimation: string | undefined;
+  if (effectType === "zoom_in" || effectType === "zoom_out" || effectType === "ken_burns") {
+    const from = effectType === "zoom_out" ? 1 + effectIntensity : 1;
+    const to = effectType === "zoom_out" ? 1 : 1 + effectIntensity;
+    const driftX = effectType === "ken_burns" ? effectIntensity * 30 : 0;
+    const driftY = effectType === "ken_burns" ? effectIntensity * 20 : 0;
+    effectKeyframes = `@keyframes templatePreviewZoom { 0% { transform: scale(${from}) translate(0%, 0%); } 100% { transform: scale(${to}) translate(${driftX}%, ${driftY}%); } }`;
+    effectAnimation = `templatePreviewZoom ${effectSpan}s ease-in-out infinite alternate`;
+  } else if (effectType === "shake") {
+    const amt = Math.max(1, effectIntensity * 24);
+    effectKeyframes = `@keyframes templatePreviewShake { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(${amt}px, -${amt}px); } 50% { transform: translate(-${amt}px, ${amt}px); } 75% { transform: translate(${amt}px, ${amt}px); } }`;
+    effectAnimation = "templatePreviewShake 0.45s steps(1) infinite";
+  }
+
+  const sortedLayers = [...layers].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+
   return (
     <div className="space-y-6">
       <div>
@@ -135,16 +194,29 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
           Back to Templates
         </Link>
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-xl font-semibold">{template.name}</h1>
-              <Badge tone="muted">{template.current_version?.label}</Badge>
-              {template.is_system && <Badge tone="accent">System</Badge>}
+          <div className="flex items-start gap-3">
+            {template.thumbnail_url && (
+              <img
+                src={template.thumbnail_url}
+                alt=""
+                className="h-14 w-14 shrink-0 rounded-lg object-cover"
+              />
+            )}
+            <div>
+              <div className="flex items-center gap-2.5">
+                <h1 className="text-xl font-semibold">{template.name}</h1>
+                <Badge tone="muted">{template.current_version?.label}</Badge>
+                {template.is_system && <Badge tone="accent">System</Badge>}
+              </div>
+              <p className="mt-1 text-sm text-muted">{template.description}</p>
             </div>
-            <p className="mt-1 text-sm text-muted">{template.description}</p>
           </div>
           {isAdmin && (
             <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleGenerateCover} loading={generatingCover}>
+                <Sparkles className="size-3.5" />
+                {template.thumbnail_url ? "Regenerate Cover" : "Generate Cover"}
+              </Button>
               <Button variant="outline" size="sm" onClick={handleArchive}>
                 <Archive className="size-3.5" />
                 Archive
@@ -160,55 +232,108 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <div className="lg:col-span-2">
-          <div className="sticky top-6 mx-auto max-w-[220px]">
+          <div className="sticky top-6 mx-auto max-w-[260px]">
             <p className="mb-2 text-center text-xs text-muted">
-              Caption Preview <span className="text-muted/70">({resolution.width}×{resolution.height})</span>
+              Live Preview <span className="text-muted/70">({resolution.width}×{resolution.height})</span>
             </p>
             <div
-              className="relative flex w-full items-end justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 p-4"
+              className="relative w-full overflow-hidden rounded-2xl"
               style={{
                 aspectRatio: `${resolution.width} / ${resolution.height}`,
-                textAlign: caption.position === "top" ? "left" : "center",
+                background: canvasBackgroundColor,
               }}
             >
+              {/* Video region — full-bleed (inset-0) unless a custom area is set below.
+                  A bundled placeholder clip stands in for the eventual source video so
+                  effects/crop framing read as real motion; captions/layers are drawn on
+                  top at the same relative position they'd render on the final canvas
+                  (see FFmpegService::renderClip()'s videoRegion step: captions burn in
+                  before the region crop, so they move/scale with the video box). */}
               <div
-                className="w-full"
+                className="absolute overflow-hidden"
                 style={{
-                  alignSelf:
-                    caption.position === "top" ? "flex-start" : caption.position === "center" ? "center" : "flex-end",
-                  position: caption.position === "top" ? "absolute" : undefined,
-                  top: caption.position === "top" ? 16 : undefined,
+                  left: 0,
+                  width: "100%",
+                  top: `${(videoRegion?.top ?? 0) * 100}%`,
+                  height: `${(videoRegion?.height ?? 1) * 100}%`,
                 }}
               >
-                <span
-                  style={{
-                    fontFamily: caption.font || "Arial",
-                    color: caption.color || "#fff",
-                    // Matches SubtitleService::toAss(): a background box replaces the
-                    // glyph stroke in the real render (ASS can't draw both at once),
-                    // so the preview drops the stroke too once a box is enabled.
-                    WebkitTextStroke: backgroundEnabled
-                      ? "0px"
-                      : `${Math.max(0.5, (caption.stroke_width ?? 3) * previewScale)}px ${caption.stroke_color || "#000"}`,
-                    fontWeight: caption.bold ? 800 : 500,
-                    fontStyle: caption.italic ? "italic" : "normal",
-                    textTransform: caption.uppercase ? "uppercase" : "none",
-                    background: previewBg,
-                    padding: backgroundEnabled ? `${previewPadding}px ${previewPadding * 1.5}px` : 0,
-                    borderRadius: backgroundEnabled ? 2 : 0,
-                    fontSize: effectiveFontSize * previewScale,
-                    lineHeight: 1.3,
-                    display: "inline-block",
-                    animation: previewAnimation,
-                  }}
+                <video
+                  ref={previewVideoRef}
+                  src={SAMPLE_PREVIEW_VIDEO}
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  className="h-full w-full object-cover"
+                  style={{ animation: effectAnimation, transformOrigin: "center" }}
+                  onTimeUpdate={(e) => setPreviewTime(e.currentTarget.currentTime)}
+                  onLoadedMetadata={(e) => setPreviewDuration(e.currentTarget.duration || 6)}
+                />
+
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-end justify-center p-[4%]"
+                  style={{ textAlign: caption.position === "top" ? "left" : "center" }}
                 >
-                  This is the{" "}
-                  <span style={{ color: caption.highlight_color || "#FFD100", WebkitTextStroke: "0px" }}>biggest</span>{" "}
-                  mistake
-                </span>
+                  <div
+                    className="w-full"
+                    style={{
+                      alignSelf:
+                        caption.position === "top"
+                          ? "flex-start"
+                          : caption.position === "center"
+                            ? "center"
+                            : "flex-end",
+                      position: caption.position === "top" ? "absolute" : undefined,
+                      top: caption.position === "top" ? "4%" : undefined,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: caption.font || "Arial",
+                        color: caption.color || "#fff",
+                        // Matches SubtitleService::toAss(): a background box replaces the
+                        // glyph stroke in the real render (ASS can't draw both at once),
+                        // so the preview drops the stroke too once a box is enabled.
+                        WebkitTextStroke: backgroundEnabled
+                          ? "0px"
+                          : `${Math.max(0.5, (caption.stroke_width ?? 3) * previewScale)}px ${caption.stroke_color || "#000"}`,
+                        fontWeight: caption.bold ? 800 : 500,
+                        fontStyle: caption.italic ? "italic" : "normal",
+                        textTransform: caption.uppercase ? "uppercase" : "none",
+                        background: previewBg,
+                        padding: backgroundEnabled ? `${previewPadding}px ${previewPadding * 1.5}px` : 0,
+                        borderRadius: backgroundEnabled ? 2 : 0,
+                        fontSize: effectiveFontSize * previewScale,
+                        lineHeight: 1.3,
+                        display: "inline-block",
+                        animation: previewAnimation,
+                      }}
+                    >
+                      This is the{" "}
+                      <span style={{ color: caption.highlight_color || "#FFD100", WebkitTextStroke: "0px" }}>
+                        biggest
+                      </span>{" "}
+                      mistake
+                    </span>
+                  </div>
+                </div>
               </div>
+
+              {/* Layers render on the full canvas, on top of the (possibly inset) video
+                  box — same stacking order as LayerCompositionService on the backend. */}
+              <div className="pointer-events-none absolute inset-0">
+                {sortedLayers.map((layer) => (
+                  <LayerOverlay key={layer.id} layer={layer} currentTime={previewTime} duration={previewDuration} />
+                ))}
+              </div>
+
+              {/* Matches RenderClipJob's translation of this legacy toggle into a
+                  progress_bar layer: no position field is saved from this checkbox,
+                  so LayerCompositionService::buildProgressBarLayer() defaults to
+                  the bottom edge. */}
               {progressBarEnabled && (
-                <div className="absolute left-0 right-0 top-0 h-1 bg-white/20">
+                <div className="pointer-events-none absolute left-0 right-0 bottom-0 h-1 bg-white/20">
                   <div className="h-full w-1/3" style={{ background: caption.highlight_color || "#7c5cff" }} />
                 </div>
               )}
@@ -222,6 +347,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 0%, 80%, 100% { transform: scale(1); }
                 90% { transform: scale(1.12); }
               }
+              ${effectKeyframes}
             `}</style>
           </div>
         </div>
@@ -518,6 +644,69 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 </div>
               </fieldset>
             )}
+          </Card>
+
+          <Card className="p-5">
+            <h3 className="mb-1 text-sm font-semibold">Effects &amp; Transition</h3>
+            <p className="mb-4 text-xs text-muted">
+              Effect applies to the base video only (captions/layers stay put). Transition only matters for clips
+              that have an intro or outro card — it controls how those segments join the main clip.
+            </p>
+            <fieldset disabled={!isAdmin} className="space-y-4 disabled:opacity-60">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Effect</Label>
+                  <Select
+                    value={effectType}
+                    onChange={(e) => setEffectType(e.target.value as NonNullable<TemplateConfig["effects"]>["type"])}
+                  >
+                    <option value="none">None</option>
+                    <option value="zoom_in">Zoom in</option>
+                    <option value="zoom_out">Zoom out</option>
+                    <option value="ken_burns">Ken Burns</option>
+                    <option value="shake">Shake</option>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Intensity ({Math.round(effectIntensity * 100)}%)</Label>
+                  <input
+                    type="range"
+                    min={0.02}
+                    max={0.5}
+                    step={0.01}
+                    disabled={effectType === "none"}
+                    value={effectIntensity}
+                    onChange={(e) => setEffectIntensity(Number(e.target.value))}
+                    className="mt-2.5 w-full accent-accent disabled:opacity-40"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Transition (intro/outro)</Label>
+                  <Select
+                    value={transitionType}
+                    onChange={(e) => setTransitionType(e.target.value as NonNullable<TemplateConfig["transition"]>["type"])}
+                  >
+                    <option value="cut">Hard cut</option>
+                    <option value="fade">Crossfade</option>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Duration ({transitionDuration.toFixed(2)}s)</Label>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={1.5}
+                    step={0.05}
+                    disabled={transitionType === "cut"}
+                    value={transitionDuration}
+                    onChange={(e) => setTransitionDuration(Number(e.target.value))}
+                    className="mt-2.5 w-full accent-accent disabled:opacity-40"
+                  />
+                </div>
+              </div>
+            </fieldset>
           </Card>
 
           <Card className="p-5">
