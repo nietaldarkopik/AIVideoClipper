@@ -11,6 +11,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Throwable;
@@ -38,6 +39,13 @@ class PublishClipJob implements ShouldQueue
     {
         $post = SocialPost::with(['clip', 'socialAccount'])->findOrFail($this->socialPostId);
 
+        Log::info('Publishing clip to social platform', [
+            'post_id' => $post->id,
+            'clip_id' => $post->clip_id,
+            'platform' => $post->platform,
+            'social_account_id' => $post->social_account_id,
+        ]);
+
         // Stale delayed job left over from before this post was rescheduled to a
         // LATER time (see SocialPostController::update()) — a fresh delayed job
         // matching the current scheduled_at was already dispatched separately, so
@@ -47,6 +55,8 @@ class PublishClipJob implements ShouldQueue
         // already published), reschedules are safe in both directions without any
         // job-cancellation mechanism.
         if ($post->status === SocialPost::STATUS_SCHEDULED && $post->scheduled_at && $post->scheduled_at->isFuture()) {
+            Log::info('Publish skipped — superseded by a later reschedule', ['post_id' => $post->id]);
+
             return;
         }
 
@@ -55,10 +65,17 @@ class PublishClipJob implements ShouldQueue
         // the queue — that one will still fire later. Without this guard it would
         // publish the same post to the platform a second time.
         if ($post->status === SocialPost::STATUS_PUBLISHED) {
+            Log::info('Publish skipped — already published', ['post_id' => $post->id]);
+
             return;
         }
 
         if (! $post->socialAccount || $post->socialAccount->status !== SocialAccount::STATUS_CONNECTED) {
+            Log::warning('Publish failed — social account not connected', [
+                'post_id' => $post->id,
+                'social_account_id' => $post->social_account_id,
+            ]);
+
             $post->update([
                 'status' => SocialPost::STATUS_FAILED,
                 'error_message' => 'Account is not connected. Reconnect the account and retry.',
@@ -68,6 +85,8 @@ class PublishClipJob implements ShouldQueue
         }
 
         if (! $post->clip || $post->clip->status !== 'completed' || ! $post->clip->output_path) {
+            Log::warning('Publish attempted before clip finished rendering', ['post_id' => $post->id]);
+
             throw new RuntimeException('Clip is not ready to publish yet.');
         }
 
@@ -85,6 +104,13 @@ class PublishClipJob implements ShouldQueue
                 'error_message' => $result['error'] ?? 'Unknown publishing error.',
             ]);
 
+            Log::warning('Clip publish attempt failed', [
+                'post_id' => $post->id,
+                'platform' => $post->platform,
+                'error' => $result['error'] ?? 'Unknown publishing error.',
+                'retry_count' => $post->retry_count,
+            ]);
+
             throw new RuntimeException($result['error'] ?? 'Publish failed.');
         }
 
@@ -96,6 +122,12 @@ class PublishClipJob implements ShouldQueue
             'error_message' => null,
         ]);
 
+        Log::info('Clip published successfully', [
+            'post_id' => $post->id,
+            'platform' => $post->platform,
+            'post_url' => $result['post_url'] ?? null,
+        ]);
+
         // Batch autobot publishes are staggered (see ProcessBatchItemJob) and finish
         // long after the batch item itself is marked "completed" — this is what
         // keeps that item's posts_published count live instead of frozen at
@@ -105,6 +137,11 @@ class PublishClipJob implements ShouldQueue
 
     public function failed(?Throwable $exception): void
     {
+        Log::error('Clip publish permanently failed after retries', [
+            'post_id' => $this->socialPostId,
+            'error' => $exception?->getMessage() ?? 'Publish failed after retries.',
+        ]);
+
         SocialPost::where('id', $this->socialPostId)->update([
             'status' => SocialPost::STATUS_FAILED,
             'error_message' => $exception?->getMessage() ?? 'Publish failed after retries.',

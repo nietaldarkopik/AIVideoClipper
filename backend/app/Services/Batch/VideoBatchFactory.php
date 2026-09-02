@@ -8,6 +8,7 @@ use App\Models\VideoBatch;
 use App\Models\VideoBatchItem;
 use App\Services\Social\AutoPublishScheduler;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Creates a VideoBatch + its VideoBatchItem rows and kicks off the batch autobot
@@ -55,6 +56,13 @@ class VideoBatchFactory
             'source_url' => $url,
             'status' => VideoBatchItem::STATUS_PENDING,
         ]));
+
+        Log::info('Video batch created', [
+            'batch_id' => $batch->id,
+            'user_id' => $user->id,
+            'channel_watch_id' => $channelWatchId,
+            'item_count' => $urls->count(),
+        ]);
 
         // Same dedicated queue as the manual-batch path — see VideoBatchController::store().
         ProcessVideoBatchJob::dispatch($batch->id)->onQueue('batch-downloads');

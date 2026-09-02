@@ -17,6 +17,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Throwable;
 
@@ -70,6 +71,11 @@ class ProcessBatchItemJob implements ShouldQueue
 
         $item->update(['status' => VideoBatchItem::STATUS_IMPORTING, 'progress' => 0, 'message' => 'Starting...', 'started_at' => now()]);
 
+        Log::info('Batch item processing started', [
+            'item_id' => $item->id,
+            'batch_id' => $item->video_batch_id,
+        ]);
+
         try {
             $batch = $item->videoBatch;
             $settings = $batch->settings ?? [];
@@ -81,7 +87,19 @@ class ProcessBatchItemJob implements ShouldQueue
 
             if (in_array($plan['stage'], [ProjectReprocessor::STAGE_IMPORT, ProjectReprocessor::STAGE_ANALYZE], true)) {
                 $item->update(['status' => VideoBatchItem::STATUS_ANALYZING, 'progress' => 20, 'message' => 'Transcribing & analyzing...']);
+
+                Log::info('Batch item: transcribing & analyzing video', [
+                    'item_id' => $item->id,
+                    'project_id' => $project->id,
+                    'video_id' => $video->id,
+                ]);
+
                 $project = $this->runAnalyze($project, $video);
+
+                Log::info('Batch item: analysis complete', [
+                    'item_id' => $item->id,
+                    'project_id' => $project->id,
+                ]);
             }
 
             // Past the import/analyze checkpoint — whatever put this project into a
@@ -103,6 +121,12 @@ class ProcessBatchItemJob implements ShouldQueue
                     'subtitle_language' => $settings['subtitle_language'] ?? 'en',
                     'subtitles_enabled' => $settings['subtitles_enabled'] ?? true,
                 ]);
+
+                Log::info('Batch item: clips selected', [
+                    'item_id' => $item->id,
+                    'project_id' => $project->id,
+                    'clip_count' => $clips->count(),
+                ]);
             }
 
             // --- Render whichever clips aren't already completed, one at a time ---
@@ -110,6 +134,14 @@ class ProcessBatchItemJob implements ShouldQueue
             $renderedClips = collect($alreadyDone->values()->all());
             foreach ($toRender->values() as $index => $clip) {
                 $item->update(['message' => sprintf('Rendering clip %d/%d...', $index + 1, $toRender->count())]);
+
+                Log::info('Batch item: rendering clip', [
+                    'item_id' => $item->id,
+                    'clip_id' => $clip->id,
+                    'position' => $index + 1,
+                    'total' => $toRender->count(),
+                ]);
+
                 // Caught per-clip, not per-item: one bad render shouldn't sink the
                 // other clips already queued up for this same video.
                 try {
@@ -117,9 +149,22 @@ class ProcessBatchItemJob implements ShouldQueue
                     $clip = $clip->fresh();
                     if ($clip->status === Clip::STATUS_COMPLETED) {
                         $renderedClips->push($clip);
+                        Log::info('Batch item: clip rendered', ['item_id' => $item->id, 'clip_id' => $clip->id]);
+                    } else {
+                        Log::warning('Batch item: clip did not complete rendering', [
+                            'item_id' => $item->id,
+                            'clip_id' => $clip->id,
+                            'status' => $clip->status,
+                            'failure_reason' => $clip->failure_reason,
+                        ]);
                     }
-                } catch (Throwable) {
+                } catch (Throwable $e) {
                     // RenderClipJob already recorded the failure on the Clip row itself.
+                    Log::warning('Batch item: clip render threw', [
+                        'item_id' => $item->id,
+                        'clip_id' => $clip->id,
+                        'error' => $e->getMessage(),
+                    ]);
                 }
             }
             $item->update(['clips_generated' => $renderedClips->count()]);
@@ -150,12 +195,25 @@ class ProcessBatchItemJob implements ShouldQueue
                     ? ($batch->channelWatch?->settings['publishing_profile_id'] ?? null)
                     : ($settings['publishing_profile_id'] ?? null);
 
+                Log::info('Batch item: scheduling auto-publish', [
+                    'item_id' => $item->id,
+                    'project_id' => $project->id,
+                    'publishing_profile_id' => $publishingProfileId,
+                    'rendered_clip_count' => $renderedClips->count(),
+                ]);
+
                 $scheduledCount = $publishScheduler->scheduleForProject(
                     $project,
                     $publishingProfileId,
                     isset($settings['publish_stagger_min_minutes']) ? $settings['publish_stagger_min_minutes'] * 60 : null,
                     isset($settings['publish_stagger_max_minutes']) ? $settings['publish_stagger_max_minutes'] * 60 : null,
                 );
+
+                Log::info('Batch item: auto-publish scheduling result', [
+                    'item_id' => $item->id,
+                    'project_id' => $project->id,
+                    'scheduled_count' => $scheduledCount,
+                ]);
 
                 if ($scheduledCount > 0) {
                     $lastScheduledAt = SocialPost::whereIn('clip_id', $renderedClips->pluck('id'))
@@ -175,7 +233,18 @@ class ProcessBatchItemJob implements ShouldQueue
                 'posts_published' => $postsPublished,
                 'finished_at' => now(),
             ]);
+
+            Log::info('Batch item processing completed', [
+                'item_id' => $item->id,
+                'clips_generated' => $renderedClips->count(),
+                'posts_published' => $postsPublished,
+            ]);
         } catch (Throwable $e) {
+            Log::error('Batch item processing failed', [
+                'item_id' => $item->id,
+                'error' => $e->getMessage(),
+            ]);
+
             $item->update([
                 'status' => VideoBatchItem::STATUS_FAILED,
                 'failure_reason' => $e->getMessage(),

@@ -22,7 +22,7 @@ class ChannelWatchController extends Controller
         return ChannelWatchResource::collection($watches);
     }
 
-    public function store(Request $request, YouTubeChannelMonitor $monitor)
+    public function store(Request $request, YouTubeChannelMonitor $monitor, ChannelWatchPoller $poller)
     {
         $data = $request->validate([
             'channel_url' => ['required', 'string', 'max:2048'],
@@ -75,12 +75,19 @@ class ChannelWatchController extends Controller
                 'publish_stagger_min_minutes' => $data['publish_stagger_min_minutes'] ?? AutoPublishScheduler::STAGGER_MIN_SECONDS / 60,
                 'publish_stagger_max_minutes' => $data['publish_stagger_max_minutes'] ?? AutoPublishScheduler::STAGGER_MAX_SECONDS / 60,
             ],
-            // Only uploads from here on are auto-clipped — adding a watch never
-            // bulk-processes a channel's existing back catalog as a surprise.
+            // queueLatestVideo() below immediately overwrites this with the
+            // channel's actual latest video (if any) — this is only the fallback
+            // watermark for a channel with no qualifying uploads at all yet.
             'last_video_published_at' => now(),
         ]);
 
-        return ChannelWatchResource::make($watch)->response()->setStatusCode(201);
+        // Immediately queue the channel's current latest video (never its whole
+        // back catalog — see queueLatestVideo()'s docblock) so adding a watch
+        // visibly does something right away instead of silently waiting for the
+        // channel's next organic upload, which can be days off.
+        $poller->queueLatestVideo($watch);
+
+        return ChannelWatchResource::make($watch->fresh())->response()->setStatusCode(201);
     }
 
     public function update(Request $request, ChannelWatch $channelWatch)

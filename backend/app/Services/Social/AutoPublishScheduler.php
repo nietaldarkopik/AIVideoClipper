@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Models\VideoBatchItem;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Schedules a project's completed clips for auto-publish, staggered so multiple
@@ -71,6 +72,12 @@ class AutoPublishScheduler
         $accounts = $this->resolvePublishTargets($project->user, $publishingProfileId);
 
         if ($clips->isEmpty() || $accounts->isEmpty()) {
+            Log::info('Auto-publish: nothing to schedule', [
+                'project_id' => $project->id,
+                'completed_clip_count' => $clips->count(),
+                'target_account_count' => $accounts->count(),
+            ]);
+
             return 0;
         }
 
@@ -116,6 +123,14 @@ class AutoPublishScheduler
                 $post->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $slot]);
                 PublishClipJob::dispatch($post->id)->delay($slot);
                 $scheduledCount++;
+
+                Log::info('Auto-publish: post scheduled', [
+                    'post_id' => $post->id,
+                    'clip_id' => $clip->id,
+                    'social_account_id' => $account->id,
+                    'platform' => $account->platform,
+                    'scheduled_at' => $slot->toIso8601String(),
+                ]);
 
                 // Plain random_int here, not spreadGapSeconds() — this schedules
                 // whatever a single project/batch just finished rendering, which
