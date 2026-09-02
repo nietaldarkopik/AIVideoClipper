@@ -17,12 +17,22 @@ export function TimelineTrack({
   currentTime,
   onChange,
   onSeek,
+  thumbnailStripUrl,
+  waveformUrl,
 }: {
   duration: number;
   segments: Segment[];
   currentTime?: number;
   onChange: (segments: Segment[]) => void;
   onSeek?: (time: number) => void;
+  // Both null for a video imported before this feature, generation failed, or
+  // (waveform only) the source has no audio — the track falls back to its
+  // original flat bar. Neither needs the tile count: the strip is stretched
+  // to exactly fill the track's width regardless of how many tiles it has
+  // (they're evenly spaced across the same [0, duration] range this track
+  // already renders), and the waveform PNG is just stretched the same way.
+  thumbnailStripUrl?: string | null;
+  waveformUrl?: string | null;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag>(null);
@@ -117,8 +127,24 @@ export function TimelineTrack({
         onClick={handleTrackClick}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        className="relative h-12 w-full cursor-pointer rounded-lg bg-black/40"
+        className="relative h-12 w-full cursor-pointer overflow-hidden rounded-lg bg-black/40"
+        style={
+          thumbnailStripUrl
+            ? { backgroundImage: `url(${thumbnailStripUrl})`, backgroundSize: "100% 100%", backgroundRepeat: "no-repeat" }
+            : undefined
+        }
       >
+        {/* Dims the whole strip so the accent-tinted "kept" regions below still
+            read as clearly brighter/selected — without this a full-color
+            filmstrip makes the trim/cut distinction hard to see at a glance. */}
+        {thumbnailStripUrl && <div className="pointer-events-none absolute inset-0 bg-black/45" />}
+        {waveformUrl && (
+          <div
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2 opacity-60"
+            style={{ backgroundImage: `url(${waveformUrl})`, backgroundSize: "100% 100%", backgroundRepeat: "no-repeat" }}
+          />
+        )}
+
         {active.map((seg, i) => (
           <div key={i} className="group">
             <div

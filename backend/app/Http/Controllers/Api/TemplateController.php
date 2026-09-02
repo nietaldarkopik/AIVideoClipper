@@ -93,6 +93,17 @@ class TemplateController extends Controller
             'description' => ['nullable', 'string'],
             'template_category_id' => ['sometimes', 'nullable', 'exists:template_categories,id'],
             'status' => ['sometimes', Rule::in(['draft', 'published', 'archived'])],
+            // aspect_ratio stays a coarse bucket (used for template<->clip matching
+            // in the picker, and to seed a sane default the next time resolution is
+            // reset) — the frontend derives it from whichever preset/custom size is
+            // picked (nearest of 9:16/1:1/16:9 by ratio) and sends both together.
+            // resolution_width/height are the actual render canvas size — see
+            // Clip::targetResolution() — editable independently of that bucket so a
+            // template can use any custom size (e.g. 1600x900) the Canvas Size UI
+            // offers as a preset or free-typed value.
+            'aspect_ratio' => ['sometimes', Rule::in(['9:16', '1:1', '16:9'])],
+            'resolution_width' => ['sometimes', 'integer', 'min:100', 'max:4000'],
+            'resolution_height' => ['sometimes', 'integer', 'min:100', 'max:4000'],
             'config' => ['sometimes', 'array'],
             'label' => ['sometimes', 'nullable', 'string', 'max:50'],
         ]);

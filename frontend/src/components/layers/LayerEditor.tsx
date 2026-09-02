@@ -67,13 +67,22 @@ export function LayerEditor({
   onChange,
   disabled = false,
   overriddenIds,
+  selectedId,
+  onSelectChange,
 }: {
   layers: TemplateLayer[];
   onChange: (layers: TemplateLayer[]) => void;
   disabled?: boolean;
   overriddenIds?: Set<string>;
+  // Controlled selection (clip editor passes this so dragging a layer on the
+  // video preview expands its panel here, and vice versa). Falls back to
+  // internal state when omitted (e.g. the read-only template preview usage).
+  selectedId?: string | null;
+  onSelectChange?: (id: string | null) => void;
 }) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [internalExpandedId, setInternalExpandedId] = useState<string | null>(null);
+  const expandedId = selectedId !== undefined ? selectedId : internalExpandedId;
+  const setExpandedId = onSelectChange ?? setInternalExpandedId;
   const [addType, setAddType] = useState<LayerType>("text");
   const sorted = [...layers].sort((a, b) => a.z_index - b.z_index);
 

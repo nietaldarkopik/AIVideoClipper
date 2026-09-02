@@ -43,7 +43,7 @@ export function EditChannelWatchModal({
   async function handleSubmit() {
     setSubmitting(true);
     try {
-      await api.patch<{ data: ChannelWatch }>(`/channel-watches/${watch.id}`, {
+      const res = await api.patch<{ data: ChannelWatch; resynced_posts?: number }>(`/channel-watches/${watch.id}`, {
         clip_mode: clipMode,
         template_id: templateId ? Number(templateId) : null,
         aspect_ratio: aspectRatio,
@@ -52,7 +52,16 @@ export function EditChannelWatchModal({
         publish_stagger_max_minutes: Number(staggerMax),
       });
       await mutate((key) => typeof key === "string" && key.startsWith("/channel-watches"));
-      toast("Channel settings updated.", "success");
+      // resynced_posts is only ever >0 when "Publish to" actually changed (see
+      // ChannelWatchController::update()) — it means clips already rendered
+      // under this channel, still waiting to publish, just got redirected onto
+      // the new target instead of the old (wrong) one.
+      toast(
+        res.resynced_posts
+          ? `Channel settings updated — ${res.resynced_posts} already-scheduled post(s) moved to the new channel.`
+          : "Channel settings updated.",
+        "success"
+      );
       onClose();
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to update channel.", "danger");
@@ -107,6 +116,12 @@ export function EditChannelWatchModal({
               </option>
             ))}
           </Select>
+          <p className="mt-1.5 text-xs text-muted">
+            Changing this also redirects any of this channel&apos;s clips that are already rendered but not
+            published yet — they move onto the new target instead of staying queued for the old one. Clips already
+            published are never touched; a clip somewhere else entirely already scheduled to the wrong channel can be
+            fixed on the Scheduler page&apos;s &quot;Move to Channel&quot; action.
+          </p>
         </div>
 
         <div>

@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { LayerEditor } from "@/components/layers/LayerEditor";
 import { LayerOverlay } from "@/components/clips/timeline/ClipVideoPreview";
+import { CanvasSizeField, nearestAspectRatio } from "@/components/templates/CanvasSizeField";
 import type { Template, TemplateConfig, TemplateLayer, VideoRegion } from "@/lib/types";
 
 // Bundled looping placeholder clip (frontend/public/sample-preview.mp4) so the
@@ -43,6 +44,8 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const { data, isLoading } = useApi<{ data: Template }>(key);
   const template = data?.data;
 
+  const [resolutionWidth, setResolutionWidth] = useState(1080);
+  const [resolutionHeight, setResolutionHeight] = useState(1920);
   const [caption, setCaption] = useState<NonNullable<TemplateConfig["caption"]>>({});
   const [watermarkOpacity, setWatermarkOpacity] = useState(0.8);
   const [progressBarEnabled, setProgressBarEnabled] = useState(false);
@@ -61,6 +64,10 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const [previewDuration, setPreviewDuration] = useState(6);
 
   useEffect(() => {
+    if (template?.resolution) {
+      setResolutionWidth(template.resolution.width);
+      setResolutionHeight(template.resolution.height);
+    }
     if (template?.current_version?.config) {
       const cfg = template.current_version.config;
       setCaption(cfg.caption ?? {});
@@ -81,6 +88,14 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
     setSaving(true);
     try {
       await api.patch(`/admin/templates/${templateId}`, {
+        // Plain metadata on the Template row itself — updated in place, no new
+        // version needed for these two (unlike config below). aspect_ratio is
+        // recomputed here too since it's the coarse bucket used for template<->
+        // clip matching elsewhere; the exact canvas size is what actually
+        // drives the render (see Clip::targetResolution()).
+        resolution_width: resolutionWidth,
+        resolution_height: resolutionHeight,
+        aspect_ratio: nearestAspectRatio(resolutionWidth, resolutionHeight),
         config: {
           // Bumping to version 2 only affects the NEW version this save creates —
           // clips already pinned to an earlier template_version_id (version 1 or
@@ -145,10 +160,14 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const backgroundEnabled = !!caption.background && (caption.background_opacity ?? 0) > 0;
   const previewBg = backgroundEnabled ? hexToRgba(caption.background!, caption.background_opacity ?? 1) : "transparent";
 
+  // Live edited size (not the stale template.resolution) so the preview below
+  // updates the instant a new Canvas Size preset/custom value is picked, same
+  // as every other field on this page.
+  //
   // Mirrors SubtitleService::toAss()'s auto-size formula exactly, so "Auto" in
   // the preview always matches what actually gets burned into the rendered
   // clip: max(36, videoHeight / 20).
-  const resolution = template.resolution ?? { width: 1080, height: 1920 };
+  const resolution = { width: resolutionWidth, height: resolutionHeight };
   const autoFontSize = Math.max(36, Math.round(resolution.height / 20));
   const effectiveFontSize = caption.font_size ?? autoFontSize;
   const PREVIEW_WIDTH_PX = 220;
@@ -184,7 +203,16 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
     effectAnimation = "templatePreviewShake 0.45s steps(1) infinite";
   }
 
+  // Mirrors FFmpegService::renderClip()'s split: a layer with a negative
+  // z_index renders BEFORE the caption burn-in (so it can sit behind the
+  // caption instead of covering it) and, since that happens before the
+  // video_region inset too, scales/crops together with the video+caption —
+  // rendered here inside the video-region box, at the same coordinate space
+  // the caption preview already uses. Every other layer keeps rendering on
+  // the outer (post-inset) canvas, on top, exactly as before.
   const sortedLayers = [...layers].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+  const behindCaptionLayers = sortedLayers.filter((l) => (l.z_index ?? 0) < 0);
+  const aboveCaptionLayers = sortedLayers.filter((l) => (l.z_index ?? 0) >= 0);
 
   return (
     <div className="space-y-6">
@@ -271,6 +299,14 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                   onLoadedMetadata={(e) => setPreviewDuration(e.currentTarget.duration || 6)}
                 />
 
+                {behindCaptionLayers.length > 0 && (
+                  <div className="pointer-events-none absolute inset-0">
+                    {behindCaptionLayers.map((layer) => (
+                      <LayerOverlay key={layer.id} layer={layer} currentTime={previewTime} duration={previewDuration} />
+                    ))}
+                  </div>
+                )}
+
                 <div
                   className="pointer-events-none absolute inset-0 flex items-end justify-center p-[4%]"
                   style={{ textAlign: caption.position === "top" ? "left" : "center" }}
@@ -320,10 +356,11 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 </div>
               </div>
 
-              {/* Layers render on the full canvas, on top of the (possibly inset) video
-                  box — same stacking order as LayerCompositionService on the backend. */}
+              {/* Non-negative-z_index layers render on the full canvas, on top of the
+                  (possibly inset) video box AND the caption — same stacking order as
+                  LayerCompositionService on the backend. */}
               <div className="pointer-events-none absolute inset-0">
-                {sortedLayers.map((layer) => (
+                {aboveCaptionLayers.map((layer) => (
                   <LayerOverlay key={layer.id} layer={layer} currentTime={previewTime} duration={previewDuration} />
                 ))}
               </div>
@@ -353,6 +390,25 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
         </div>
 
         <div className="space-y-6 lg:col-span-3">
+          <Card className="p-5">
+            <h3 className="mb-1 text-sm font-semibold">Canvas Size</h3>
+            <p className="mb-4 text-xs text-muted">
+              The exact pixel size clips render at when they use this template — pick a preset or type your own.
+              Existing clips already rendered under an earlier version keep their original size; this only affects
+              the next render.
+            </p>
+            <CanvasSizeField
+              width={resolutionWidth}
+              height={resolutionHeight}
+              disabled={!isAdmin}
+              onChange={({ width, height }) => {
+                setResolutionWidth(width);
+                setResolutionHeight(height);
+              }}
+            />
+            {!isAdmin && <p className="mt-4 text-xs text-muted">Only admins can edit templates.</p>}
+          </Card>
+
           <Card className="p-5">
             <h3 className="mb-4 text-sm font-semibold">Caption Style</h3>
             <fieldset disabled={!isAdmin} className="space-y-4 disabled:opacity-60">

@@ -90,6 +90,11 @@ class ClipController extends Controller
             'end_time' => ['sometimes', 'numeric', 'min:0'],
             'aspect_ratio' => ['sometimes', Rule::in(['9:16', '1:1', '16:9'])],
             'template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
+            // See FFmpegService::renderClip()'s setpts/atempo (speed) and volume=
+            // (volume) blocks — 1.0 is a no-op for both, matching every clip
+            // before this feature.
+            'speed' => ['sometimes', 'numeric', 'min:0.5', 'max:2'],
+            'volume' => ['sometimes', 'numeric', 'min:0', 'max:2'],
             'subtitles_enabled' => ['sometimes', 'boolean'],
             'subtitle_language' => ['sometimes', 'string', 'max:10'],
             'subtitle_config' => ['sometimes', 'array'],
@@ -125,7 +130,7 @@ class ClipController extends Controller
             $data['intro_cover_path'] = null;
         }
 
-        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes', 'layer_overrides', 'segments', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice'];
+        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes', 'layer_overrides', 'segments', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice', 'speed', 'volume'];
         $needsRerender = ! empty(array_intersect(array_keys($data), $reRenderFields));
 
         if (array_key_exists('template_id', $data)) {
@@ -226,12 +231,12 @@ class ClipController extends Controller
     public function previewConfig(Request $request, Clip $clip)
     {
         $this->authorizeClip($request, $clip);
-        $clip->load('templateVersion');
+        $clip->load(['template', 'templateVersion']);
 
         $config = $clip->templateVersion?->config ?? DefaultTemplateConfig::config();
         $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
         $layers = LayerOverrideMerger::merge($config['layers'] ?? [], $clip->layer_overrides ?? []);
-        [$width, $height] = \App\Services\Video\AspectRatio::resolution($clip->aspect_ratio);
+        [$width, $height] = $clip->targetResolution();
 
         return response()->json([
             'data' => [

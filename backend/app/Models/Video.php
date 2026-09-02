@@ -14,7 +14,8 @@ class Video extends Model
 
     protected $fillable = [
         'project_id', 'source_type', 'source_url', 'original_filename', 'disk_path',
-        'audio_path', 'thumbnail_path', 'title', 'duration_seconds', 'width', 'height',
+        'audio_path', 'thumbnail_path', 'thumbnail_strip_path', 'waveform_path',
+        'title', 'duration_seconds', 'width', 'height',
         'file_size_bytes', 'status', 'failure_reason', 'metadata',
     ];
 

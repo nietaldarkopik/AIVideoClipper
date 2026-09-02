@@ -14,6 +14,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -86,8 +87,31 @@ class ImportVideoJob implements ShouldQueue
                 min(1.0, max(0.1, ($probe['duration'] ?? 10) * 0.1))
             );
 
+            // Best-effort: a video with no audio stream can't get a waveform, and
+            // either call failing for any other reason shouldn't fail the whole
+            // import — the timeline just falls back to a plain bar for this video,
+            // same as every video imported before this feature existed.
+            $stripRelative = null;
+            $waveformRelative = null;
+            try {
+                $stripRelative = "videos/{$video->id}/thumbnail_strip.jpg";
+                $ffmpeg->generateThumbnailStrip($fullPath, $disk->path($stripRelative), $probe['duration'] ?? 10.0);
+            } catch (Throwable $e) {
+                $stripRelative = null;
+                Log::warning('Thumbnail strip generation failed', ['video_id' => $video->id, 'error' => $e->getMessage()]);
+            }
+            try {
+                $waveformRelative = "videos/{$video->id}/waveform.png";
+                $ffmpeg->generateWaveform($fullPath, $disk->path($waveformRelative));
+            } catch (Throwable $e) {
+                $waveformRelative = null;
+                Log::warning('Waveform generation failed', ['video_id' => $video->id, 'error' => $e->getMessage()]);
+            }
+
             $video->update([
                 'thumbnail_path' => $thumbRelative,
+                'thumbnail_strip_path' => $stripRelative,
+                'waveform_path' => $waveformRelative,
                 'title' => $video->title ?: pathinfo($video->original_filename ?? 'Untitled', PATHINFO_FILENAME),
                 'status' => 'ready',
             ]);

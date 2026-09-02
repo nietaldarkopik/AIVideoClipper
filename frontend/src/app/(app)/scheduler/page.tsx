@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { mutate } from "swr";
-import { ArrowUpToLine, CalendarClock, CalendarDays, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
+import { ArrowLeftRight, ArrowUpToLine, CalendarClock, CalendarDays, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -18,6 +18,7 @@ import { NewScheduleModal } from "@/components/scheduler/NewScheduleModal";
 import { EditScheduleModal } from "@/components/scheduler/EditScheduleModal";
 import { ClipPreviewModal } from "@/components/scheduler/ClipPreviewModal";
 import { RescheduleAllModal } from "@/components/scheduler/RescheduleAllModal";
+import { MoveChannelModal } from "@/components/scheduler/MoveChannelModal";
 import { SchedulerCalendar } from "@/components/scheduler/SchedulerCalendar";
 import { SchedulerWeekView } from "@/components/scheduler/SchedulerWeekView";
 import type { Paginated, Project, SocialAccount, SocialPost } from "@/lib/types";
@@ -39,6 +40,11 @@ export default function SchedulerPage() {
   // "items disappeared" even though nothing was actually lost.
   const [visibleRange, setVisibleRange] = useState<{ from: string; to: string } | null>(null);
   const [rescheduleAllOpen, setRescheduleAllOpen] = useState(false);
+  const [moveChannelOpen, setMoveChannelOpen] = useState(false);
+  // Table-only: checked rows for "Move to Channel". Empty means "use whatever
+  // the current filters narrow the table down to" instead — see
+  // handleOpenMoveChannel().
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   const { data: projectsRes } = useApi<Paginated<Project>>("/projects?per_page=100");
   const { data: accountsRes } = useApi<{ data: SocialAccount[] }>("/social-accounts");
@@ -184,6 +190,65 @@ export default function SchedulerPage() {
     setRescheduleAllOpen(true);
   }
 
+  // "Move to Channel" prefers whatever's checked in the table (a deliberate,
+  // possibly-mixed hand-pick of posts) — falls back to the current filtered
+  // view (eligibleForBulk) when nothing's checked, same "act on what's in
+  // front of you" default as Reschedule All.
+  const usingSelectionForMove = selectedIds.size > 0;
+  const moveChannelPostIds = useMemo(
+    () => (usingSelectionForMove ? eligibleForBulk.filter((p) => selectedIds.has(p.id)) : eligibleForBulk).map((p) => p.id),
+    [usingSelectionForMove, eligibleForBulk, selectedIds]
+  );
+
+  function handleOpenMoveChannel() {
+    if (moveChannelPostIds.length === 0) {
+      toast(
+        usingSelectionForMove ? "None of the selected posts are eligible to move." : "Nothing eligible to move in the current view.",
+        "danger"
+      );
+      return;
+    }
+    setMoveChannelOpen(true);
+  }
+
+  function toggleSelected(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allEligibleSelected = eligibleForBulk.length > 0 && eligibleForBulk.every((p) => selectedIds.has(p.id));
+
+  function toggleSelectAll() {
+    setSelectedIds(allEligibleSelected ? new Set() : new Set(eligibleForBulk.map((p) => p.id)));
+  }
+
+  // "Reschedule All" only ever touches `posts` (whatever the active
+  // project/platform/channel/status filters narrowed the table/calendar down
+  // to) — correct behavior (lets someone reschedule just one channel on
+  // purpose), but silent about it. A leftover filter from earlier browsing
+  // makes a bulk reschedule quietly single-channel, which reads as "different
+  // channels never land on the same day" even though the underlying
+  // stagger/day-cap algorithm treats every channel independently and happily
+  // interleaves them when given the chance. Surfaced in the modal instead.
+  const activeFilterLabels = useMemo(() => {
+    const labels: string[] = [];
+    if (projectFilter) {
+      const project = (projectsRes?.data ?? []).find((p) => String(p.id) === projectFilter);
+      labels.push(`Project: ${project?.title ?? projectFilter}`);
+    }
+    if (platformFilter) labels.push(`Platform: ${PLATFORM_LABELS[platformFilter] ?? platformFilter}`);
+    if (accountFilter) {
+      const account = (accountsRes?.data ?? []).find((a) => String(a.id) === accountFilter);
+      labels.push(`Channel: ${account?.account_name ?? accountFilter}`);
+    }
+    if (statusFilter) labels.push(`Status: ${statusFilter}`);
+    return labels;
+  }, [projectFilter, platformFilter, accountFilter, statusFilter, projectsRes, accountsRes]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -192,6 +257,10 @@ export default function SchedulerPage() {
           <p className="mt-1 text-sm text-muted">All scheduled clip publishes, across every project and channel.</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={handleOpenMoveChannel}>
+            <ArrowLeftRight className="size-4" />
+            {selectedIds.size > 0 ? `Move ${selectedIds.size} to Channel` : "Move to Channel"}
+          </Button>
           <Button variant="outline" onClick={handleOpenRescheduleAll}>
             <Shuffle className="size-4" />
             Reschedule All
@@ -319,6 +388,15 @@ export default function SchedulerPage() {
           <table className="w-full text-left text-sm">
             <thead>
               <tr className="border-b border-border-subtle text-xs text-muted">
+                <th className="w-8 px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={allEligibleSelected}
+                    onChange={toggleSelectAll}
+                    className="size-4 rounded accent-accent cursor-pointer"
+                    title="Select all eligible posts in view"
+                  />
+                </th>
                 <th className="px-4 py-3 font-medium">Clip</th>
                 <th className="px-4 py-3 font-medium">Project</th>
                 <th className="px-4 py-3 font-medium">Channel</th>
@@ -328,8 +406,20 @@ export default function SchedulerPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
-              {posts.map((post) => (
+              {posts.map((post) => {
+                const locked = ["published", "uploading", "publishing"].includes(post.status);
+                return (
                 <tr key={post.id} className="hover:bg-white/5">
+                  <td className="px-4 py-3">
+                    {!locked && (
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(post.id)}
+                        onChange={() => toggleSelected(post.id)}
+                        className="size-4 rounded accent-accent cursor-pointer"
+                      />
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <button
@@ -438,7 +528,8 @@ export default function SchedulerPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </Card>
@@ -450,8 +541,20 @@ export default function SchedulerPage() {
       <RescheduleAllModal
         open={rescheduleAllOpen}
         postIds={eligibleForBulk.map((p) => p.id)}
+        activeFilterLabels={activeFilterLabels}
         onClose={() => setRescheduleAllOpen(false)}
         onRescheduled={refresh}
+      />
+      <MoveChannelModal
+        open={moveChannelOpen}
+        postIds={moveChannelPostIds}
+        usingSelection={usingSelectionForMove}
+        accounts={accountsRes?.data ?? []}
+        onClose={() => setMoveChannelOpen(false)}
+        onMoved={() => {
+          setSelectedIds(new Set());
+          refresh();
+        }}
       />
     </div>
   );

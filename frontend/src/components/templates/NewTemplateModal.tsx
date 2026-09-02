@@ -7,6 +7,7 @@ import { Plus } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select, Textarea } from "@/components/ui/Input";
+import { CanvasSizeField } from "@/components/templates/CanvasSizeField";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -18,7 +19,9 @@ export function NewTemplateModal({ open, onClose }: { open: boolean; onClose: ()
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [categoryId, setCategoryId] = useState("");
-  const [aspectRatio, setAspectRatio] = useState("9:16");
+  const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9">("9:16");
+  const [resolutionWidth, setResolutionWidth] = useState(1080);
+  const [resolutionHeight, setResolutionHeight] = useState(1920);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit() {
@@ -33,6 +36,8 @@ export function NewTemplateModal({ open, onClose }: { open: boolean; onClose: ()
         description,
         template_category_id: categoryId ? Number(categoryId) : null,
         aspect_ratio: aspectRatio,
+        resolution_width: resolutionWidth,
+        resolution_height: resolutionHeight,
       });
       await mutate((key) => typeof key === "string" && key.startsWith("/templates"));
       toast("Template created.", "success");
@@ -56,25 +61,29 @@ export function NewTemplateModal({ open, onClose }: { open: boolean; onClose: ()
           <Label htmlFor="description">Description</Label>
           <Textarea id="description" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label htmlFor="category">Category</Label>
-            <Select id="category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">Uncategorized</option>
-              {categoriesRes?.data.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="aspect">Aspect Ratio</Label>
-            <Select id="aspect" value={aspectRatio} onChange={(e) => setAspectRatio(e.target.value)}>
-              <option value="9:16">9:16</option>
-              <option value="1:1">1:1</option>
-              <option value="16:9">16:9</option>
-            </Select>
+        <div>
+          <Label htmlFor="category">Category</Label>
+          <Select id="category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+            <option value="">Uncategorized</option>
+            {categoriesRes?.data.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <Label>Canvas Size</Label>
+          <div className="mt-1.5">
+            <CanvasSizeField
+              width={resolutionWidth}
+              height={resolutionHeight}
+              onChange={({ width, height, aspectRatio }) => {
+                setResolutionWidth(width);
+                setResolutionHeight(height);
+                setAspectRatio(aspectRatio);
+              }}
+            />
           </div>
         </div>
       </div>

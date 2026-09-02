@@ -15,6 +15,32 @@ class FFmpegService
 
     private const PIP_MARGIN = 24;
 
+    // Frame rate concatSegments() normalizes every segment's video pad to when
+    // stitching with a fade transition, so xfade's "inputs must share a time
+    // base" requirement is always satisfied regardless of where each segment
+    // came from (looped-image cover card vs. re-encoded clip) — see the fps=
+    // filter added there. Not used for the plain 'cut' path, which has no such
+    // requirement.
+    private const FADE_CONCAT_FPS = 30;
+
+    // Similar idea to FADE_CONCAT_FPS but for audio, and NOT limited to the fade
+    // path: every segment's audio pad concatSegments() joins — 'cut' or 'fade'
+    // — gets resampled to this rate (and forced to stereo) first, so a lower-
+    // quality segment (e.g. 16kHz mono TTS narration on an intro card) can't
+    // drag the whole chained output down to its format — see the aformat=
+    // filter added there. 44.1kHz matches what renderClip()/renderCoverSegment()
+    // already output for a real source clip.
+    private const CONCAT_AUDIO_SAMPLE_RATE = 44100;
+
+    // Public — VideoResource exposes this alongside thumbnail_strip_url so the
+    // frontend timeline's per-pixel slice math (tile index = floor(fraction *
+    // tileCount)) never has to hardcode or guess a number that only this class
+    // actually controls. Fixed regardless of source duration — see
+    // generateThumbnailStrip()'s docblock for why.
+    public const THUMBNAIL_STRIP_TILE_COUNT = 100;
+
+    public const THUMBNAIL_STRIP_TILE_HEIGHT = 96;
+
     public function __construct(
         private readonly string $ffmpegBin = 'ffmpeg',
         private readonly string $ffprobeBin = 'ffprobe',
@@ -151,6 +177,88 @@ class FFmpegService
     }
 
     /**
+     * One sprite image: THUMBNAIL_STRIP_TILE_COUNT frames sampled evenly across
+     * the WHOLE video and tiled left-to-right into a single row. Tile count is
+     * fixed regardless of duration (a 2-minute clip and a 7-hour livestream VOD
+     * both get the same number of tiles) so the sprite size stays bounded and
+     * the frontend's per-pixel slice math (tile index = floor(fraction *
+     * tileCount)) doesn't need to know anything about the source's actual
+     * length.
+     *
+     * Grabs each tile with its OWN fast input seek (-ss before -i) rather than
+     * one fps=N/duration filter pass over the whole file — the filter-pass
+     * approach decodes from position 0 every time regardless of how far into
+     * the file the sampled frames are, which for a source hours long was
+     * observed to turn a "generate 100 thumbnails" call into "decode the
+     * entire multi-hour video" (same root cause fixed in
+     * extractWithoutSilence() — see that method's docblock for the concrete
+     * numbers). N individual near-instant seeks, stitched together with a
+     * second, cheap ffmpeg pass, stays fast regardless of source length.
+     */
+    public function generateThumbnailStrip(string $videoPath, string $outPath, float $duration, int $tileCount = self::THUMBNAIL_STRIP_TILE_COUNT): void
+    {
+        $this->ensureDir($outPath);
+        $duration = max(1.0, $duration);
+        // Never ask for more tiles than there are whole seconds of video — a
+        // 30-second clip doesn't need 100 near-duplicate frames.
+        $n = max(2, min($tileCount, (int) floor($duration)));
+        $step = $duration / $n;
+        $tileHeight = self::THUMBNAIL_STRIP_TILE_HEIGHT;
+
+        $tmpDir = sys_get_temp_dir() . '/thumbstrip_' . uniqid();
+        mkdir($tmpDir, 0777, true);
+
+        try {
+            for ($i = 0; $i < $n; $i++) {
+                // Midpoint of each slice rather than its start — a more
+                // representative frame than landing exactly on a slice boundary.
+                $t = min($duration - 0.05, ($i + 0.5) * $step);
+                $framePath = sprintf('%s/frame_%04d.jpg', $tmpDir, $i);
+
+                $result = Process::timeout(30)->run([
+                    $this->ffmpegBin, '-y', '-ss', (string) $t, '-i', $videoPath,
+                    '-frames:v', '1', '-vf', "scale=-1:{$tileHeight}", '-q:v', '4', $framePath,
+                ]);
+                $this->assertSuccess($result, "generate thumbnail strip frame {$i}");
+            }
+
+            $result = Process::timeout(60)->run([
+                $this->ffmpegBin, '-y', '-f', 'image2', '-i', "{$tmpDir}/frame_%04d.jpg",
+                '-vf', "tile={$n}x1", '-frames:v', '1', '-q:v', '4', $outPath,
+            ]);
+            $this->assertSuccess($result, 'stitch thumbnail strip');
+        } finally {
+            array_map('unlink', glob("{$tmpDir}/*.jpg") ?: []);
+            @rmdir($tmpDir);
+        }
+    }
+
+    /**
+     * A single waveform PNG via ffmpeg's own showwavespic filter — no peak-data
+     * computation needed client-side, just an image the timeline overlays on
+     * top of the thumbnail strip. showwavespic has no direct "transparent
+     * background" option, so the solid-black canvas it always draws on gets
+     * keyed out to alpha afterward (colorkey) — PNG (unlike the strip's own
+     * .jpg) supports that alpha channel. Reads the WHOLE audio stream once
+     * (unlike the thumbnail strip, a waveform is inherently a summary of the
+     * entire signal, not sample-able by seeking) — audio-only decode is cheap
+     * enough even for a multi-hour source that this doesn't need the
+     * seek-per-tile treatment generateThumbnailStrip() needed for video.
+     */
+    public function generateWaveform(string $videoPath, string $outPath, int $width = 1000, int $height = self::THUMBNAIL_STRIP_TILE_HEIGHT): void
+    {
+        $this->ensureDir($outPath);
+
+        $result = Process::timeout(180)->run([
+            $this->ffmpegBin, '-y', '-i', $videoPath,
+            '-filter_complex', "showwavespic=s={$width}x{$height}:colors=white,format=rgba,colorkey=black:0.15:0.1",
+            '-frames:v', '1', $outPath,
+        ]);
+
+        $this->assertSuccess($result, 'generate waveform');
+    }
+
+    /**
      * Detect silent gaps in [start, start+duration] of $sourcePath via ffmpeg's
      * silencedetect filter, parsed off its stderr log (it has no structured output
      * mode). -vn skips video decode entirely since only audio is analyzed here.
@@ -198,7 +306,18 @@ class FFmpegService
      * Cut $clipStart-relative $keepIntervals out of $sourcePath and concatenate
      * them into a single silence-free file — a pre-pass ahead of renderClip() (see
      * SilenceTrimmer). Uses the trim/concat filter pair rather than -ss/-t per
-     * segment so every kept piece comes from one decoded pass of the source.
+     * segment so every kept piece comes from one decoded pass of the source —
+     * but that one pass still starts at $clipStart via input seeking (-ss before
+     * -i) rather than at 0, so a clip deep into a long source (e.g. a multi-hour
+     * livestream VOD) doesn't force ffmpeg to decode everything before it just to
+     * reach the part that matters. Without this, a clip starting tens of
+     * thousands of seconds in was observed to come out with completely silent
+     * audio (video too, per the same mechanism) despite the source audibly
+     * having real audio at that timestamp when probed directly — decoding from
+     * 0 across that much accumulated audio/video PTS drift landed trim/atrim's
+     * absolute-timestamp math on the wrong (empty-sounding) content. Every
+     * interval's start/end shift by $clipStart accordingly, since the seek
+     * already re-bases the decoded timeline to start near 0.
      *
      * @param  list<array{start: float, end: float}>  $keepIntervals  clip-relative
      */
@@ -206,15 +325,15 @@ class FFmpegService
     {
         $this->ensureDir($outPath);
 
-        $inputArgs = ['-i', $sourcePath];
+        $inputArgs = ['-ss', (string) $clipStart, '-i', $sourcePath];
         $graph = [];
         $labels = '';
 
         foreach (array_values($keepIntervals) as $i => $seg) {
-            $absStart = $clipStart + $seg['start'];
-            $absEnd = $clipStart + $seg['end'];
-            $graph[] = "[0:v]trim=start={$absStart}:end={$absEnd},setpts=PTS-STARTPTS[v{$i}]";
-            $graph[] = "[0:a]atrim=start={$absStart}:end={$absEnd},asetpts=PTS-STARTPTS[a{$i}]";
+            $start = number_format($seg['start'], 3, '.', '');
+            $end = number_format($seg['end'], 3, '.', '');
+            $graph[] = "[0:v]trim=start={$start}:end={$end},setpts=PTS-STARTPTS[v{$i}]";
+            $graph[] = "[0:a]atrim=start={$start}:end={$end},asetpts=PTS-STARTPTS[a{$i}]";
             $labels .= "[v{$i}][a{$i}]";
         }
 
@@ -237,10 +356,12 @@ class FFmpegService
      * the target aspect ratio/resolution, and optionally burn in an ASS subtitle file.
      *
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  relative to clip start
-     * @param  array<int, array<string, mixed>>  $layers  override-merged template layers (text/image/progress_bar/audio/rect), see LayerCompositionService
+     * @param  array<int, array<string, mixed>>  $layers  override-merged template layers (text/image/progress_bar/audio/rect), see LayerCompositionService. Rendered after (on top of) the caption burn-in unless a layer's z_index is negative, in which case it renders before (underneath) instead — see the split into $behindCaptionLayers/$aboveCaptionLayers inside this method.
      * @param  (callable(string): string)|null  $resolveLayerPath  resolves a layer's stored relative path to an absolute path; required if $layers references any image/audio layer
      * @param  ?array{x: float, y: float, width: float, height: float}  $videoRegion  null (default, every template before this feature) fills the whole canvas exactly as before — a smaller region insets the video into that box instead, with $canvasBackgroundColor filling the rest, so template layers (typically a 'rect' + 'text' pair) can build bars around it. Smart-pan crop keyframes and subtitle burn-in are computed against the full canvas either way — see the docblock at the call site inside this method for why.
      * @param  ?array{type?: string, intensity?: float}  $effect  null/'none' (default, every template before this feature) leaves the frame untouched — see buildEffectFilter() docblock.
+     * @param  float  $speed  0.5-2.0, 1.0 (default, every clip before this feature) leaves timing untouched. Applied as the FINAL stage (after crop/caption/layers/watermark), so every earlier stage keeps computing against real, untouched time — see the setpts/atempo block near the end of this method.
+     * @param  float  $volume  0.0-2.0, 1.0 (default) leaves the source clip's own audio untouched. A background-audio layer's own `volume` prop (LayerCompositionService::buildAudioLayer()) is independent of this — this only scales the clip's OWN dialogue track, not anything mixed in on top of it.
      */
     public function renderClip(
         string $sourceVideoPath,
@@ -258,6 +379,8 @@ class FFmpegService
         ?array $videoRegion = null,
         string $canvasBackgroundColor = '#000000',
         ?array $effect = null,
+        float $speed = 1.0,
+        float $volume = 1.0,
     ): void {
         $this->ensureDir($outPath);
 
@@ -272,6 +395,64 @@ class FFmpegService
         // in text and branding never get zoomed/shaken along with the footage.
         [$effectGraph, $videoLabel] = $this->buildEffectFilter($videoLabel, $effect, $targetWidth, $targetHeight, $duration);
         $graph = array_merge($graph, $effectGraph);
+
+        $inputArgs = [
+            // -ss/-t must sit BEFORE their -i to bind to that input. Once a second
+            // -i (the watermark) follows, a trailing -t here would instead bind to
+            // THAT input — silently leaving this source clip untrimmed and reading
+            // to EOF (observed: output ran to the source's full remaining length).
+            '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
+        ];
+        $audioLabels = [];
+        $nextInputIndex = 1;
+        $layerTempFiles = [];
+
+        // Only builds a real filter node when volume is actually non-default —
+        // '0:a' stays a bare stream specifier otherwise, so the existing '0:a?'
+        // (optional — tolerates a source with literally no audio track) further
+        // down is unaffected for every clip that doesn't touch this new field.
+        // Opting into a custom volume loses that tolerance (this filter node
+        // requires a real [0:a] to exist) — an accepted trade-off, same shape as
+        // every other "byte-identical unless you opt in" feature in this method.
+        $sourceAudioLabel = '0:a';
+        if (abs($volume - 1.0) > 0.001) {
+            $vol = number_format(max(0.0, min(2.0, $volume)), 3, '.', '');
+            $graph[] = "[0:a]volume={$vol}[srcaudio]";
+            $sourceAudioLabel = 'srcaudio';
+        }
+
+        // Every layer used to render strictly AFTER the caption burn-in below —
+        // fine for a branding bar that sits outside the caption's area, but a
+        // 'rect'/'image' layer whose box overlaps the caption (e.g. a footer bar
+        // built to frame it) opaquely covered the caption text, and there was no
+        // way to ask for the opposite stacking regardless of the layer's own
+        // z_index (z_index only orders layers against EACH OTHER, never against
+        // the caption). A negative z_index now means "render before/underneath
+        // the caption" instead — split here and interleave the caption burn-in
+        // between the two groups. Every existing template only ever used
+        // z_index >= 0 (LayerEditor's "Add layer" starts at 1), so this is a
+        // no-op for them: $behindCaptionLayers is empty and behavior is
+        // byte-for-byte the same as before.
+        $behindCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) < 0);
+        $aboveCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) >= 0);
+
+        if (! empty($behindCaptionLayers)) {
+            $built = $this->layerService->buildGraph(
+                $behindCaptionLayers,
+                $videoLabel,
+                $targetWidth,
+                $targetHeight,
+                $duration,
+                $resolveLayerPath ?? fn (string $p) => $p,
+                $nextInputIndex,
+            );
+            $graph = array_merge($graph, $built['graph']);
+            $inputArgs = array_merge($inputArgs, $built['inputArgs']);
+            $videoLabel = $built['videoLabel'];
+            $audioLabels = array_merge($audioLabels, $built['audioLabels']);
+            $nextInputIndex += $built['inputCount'];
+            $layerTempFiles = array_merge($layerTempFiles, $built['tempFiles']);
+        }
 
         if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
             $escaped = $this->escapeFilterPath($subtitlesAssPath);
@@ -307,24 +488,15 @@ class FFmpegService
             $videoLabel = 'regioncomposited';
         }
 
-        $inputArgs = [
-            // -ss/-t must sit BEFORE their -i to bind to that input. Once a second
-            // -i (the watermark) follows, a trailing -t here would instead bind to
-            // THAT input — silently leaving this source clip untrimmed and reading
-            // to EOF (observed: output ran to the source's full remaining length).
-            '-ss', (string) $start, '-t', (string) $duration, '-i', $sourceVideoPath,
-        ];
-
-        // Template layers (text/logo/progress-bar/background-audio) render between
-        // the caption burn-in above and the watermark overlay below — captions stay
-        // implicitly at the bottom of the stack, watermark implicitly at the top, in
-        // this pass (see LayerCompositionService docblock).
-        $audioLabels = [];
-        $nextInputIndex = 1;
-        $layerTempFiles = [];
-        if (! empty($layers)) {
+        // Remaining (z_index >= 0) template layers render between the caption
+        // burn-in above and the watermark overlay below — same tier as before
+        // this method learned about "behind the caption" layers, and still the
+        // ONLY tier for a template that doesn't use one — captions stay
+        // implicitly at the bottom of that group, watermark implicitly at the
+        // top (see LayerCompositionService docblock).
+        if (! empty($aboveCaptionLayers)) {
             $built = $this->layerService->buildGraph(
-                $layers,
+                $aboveCaptionLayers,
                 $videoLabel,
                 $targetWidth,
                 $targetHeight,
@@ -335,9 +507,9 @@ class FFmpegService
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
             $videoLabel = $built['videoLabel'];
-            $audioLabels = $built['audioLabels'];
+            $audioLabels = array_merge($audioLabels, $built['audioLabels']);
             $nextInputIndex += $built['inputCount'];
-            $layerTempFiles = $built['tempFiles'];
+            $layerTempFiles = array_merge($layerTempFiles, $built['tempFiles']);
         }
 
         $outputArgs = [];
@@ -353,11 +525,31 @@ class FFmpegService
             $outputArgs[] = '-shortest';
         }
 
-        $audioMapLabel = '0:a?';
+        // $sourceAudioLabel is '0:a' (bare stream specifier, '?' appended just
+        // below) unless a custom volume built a real [srcaudio] node above.
+        $audioMapLabel = $sourceAudioLabel === '0:a' ? '0:a?' : "[{$sourceAudioLabel}]";
         if (! empty($audioLabels)) {
-            $mixInputs = array_merge(['[0:a]'], $audioLabels);
+            $mixInputs = array_merge(["[{$sourceAudioLabel}]"], $audioLabels);
             $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ':duration=first:dropout_transition=0[aout]';
             $audioMapLabel = '[aout]';
+        }
+
+        // Speed is the FINAL transform, applied together to video and whatever
+        // the audio chain above produced (raw/volume-adjusted/mixed) — every
+        // earlier stage (crop, captions, layers, silence removal upstream of
+        // this call) computed against real time, so scaling both streams by the
+        // identical factor here is what keeps them in sync. Same "loses the
+        // '0:a?' missing-audio tolerance only if you opt in" trade-off as the
+        // volume block above, for the same reason (a real filter node needs a
+        // real [0:a] to exist).
+        if (abs($speed - 1.0) > 0.001) {
+            $spd = number_format(max(0.5, min(2.0, $speed)), 3, '.', '');
+            $graph[] = "[{$videoLabel}]setpts=PTS/{$spd}[spedvideo]";
+            $videoLabel = 'spedvideo';
+
+            $audioSourceForTempo = $audioMapLabel === '0:a?' ? '0:a' : trim($audioMapLabel, '[]');
+            $graph[] = "[{$audioSourceForTempo}]atempo={$spd}[spedaudio]";
+            $audioMapLabel = '[spedaudio]';
         }
 
         $outputArgs = array_merge($outputArgs, [
@@ -391,6 +583,8 @@ class FFmpegService
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  only meaningful for pip_* layouts — split_* layouts fill their half-frame with a plain cover-crop instead (see class docblock on buildSplitGraph())
      * @param  array<int, array<string, mixed>>  $layers  override-merged template layers; RenderClipJob filters out any pip_video layer before calling here since reaction_layout already owns PiP for this clip (see class docblock on LayerCompositionService's pip_video case)
      * @param  ?array{type?: string, intensity?: float}  $effect  applied to the whole composited PiP/split frame, same as renderClip() — see buildEffectFilter()
+     * @param  float  $speed  see renderClip() — same 0.5-2.0 setpts/atempo final stage, applied to the whole composited video and the already-mixed source+webcam+layers audio together.
+     * @param  float  $volume  see renderClip() — scales only the source clip's own [0:a], not the webcam/reactor commentary track or any background-audio layer.
      */
     public function renderReactionClip(
         string $sourceVideoPath,
@@ -408,6 +602,8 @@ class FFmpegService
         array $layers = [],
         ?callable $resolveLayerPath = null,
         ?array $effect = null,
+        float $speed = 1.0,
+        float $volume = 1.0,
     ): void {
         $this->ensureDir($outPath);
         $duration = max(0.1, $end - $start);
@@ -423,12 +619,6 @@ class FFmpegService
         [$effectGraph, $outputLabel] = $this->buildEffectFilter($outputLabel, $effect, $targetWidth, $targetHeight, $duration);
         $graph = array_merge($graph, $effectGraph);
 
-        if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
-            $escaped = $this->escapeFilterPath($subtitlesAssPath);
-            $graph[] = "[{$outputLabel}]ass='{$escaped}'[captioned]";
-            $outputLabel = 'captioned';
-        }
-
         $inputArgs = [
             // -ss/-t must each sit immediately BEFORE their own -i — with two-plus
             // inputs, a trailing -t instead binds to the NEXT -i (see renderClip()).
@@ -439,9 +629,27 @@ class FFmpegService
         $audioLabels = [];
         $nextInputIndex = 2;
         $layerTempFiles = [];
-        if (! empty($layers)) {
+
+        // Only the source clip's own track — see renderClip()'s equivalent
+        // block for why this stays a bare '0:a' (used unquoted as a mixInputs
+        // entry below) unless volume is actually non-default.
+        $sourceAudioLabel = '0:a';
+        if (abs($volume - 1.0) > 0.001) {
+            $vol = number_format(max(0.0, min(2.0, $volume)), 3, '.', '');
+            $graph[] = "[0:a]volume={$vol}[srcaudio]";
+            $sourceAudioLabel = 'srcaudio';
+        }
+
+        // Same negative-z_index-means-behind-the-caption split as renderClip() —
+        // see its docblock/comment for why. Existing templates never use a
+        // negative z_index, so $behindCaptionLayers is empty for them and this
+        // is a no-op.
+        $behindCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) < 0);
+        $aboveCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) >= 0);
+
+        if (! empty($behindCaptionLayers)) {
             $built = $this->layerService->buildGraph(
-                $layers,
+                $behindCaptionLayers,
                 $outputLabel,
                 $targetWidth,
                 $targetHeight,
@@ -452,9 +660,33 @@ class FFmpegService
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
             $outputLabel = $built['videoLabel'];
-            $audioLabels = $built['audioLabels'];
+            $audioLabels = array_merge($audioLabels, $built['audioLabels']);
             $nextInputIndex += $built['inputCount'];
-            $layerTempFiles = $built['tempFiles'];
+            $layerTempFiles = array_merge($layerTempFiles, $built['tempFiles']);
+        }
+
+        if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
+            $escaped = $this->escapeFilterPath($subtitlesAssPath);
+            $graph[] = "[{$outputLabel}]ass='{$escaped}'[captioned]";
+            $outputLabel = 'captioned';
+        }
+
+        if (! empty($aboveCaptionLayers)) {
+            $built = $this->layerService->buildGraph(
+                $aboveCaptionLayers,
+                $outputLabel,
+                $targetWidth,
+                $targetHeight,
+                $duration,
+                $resolveLayerPath ?? fn (string $p) => $p,
+                $nextInputIndex,
+            );
+            $graph = array_merge($graph, $built['graph']);
+            $inputArgs = array_merge($inputArgs, $built['inputArgs']);
+            $outputLabel = $built['videoLabel'];
+            $audioLabels = array_merge($audioLabels, $built['audioLabels']);
+            $nextInputIndex += $built['inputCount'];
+            $layerTempFiles = array_merge($layerTempFiles, $built['tempFiles']);
         }
 
         if ($watermarkPath && file_exists($watermarkPath)) {
@@ -472,9 +704,19 @@ class FFmpegService
         // trim, so shortest/first are equivalent there anyway); duration=first only
         // kicks in once a bg-music layer joins the mix, so a shorter music bed can't
         // truncate the source+webcam audio (see renderClip()'s equivalent case).
-        $mixInputs = array_merge(['[0:a]', '[1:a]'], $audioLabels);
+        $mixInputs = array_merge(["[{$sourceAudioLabel}]", '[1:a]'], $audioLabels);
         $mixDuration = empty($audioLabels) ? 'shortest' : 'first';
         $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ":duration={$mixDuration}:dropout_transition=0[aout]";
+        $audioMapLabel = '[aout]';
+
+        // Speed is the FINAL transform — see renderClip()'s equivalent block.
+        if (abs($speed - 1.0) > 0.001) {
+            $spd = number_format(max(0.5, min(2.0, $speed)), 3, '.', '');
+            $graph[] = "[{$outputLabel}]setpts=PTS/{$spd}[spedvideo]";
+            $outputLabel = 'spedvideo';
+            $graph[] = '[aout]atempo=' . $spd . '[spedaudio]';
+            $audioMapLabel = '[spedaudio]';
+        }
 
         $outputArgs = [
             // Both real video/audio inputs already share the same -t, but a watermark
@@ -491,7 +733,7 @@ class FFmpegService
             $this->runWithFilterScript(
                 $inputArgs,
                 $graph,
-                ['-map', "[{$outputLabel}]", '-map', '[aout]'],
+                ['-map', "[{$outputLabel}]", '-map', $audioMapLabel],
                 $outputArgs,
                 'render reaction clip',
                 1800
@@ -619,17 +861,52 @@ class FFmpegService
             return;
         }
 
+        $transitionType = $transition['type'] ?? 'cut';
+        $transitionDuration = (float) ($transition['duration'] ?? 0.4);
+
         $inputArgs = [];
         $graph = [];
 
         foreach ($segmentPaths as $i => $path) {
             $inputArgs[] = '-i';
             $inputArgs[] = $path;
-            $graph[] = "[{$i}:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight},setsar=1[v{$i}]";
-        }
+            $filter = "[{$i}:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight},setsar=1";
+            if ($transitionType === 'fade' && $transitionDuration > 0) {
+                // xfade requires its two input pads to share an identical time
+                // base — segments generated by different paths in this app (an
+                // intro/outro card looped from a still image vs. a real decoded-
+                // and-re-encoded clip) end up with different container time
+                // bases even at the same frame rate (observed: 1/12800 vs
+                // 1/1000000 despite both being 25fps), which ffmpeg reports as
+                // "First input link main timebase ... do not match" and refuses
+                // to configure the filter at all. fps= resets a pad's time base
+                // to a fixed 1/{fps} as a side effect (documented ffmpeg
+                // behavior), so applying it identically to every segment here
+                // guarantees a match regardless of where each one came from.
+                // Scoped to the fade path only — the plain concat filter below
+                // has no such requirement and re-encoding every segment's frame
+                // rate for it would be an unrelated, unnecessary quality cost.
+                $filter .= ',fps=' . self::FADE_CONCAT_FPS;
+            }
+            $graph[] = "{$filter}[v{$i}]";
 
-        $transitionType = $transition['type'] ?? 'cut';
-        $transitionDuration = (float) ($transition['duration'] ?? 0.4);
+            // Unlike fps= above, this normalization applies to BOTH paths, not
+            // just fade: the plain concat FILTER below (used for 'cut') also
+            // negotiates a single common audio format across its inputs, same
+            // as acrossfade does — it just doesn't hard-reject a mismatch the
+            // way xfade rejects a mismatched video time base, so this failure
+            // mode is silent instead of an error either way. An intro/outro
+            // card's narration track (commonly 16kHz mono TTS output) chained
+            // against the main clip's real audio (typically 44.1kHz stereo)
+            // was observed to implicitly negotiate down to the FIRST segment's
+            // (worse) format for the WHOLE output — quietly downsampling the
+            // actual dialogue audio even on a hard-cut concat with no fade at
+            // all. Normalizing every segment to the same sample rate/channel
+            // layout up front means both filters always negotiate a chain
+            // that's already uniform, instead of picking a lowest-common-
+            // denominator format on their own.
+            $graph[] = "[{$i}:a]aformat=sample_rates=" . self::CONCAT_AUDIO_SAMPLE_RATE . ':channel_layouts=stereo[a' . $i . ']';
+        }
 
         if ($transitionType === 'fade' && $transitionDuration > 0) {
             // xfade needs each segment's real duration up front to compute where
@@ -637,7 +914,7 @@ class FFmpegService
             $durations = array_map(fn (string $p) => max(0.1, $this->probeDuration($p) ?? 0.1), $segmentPaths);
 
             $videoLabel = 'v0';
-            $audioLabel = '0:a';
+            $audioLabel = 'a0';
             $cumulative = $durations[0];
 
             for ($i = 1; $i < $n; $i++) {
@@ -653,7 +930,7 @@ class FFmpegService
                 $vOut = "vx{$i}";
                 $aOut = "ax{$i}";
                 $graph[] = "[{$videoLabel}][v{$i}]xfade=transition=fade:duration={$durationStr}:offset={$offsetStr}[{$vOut}]";
-                $graph[] = "[{$audioLabel}][{$i}:a]acrossfade=d={$durationStr}[{$aOut}]";
+                $graph[] = "[{$audioLabel}][a{$i}]acrossfade=d={$durationStr}[{$aOut}]";
                 $videoLabel = $vOut;
                 $audioLabel = $aOut;
                 $cumulative = $cumulative + $durations[$i] - $pairDuration;
@@ -673,7 +950,7 @@ class FFmpegService
 
         $pairLabels = '';
         foreach ($segmentPaths as $i => $path) {
-            $pairLabels .= "[v{$i}][{$i}:a]";
+            $pairLabels .= "[v{$i}][a{$i}]";
         }
         $graph[] = "{$pairLabels}concat=n={$n}:v=1:a=1[vout][aout]";
 

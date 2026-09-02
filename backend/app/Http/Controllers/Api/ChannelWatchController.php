@@ -106,6 +106,8 @@ class ChannelWatchController extends Controller
             }
         }
 
+        $oldPublishingProfileId = $channelWatch->settings['publishing_profile_id'] ?? null;
+
         $settingsKeys = [
             'clip_mode', 'template_id', 'aspect_ratio', 'subtitle_language', 'subtitles_enabled',
             'publishing_profile_id', 'publish_stagger_min_minutes', 'publish_stagger_max_minutes',
@@ -121,7 +123,20 @@ class ChannelWatchController extends Controller
 
         $channelWatch->save();
 
-        return ChannelWatchResource::make($channelWatch->fresh());
+        // The publishing target just got corrected — redirect whatever this
+        // channel's already-rendered-but-not-yet-published clips are still
+        // scheduled to, onto the new target(s), instead of leaving them queued
+        // to publish to the old (wrong) account. See
+        // AutoPublishScheduler::resyncChannelWatchProfile()'s docblock for what
+        // this does and doesn't cover.
+        $newPublishingProfileId = $channelWatch->settings['publishing_profile_id'] ?? null;
+        $resyncedCount = 0;
+        if (array_key_exists('publishing_profile_id', $data) && $newPublishingProfileId !== $oldPublishingProfileId) {
+            $resyncedCount = app(AutoPublishScheduler::class)->resyncChannelWatchProfile($channelWatch, $newPublishingProfileId);
+        }
+
+        return ChannelWatchResource::make($channelWatch->fresh())
+            ->additional(['resynced_posts' => $resyncedCount]);
     }
 
     public function destroy(Request $request, ChannelWatch $channelWatch)

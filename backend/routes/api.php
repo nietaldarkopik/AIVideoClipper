@@ -110,6 +110,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/social-posts', [SocialPostController::class, 'index']);
     Route::post('/social-posts', [SocialPostController::class, 'store']);
     Route::post('/social-posts/bulk-reschedule', [SocialPostController::class, 'bulkReschedule']);
+    Route::post('/social-posts/bulk-move-channel', [SocialPostController::class, 'bulkMoveChannel']);
     Route::get('/social-posts/{socialPost}', [SocialPostController::class, 'show']);
     Route::patch('/social-posts/{socialPost}', [SocialPostController::class, 'update']);
     Route::post('/social-posts/{socialPost}/regenerate-schedule', [SocialPostController::class, 'regenerateSchedule']);

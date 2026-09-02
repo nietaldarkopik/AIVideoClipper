@@ -19,7 +19,7 @@ class VideoBatch extends Model
     public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [
-        'user_id', 'name', 'status', 'settings', 'total_items', 'completed_items',
+        'user_id', 'channel_watch_id', 'name', 'status', 'settings', 'total_items', 'completed_items',
         'failed_items', 'cancel_requested', 'started_at', 'finished_at',
     ];
 
@@ -36,6 +36,11 @@ class VideoBatch extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function channelWatch(): BelongsTo
+    {
+        return $this->belongsTo(ChannelWatch::class);
     }
 
     public function items(): HasMany

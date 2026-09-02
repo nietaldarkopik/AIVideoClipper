@@ -11,10 +11,12 @@ const HOURS = Array.from({ length: 25 }, (_, i) => i); // 0..24 (24 = midnight/e
 
 function RescheduleAllForm({
   postIds,
+  activeFilterLabels,
   onClose,
   onRescheduled,
 }: {
   postIds: number[];
+  activeFilterLabels: string[];
   onClose: () => void;
   onRescheduled: () => void;
 }) {
@@ -55,7 +57,20 @@ function RescheduleAllForm({
       <p className="text-xs text-muted">
         Redistributes {postIds.length} post{postIds.length === 1 ? "" : "s"} currently in view (already-published or
         in-progress ones are skipped), staggered per channel so posts don&apos;t hit the same account back-to-back.
+        Different channels are scheduled independently — they can land on the same day, or even close to the same
+        time, whenever they&apos;re rescheduled together.
       </p>
+
+      {activeFilterLabels.length > 0 && (
+        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+          <p className="font-medium">Filter active — this will only touch:</p>
+          <p className="mt-0.5">{activeFilterLabels.join(" · ")}</p>
+          <p className="mt-1 text-warning/80">
+            Posts outside this filter (other channels/projects/statuses) won&apos;t be included in this run. Clear
+            the filters above first if you meant to reschedule everything together.
+          </p>
+        </div>
+      )}
 
       <div>
         <Label>Max clips per day, per channel</Label>
@@ -145,17 +160,26 @@ function RescheduleAllForm({
 export function RescheduleAllModal({
   open,
   postIds,
+  activeFilterLabels = [],
   onClose,
   onRescheduled,
 }: {
   open: boolean;
   postIds: number[];
+  activeFilterLabels?: string[];
   onClose: () => void;
   onRescheduled: () => void;
 }) {
   return (
     <Modal open={open} onClose={onClose} title="Reschedule All">
-      {open && <RescheduleAllForm postIds={postIds} onClose={onClose} onRescheduled={onRescheduled} />}
+      {open && (
+        <RescheduleAllForm
+          postIds={postIds}
+          activeFilterLabels={activeFilterLabels}
+          onClose={onClose}
+          onRescheduled={onRescheduled}
+        />
+      )}
     </Modal>
   );
 }

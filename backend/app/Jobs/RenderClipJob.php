@@ -13,7 +13,6 @@ use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\Social\AutoPublishScheduler;
-use App\Services\Video\AspectRatio;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
 use App\Services\Video\LayerOverrideMerger;
@@ -50,7 +49,7 @@ class RenderClipJob implements ShouldQueue
         TextToSpeechProvider $tts,
         ImageGenerationProvider $imageGen,
     ): void {
-        $clip = Clip::with(['video', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
+        $clip = Clip::with(['video', 'template', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
 
         $processingJob = ProcessingJob::create([
@@ -70,7 +69,11 @@ class RenderClipJob implements ShouldQueue
             $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
             $effectConfig = array_merge(DefaultTemplateConfig::config()['effects'], $config['effects'] ?? []);
             $transitionConfig = array_merge(DefaultTemplateConfig::config()['transition'], $config['transition'] ?? []);
-            [$targetWidth, $targetHeight] = AspectRatio::resolution($clip->aspect_ratio);
+            // Prefers the attached template's own canvas size (a template-level
+            // custom resolution override — see Template::resolution_width/height
+            // and the Template Builder's Canvas Size UI) over the clip's own
+            // aspect_ratio bucket — see Clip::targetResolution()'s docblock.
+            [$targetWidth, $targetHeight] = $clip->targetResolution();
 
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
@@ -317,6 +320,8 @@ class RenderClipJob implements ShouldQueue
                     $layers,
                     $resolveLayerPath,
                     $effectConfig,
+                    (float) $clip->speed,
+                    (float) $clip->volume,
                 );
             } else {
                 $ffmpeg->renderClip(
@@ -335,6 +340,8 @@ class RenderClipJob implements ShouldQueue
                     $config['video_region'] ?? null,
                     (string) ($config['canvas_background_color'] ?? '#000000'),
                     $effectConfig,
+                    (float) $clip->speed,
+                    (float) $clip->volume,
                 );
             }
 

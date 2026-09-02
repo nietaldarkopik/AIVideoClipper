@@ -134,9 +134,25 @@ class ProcessBatchItemJob implements ShouldQueue
             if ($renderedClips->isNotEmpty()) {
                 $item->update(['status' => VideoBatchItem::STATUS_PUBLISHING, 'progress' => 85]);
 
+                // $settings['publishing_profile_id'] is a SNAPSHOT taken when this
+                // batch was created (VideoBatchFactory::createFromUrls) — correct
+                // for a manually-submitted batch, which has no ongoing "source of
+                // truth" to defer to, but wrong for a ChannelWatch-originated one
+                // (channel_watch_id set): if the user fixes the watch's publishing
+                // target AFTER this batch was queued but BEFORE this item finishes
+                // rendering, the snapshot is already stale and this would otherwise
+                // publish to the old (wrong) destination anyway. Resolve the LIVE
+                // value from the watch in that case instead — everything else in
+                // $settings (clip_mode, template_id, ...) stays a snapshot, since
+                // those affect how the clip itself was already generated, not just
+                // where it's about to be sent.
+                $publishingProfileId = $batch->channel_watch_id
+                    ? ($batch->channelWatch?->settings['publishing_profile_id'] ?? null)
+                    : ($settings['publishing_profile_id'] ?? null);
+
                 $scheduledCount = $publishScheduler->scheduleForProject(
                     $project,
-                    $settings['publishing_profile_id'] ?? null,
+                    $publishingProfileId,
                     isset($settings['publish_stagger_min_minutes']) ? $settings['publish_stagger_min_minutes'] * 60 : null,
                     isset($settings['publish_stagger_max_minutes']) ? $settings['publish_stagger_max_minutes'] * 60 : null,
                 );

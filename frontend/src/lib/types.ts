@@ -26,6 +26,13 @@ export interface Video {
   original_filename: string | null;
   url: string | null;
   thumbnail_url: string | null;
+  // Null when the video was imported before this feature, generation failed,
+  // or (waveform only) the source has no audio track — TimelineTrack falls
+  // back to a plain bar. tile_count is the fixed number of frames tiled into
+  // thumbnail_strip_url (see FFmpegService::THUMBNAIL_STRIP_TILE_COUNT).
+  thumbnail_strip_url: string | null;
+  thumbnail_strip_tile_count: number;
+  waveform_url: string | null;
   duration_seconds: number | null;
   width: number | null;
   height: number | null;
@@ -124,6 +131,8 @@ export interface Clip {
   start_time: number;
   end_time: number;
   duration: number;
+  speed: number;
+  volume: number;
   aspect_ratio: "9:16" | "1:1" | "16:9";
   crop_config: CropConfig | null;
   scenes: unknown[] | null;

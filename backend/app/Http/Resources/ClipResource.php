@@ -23,6 +23,8 @@ class ClipResource extends JsonResource
             'start_time' => (float) $this->start_time,
             'end_time' => (float) $this->end_time,
             'duration' => (float) $this->duration,
+            'speed' => (float) $this->speed,
+            'volume' => (float) $this->volume,
             'aspect_ratio' => $this->aspect_ratio,
             'segments' => $this->segments,
             'crop_config' => $this->crop_config,

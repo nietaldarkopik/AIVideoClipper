@@ -55,6 +55,34 @@ function PositionFields({ layer, onChange }: Props) {
   );
 }
 
+function StackingField({ layer, onChange }: Props) {
+  // Layers always render on top of the caption UNLESS their z_index is
+  // negative — see FFmpegService::renderClip()'s split into
+  // $behindCaptionLayers/$aboveCaptionLayers. z_index otherwise only orders
+  // layers against each other (via the move up/down arrows above), so this is
+  // the only way to ask for "behind the caption" instead — needed for a
+  // full-width bar/background that would otherwise cover caption text sitting
+  // in the same area.
+  const behindCaption = layer.z_index < 0;
+
+  function toggle(checked: boolean) {
+    const magnitude = Math.max(1, Math.abs(layer.z_index));
+    onChange({ z_index: checked ? -magnitude : magnitude });
+  }
+
+  return (
+    <label className="flex items-center gap-2 text-xs text-muted">
+      <input
+        type="checkbox"
+        checked={behindCaption}
+        onChange={(e) => toggle(e.target.checked)}
+        className="size-4 rounded accent-accent"
+      />
+      Render behind captions (instead of covering them)
+    </label>
+  );
+}
+
 function TimingFields({ layer, onChange, clipDuration }: Props & { clipDuration?: number }) {
   const start = layer.timing?.start ?? 0;
   const end = layer.timing?.end;
@@ -95,6 +123,7 @@ export function LayerPropsFields({ layer, onChange }: Props) {
   return (
     <>
       <PositionFields layer={layer} onChange={onChange} />
+      <StackingField layer={layer} onChange={onChange} />
       <TimingFields layer={layer} onChange={onChange} />
 
       {layer.type === "text" && (

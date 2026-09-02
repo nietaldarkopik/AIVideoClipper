@@ -276,6 +276,67 @@ class SocialPostController extends Controller
         return response()->json(['message' => "Rescheduled {$count} post(s).", 'rescheduled_count' => $count]);
     }
 
+    /**
+     * Bulk-retarget a caller-chosen set of existing posts (wrong-channel
+     * fix-up — see the "Move to Channel" action on the Scheduler page) onto a
+     * single destination account, then immediately restagger just the moved
+     * ones onto THAT account's own day-cap/schedule via rescheduleBulk() — their
+     * old scheduled_at was picked against the OLD account's queue, so it's
+     * meaningless for the new one. Posts already published or in-flight, or
+     * that don't belong to the caller, are silently skipped (same reasoning as
+     * bulkReschedule() above). A post whose clip already has ANOTHER post
+     * targeting the destination account (e.g. two wrongly-targeted duplicates
+     * both getting moved to the one correct account) is cancelled instead of
+     * creating a second post for the same (clip, account) pair.
+     */
+    public function bulkMoveChannel(Request $request, AutoPublishScheduler $scheduler)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+            'target_social_account_id' => ['required', 'exists:social_accounts,id'],
+        ]);
+
+        $targetAccount = SocialAccount::where('user_id', $request->user()->id)
+            ->where('status', SocialAccount::STATUS_CONNECTED)
+            ->find($data['target_social_account_id']);
+        if (! $targetAccount) {
+            return response()->json(['message' => 'Target channel not found.'], 422);
+        }
+
+        $posts = SocialPost::whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->whereNotIn('status', [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING])
+            ->get();
+
+        $movedIds = [];
+        foreach ($posts as $post) {
+            if ($post->social_account_id === $targetAccount->id) {
+                continue;
+            }
+
+            $duplicate = SocialPost::where('clip_id', $post->clip_id)
+                ->where('social_account_id', $targetAccount->id)
+                ->whereKeyNot($post->id)
+                ->exists();
+            if ($duplicate) {
+                $post->update(['status' => SocialPost::STATUS_CANCELLED]);
+                continue;
+            }
+
+            $post->update(['social_account_id' => $targetAccount->id, 'platform' => $targetAccount->platform]);
+            $movedIds[] = $post->id;
+        }
+
+        if (! empty($movedIds)) {
+            $scheduler->rescheduleBulk(SocialPost::whereIn('id', $movedIds)->get());
+        }
+
+        $count = count($movedIds);
+
+        return response()->json(['message' => "Moved {$count} post(s) to {$targetAccount->account_name}.", 'moved_count' => $count]);
+    }
+
     public function retry(Request $request, SocialPost $socialPost)
     {
         $this->authorizePost($request, $socialPost);

@@ -48,6 +48,7 @@ class ChannelWatchPoller
                     [$video['url']],
                     $watch->settings ?? [],
                     "Auto: {$watch->channel_title}",
+                    $watch->id,
                 );
             } catch (Throwable $e) {
                 // Leave later (newer) videos for the next poll rather than processing
