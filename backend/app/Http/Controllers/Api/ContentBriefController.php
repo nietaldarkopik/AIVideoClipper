@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\ContentBriefResource;
 use App\Jobs\GenerateContentBriefJob;
 use App\Models\ContentBrief;
+use App\Services\ContentResearch\RelevantVideoFinder;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
@@ -80,6 +81,44 @@ class ContentBriefController extends Controller
         GenerateContentBriefJob::dispatch($contentBrief->id, scriptOnly: true);
 
         return ContentBriefResource::make($contentBrief->fresh());
+    }
+
+    /**
+     * Search for more candidate videos (optionally with a different query than the
+     * brief's own topic) and merge them into candidate_videos, deduped by URL —
+     * lets the user broaden/refine "Video Terkait" without regenerating anything
+     * else on the brief. Runs synchronously: RelevantVideoFinder is a couple of
+     * quick HTTP calls (YouTube search + one web search), not an LLM generation.
+     */
+    public function searchVideos(Request $request, ContentBrief $contentBrief, RelevantVideoFinder $videoFinder)
+    {
+        $this->authorizeBrief($request, $contentBrief);
+
+        if (in_array($contentBrief->status, ContentBrief::ACTIVE_STATUSES, true)) {
+            return response()->json(['message' => 'This content brief is still being generated.'], 422);
+        }
+
+        $data = $request->validate([
+            'query' => ['sometimes', 'nullable', 'string', 'max:500'],
+        ]);
+        $query = trim((string) ($data['query'] ?? '')) ?: $contentBrief->topic;
+
+        $found = $videoFinder->find($query, maxResults: 8);
+
+        $existing = $contentBrief->candidate_videos ?? [];
+        $seenUrls = array_column($existing, 'url');
+        $newOnes = array_values(array_filter($found, fn (array $v) => ! in_array($v['url'], $seenUrls, true)));
+
+        // Cap total stored videos so repeatedly clicking "search more" can't grow
+        // this column without bound.
+        $merged = array_slice([...$existing, ...$newOnes], 0, 20);
+
+        $contentBrief->update(['candidate_videos' => $merged]);
+
+        return response()->json([
+            'data' => ContentBriefResource::make($contentBrief->fresh()),
+            'added' => count($newOnes),
+        ]);
     }
 
     public function destroy(Request $request, ContentBrief $contentBrief)

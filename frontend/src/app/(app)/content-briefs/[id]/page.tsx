@@ -4,7 +4,7 @@ import { use, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { mutate } from "swr";
-import { ArrowLeft, Copy, Download, RotateCcw, Scissors, ExternalLink, Trash2 } from "lucide-react";
+import { ArrowLeft, Copy, Download, RotateCcw, Scissors, ExternalLink, Trash2, Search } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -12,6 +12,7 @@ import { formatRelativeTime, formatDuration } from "@/lib/format";
 import { createProjectFromUrl } from "@/lib/createProjectFromUrl";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { Input } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
@@ -26,6 +27,8 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
   const [regenerating, setRegenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [creatingProjectFor, setCreatingProjectFor] = useState<string | null>(null);
+  const [videoQuery, setVideoQuery] = useState("");
+  const [searchingVideos, setSearchingVideos] = useState(false);
 
   const key = `/content-briefs/${briefId}`;
   const { data: res, isLoading } = useApi<{ data: ContentBrief }>(key, {
@@ -71,6 +74,25 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Gagal membuat proyek.", "danger");
       setCreatingProjectFor(null);
+    }
+  }
+
+  async function handleSearchVideos() {
+    setSearchingVideos(true);
+    try {
+      const res = await api.post<{ data: ContentBrief; added: number }>(
+        `/content-briefs/${briefId}/search-videos`,
+        { query: videoQuery.trim() || undefined }
+      );
+      await mutate(key, { data: res.data }, { revalidate: false });
+      toast(
+        res.added > 0 ? `${res.added} video baru ditemukan.` : "Tidak ada video baru (sudah ada semua).",
+        res.added > 0 ? "success" : "default"
+      );
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Gagal mencari video.", "danger");
+    } finally {
+      setSearchingVideos(false);
     }
   }
 
@@ -239,10 +261,31 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
         </Card>
       )}
 
-      {brief.candidate_videos.length > 0 && (
+      {!isActive && (
         <Card className="p-5">
-          <h2 className="text-sm font-semibold">Video Terkait</h2>
-          <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-sm font-semibold">Video Terkait</h2>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <Input
+              value={videoQuery}
+              onChange={(e) => setVideoQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearchVideos()}
+              placeholder={`Cari topik lain (kosongkan untuk pakai "${brief.topic}")`}
+              className="flex-1"
+            />
+            <Button onClick={handleSearchVideos} loading={searchingVideos} size="sm">
+              <Search className="size-3.5" />
+              Cari Video
+            </Button>
+          </div>
+
+          {brief.candidate_videos.length === 0 ? (
+            <p className="mt-4 text-xs text-muted">
+              Belum ada video terkait. Klik &quot;Cari Video&quot; untuk mencari.
+            </p>
+          ) : (
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {brief.candidate_videos.map((video, i) => (
               <Card key={i} className="overflow-hidden">
                 <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden bg-gradient-to-br from-surface-elevated to-surface">
@@ -273,6 +316,7 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
               </Card>
             ))}
           </div>
+          )}
         </Card>
       )}
     </div>

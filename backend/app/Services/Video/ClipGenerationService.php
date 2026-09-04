@@ -48,7 +48,7 @@ class ClipGenerationService
             }
         }
 
-        $candidates = $query->get();
+        $candidates = $query->with('video')->get();
 
         if ($candidates->isEmpty()) {
             return collect();
@@ -68,7 +68,7 @@ class ClipGenerationService
                 'template_id' => $template?->id,
                 'template_version_id' => $template?->current_version_id,
                 'title' => $candidate->suggested_title,
-                'caption' => $candidate->suggested_caption,
+                'caption' => ClipCreditFormatter::append($candidate->suggested_caption, $candidate->video?->channelName()),
                 'hashtags' => $candidate->suggested_hashtags,
                 'start_time' => $candidate->start_time,
                 'end_time' => $candidate->end_time,

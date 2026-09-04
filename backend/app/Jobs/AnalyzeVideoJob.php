@@ -118,10 +118,18 @@ class AnalyzeVideoJob implements ShouldQueue
             // makes any future retry think analysis already finished (candidates
             // exist) and skip straight to rendering off incomplete data instead of
             // re-running the analysis that actually failed.
-            DB::transaction(function () use ($video, $project, $candidates) {
+            DB::transaction(function () use ($video, $project, $candidates, $transcript) {
                 ClipCandidate::where('video_id', $video->id)->delete();
+                $words = $transcript->words ?? [];
                 foreach ($candidates as $candidate) {
-                    ClipCandidate::create($candidate->toModelAttributes($project->id, $video->id));
+                    $attributes = $candidate->toModelAttributes($project->id, $video->id);
+                    [$attributes['start_time'], $attributes['end_time']] = $this->snapToWordBoundaries(
+                        $attributes['start_time'],
+                        $attributes['end_time'],
+                        $words
+                    );
+                    $attributes['duration'] = round($attributes['end_time'] - $attributes['start_time'], 2);
+                    ClipCandidate::create($attributes);
                 }
             });
 
@@ -156,5 +164,35 @@ class AnalyzeVideoJob implements ShouldQueue
 
             throw $e;
         }
+    }
+
+    /**
+     * An AI-picked start/end (free-form seconds, read off a formatted transcript)
+     * regularly lands a fraction of a second inside a word rather than exactly on
+     * its boundary — the model has no frame-accurate sense of timing, only the
+     * text it was shown. Rendering that verbatim cuts the clip mid-word. Pull each
+     * boundary out to the edge of whichever word it falls inside, using the
+     * transcript's real per-word timestamps — a gap between words (natural pause)
+     * is already a safe cut point and is left untouched.
+     *
+     * @param  array<int, array{word?: string, start?: float, end?: float}>  $words
+     * @return array{0: float, 1: float}
+     */
+    private function snapToWordBoundaries(float $start, float $end, array $words): array
+    {
+        foreach ($words as $word) {
+            $wordStart = (float) ($word['start'] ?? 0);
+            $wordEnd = (float) ($word['end'] ?? 0);
+
+            if ($start > $wordStart && $start < $wordEnd) {
+                $start = $wordStart;
+            }
+
+            if ($end > $wordStart && $end < $wordEnd) {
+                $end = $wordEnd;
+            }
+        }
+
+        return [$start, $end];
     }
 }

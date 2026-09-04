@@ -16,6 +16,7 @@ use App\Services\AI\Contracts\WebSearchProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
 use App\Services\AI\Gemini\GeminiReactionScriptProvider;
+use App\Services\AI\Groq\GroqTranscriptionProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
 use App\Services\AI\Mock\MockEmbeddingProvider;
 use App\Services\AI\Mock\MockImageGenerationProvider;
@@ -111,7 +112,12 @@ class AIServiceProvider extends ServiceProvider
                     config('services.nine_router.api_key'),
                     (string) config('services.nine_router.transcribe_model'),
                 ),
-                default => throw new InvalidArgumentException("Unknown AI_TRANSCRIPTION_PROVIDER [{$provider}]. Valid values: mock, openai, whisper_engine, nine_router."),
+                'groq' => new GroqTranscriptionProvider(
+                    $app->make(FFmpegService::class),
+                    (string) config('services.groq.api_key'),
+                    (string) config('services.groq.transcribe_model', 'whisper-large-v3-turbo'),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_TRANSCRIPTION_PROVIDER [{$provider}]. Valid values: mock, openai, whisper_engine, nine_router, groq."),
             };
         });
 

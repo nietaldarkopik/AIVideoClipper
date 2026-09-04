@@ -95,6 +95,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/content-briefs', [ContentBriefController::class, 'store']);
     Route::get('/content-briefs/{contentBrief}', [ContentBriefController::class, 'show']);
     Route::post('/content-briefs/{contentBrief}/regenerate-script', [ContentBriefController::class, 'regenerateScript']);
+    Route::post('/content-briefs/{contentBrief}/search-videos', [ContentBriefController::class, 'searchVideos']);
     Route::delete('/content-briefs/{contentBrief}', [ContentBriefController::class, 'destroy']);
 
     Route::get('/social-accounts/platforms', [SocialAccountController::class, 'platforms']);

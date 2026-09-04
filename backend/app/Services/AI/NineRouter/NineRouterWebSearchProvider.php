@@ -15,6 +15,18 @@ use Throwable;
  * provider name, not a chat model id). Formalizes the same HTTP call already used
  * ad-hoc by App\Services\Trending\Providers\AbstractNineRouterSearchTrendingProvider,
  * as a reusable capability for content-research (not just trending discovery).
+ *
+ * $domainFilter is accepted for interface compatibility but deliberately NOT sent
+ * to 9Router — verified live 2026-09-03 that a single (non-"-combo") provider's
+ * /v1/search route throws a server-side TypeError ("a.filter is not a function")
+ * the instant the request body has ANY field beyond {model, query}, regardless of
+ * that field's name or type (reproduced with domain_filter, include_domains, and
+ * even plain max_results, on both tavily and exa). A combo model like
+ * "search-combo" tolerates extra fields without erroring but silently ignores
+ * domain_filter anyway. Bottom line: server-side domain filtering isn't usable on
+ * this gateway today — a caller that needs it should fold a platform hint into
+ * the query text instead (e.g. "{topic} tiktok") and filter results client-side
+ * by host, the way RelevantVideoFinder does.
  */
 class NineRouterWebSearchProvider implements WebSearchProvider
 {
@@ -46,14 +58,12 @@ class NineRouterWebSearchProvider implements WebSearchProvider
             $request = $request->withToken($this->apiKey);
         }
 
+        // See the class docblock — only {model, query} is safe to send; anything
+        // else (max_results, domain_filter, ...) crashes a single-provider route.
         $payload = [
             'model' => $this->model,
             'query' => $query,
-            'max_results' => $maxResults,
         ];
-        if ($domainFilter) {
-            $payload['domain_filter'] = $domainFilter;
-        }
 
         try {
             $response = $request->post(rtrim($this->baseUrl, '/') . '/search', $payload);
@@ -74,10 +84,10 @@ class NineRouterWebSearchProvider implements WebSearchProvider
         $results = $response->json('results', []);
         $span->success('results: ' . count($results ?? []));
 
-        $mapped = array_values(array_filter(array_map(
+        $mapped = array_slice(array_values(array_filter(array_map(
             fn (array $r) => $this->toResult($r),
             is_array($results) ? $results : []
-        )));
+        ))), 0, $maxResults);
 
         // Some queries (observed: sensitive/complex multi-topic ones) come back
         // with an empty results array even though the underlying grounding search

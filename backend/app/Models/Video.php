@@ -51,4 +51,13 @@ class Video extends Model
 
         return "{$this->width}x{$this->height}";
     }
+
+    /**
+     * The source channel/uploader name captured by UrlVideoDownloader at import
+     * time (null for a direct file upload, or when the source didn't expose one).
+     */
+    public function channelName(): ?string
+    {
+        return $this->metadata['channel_name'] ?? null;
+    }
 }

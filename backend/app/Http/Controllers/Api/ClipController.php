@@ -12,6 +12,7 @@ use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\WebContentFetcher;
+use App\Services\Video\ClipCreditFormatter;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\LayerOverrideMerger;
 use Illuminate\Http\Request;
@@ -290,9 +291,22 @@ class ClipController extends Controller
 
         Context::add(['project_id' => $clip->project_id, 'video_id' => $clip->video_id, 'clip_id' => $clip->id]);
 
-        return response()->json([
-            'metadata' => $provider->generateMetadata($clip->load('clipCandidate'), $platforms, $referenceContent),
-        ]);
+        $metadata = $provider->generateMetadata($clip->load('clipCandidate'), $platforms, $referenceContent);
+
+        // Credit the source channel deterministically rather than relying on the
+        // AI prompt to remember to — see ClipCreditFormatter.
+        $channelName = $clip->video?->channelName();
+        foreach ($metadata as $platform => &$fields) {
+            if (isset($fields['caption'])) {
+                $fields['caption'] = ClipCreditFormatter::append($fields['caption'], $channelName);
+            }
+            if (isset($fields['description'])) {
+                $fields['description'] = ClipCreditFormatter::append($fields['description'], $channelName);
+            }
+        }
+        unset($fields);
+
+        return response()->json(['metadata' => $metadata]);
     }
 
     /**

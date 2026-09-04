@@ -57,6 +57,11 @@ class ImportVideoJob implements ShouldQueue
                     $metadata['captions_srt_path'] = 'videos/' . $video->id . '/' . basename($downloaded['captions']['path']);
                     $metadata['captions_language'] = $downloaded['captions']['language'];
                 }
+                if (! empty($downloaded['channel_name'])) {
+                    // Credited on generated clip captions/descriptions — see
+                    // ClipCreditFormatter.
+                    $metadata['channel_name'] = $downloaded['channel_name'];
+                }
 
                 $video->update([
                     'disk_path' => $relativePath,

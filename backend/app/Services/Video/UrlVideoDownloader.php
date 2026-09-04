@@ -46,7 +46,7 @@ class UrlVideoDownloader
     }
 
     /**
-     * @return array{path: string, title: ?string, captions: ?array{path: string, language: string}}
+     * @return array{path: string, title: ?string, channel_name: ?string, captions: ?array{path: string, language: string}}
      */
     public function download(string $url, string $destinationDir): array
     {
@@ -57,12 +57,17 @@ class UrlVideoDownloader
         $destinationDir = rtrim($destinationDir, '/\\');
         $outputTemplate = $destinationDir . DIRECTORY_SEPARATOR . 'source.%(ext)s';
 
-        // Only ask yt-dlp to print the title. The output filename is already
-        // deterministic via -o, and yt-dlp's --print statements aren't guaranteed
-        // to appear in the order they were passed on the command line (the
-        // untagged "title" print fires at metadata-extraction time, *before* the
-        // "after_move:filepath" one does) — so we find the produced files on disk
-        // instead of trying to parse a positional filepath out of stdout.
+        // Ask yt-dlp to print the title and channel/uploader name, tab-separated on
+        // one line so they can't get split across separate --print events (yt-dlp's
+        // --print statements aren't guaranteed to appear in the order they were
+        // passed on the command line — the untagged "title" print used to fire at
+        // metadata-extraction time, *before* the "after_move:filepath" one does).
+        // The output filename is already deterministic via -o, so we still find the
+        // produced files on disk rather than trying to parse a positional filepath
+        // out of stdout. "%(channel,uploader|)s" falls back to the uploader/handle
+        // when a platform has no separate "channel" concept (e.g. TikTok), and to
+        // an empty string when neither is available (e.g. a generic direct link)
+        // — used to credit the source in clip captions, see ClipCreditFormatter.
         //
         // Subtitles are fetched in a *separate* yt-dlp invocation (see
         // downloadCaptions()), not bundled into this command. yt-dlp aborts the
@@ -76,7 +81,7 @@ class UrlVideoDownloader
             '--ffmpeg-location', $this->ffmpegBin,
             '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
             '--merge-output-format', 'mp4',
-            '--print', 'after_move:%(title)s',
+            '--print', "after_move:%(title)s\t%(channel,uploader|)s",
             '-o', $outputTemplate,
             // Mimics a real Chrome TLS/HTTP fingerprint (via curl_cffi) instead of
             // yt-dlp's default client signature — several sites' anti-bot systems
@@ -161,7 +166,7 @@ class UrlVideoDownloader
             }
         }
 
-        $title = trim($result->output()) ?: null;
+        [$title, $channelName] = $this->parseTitleAndChannel($result->output());
 
         if (empty($videoCandidates)) {
             throw new RuntimeException('yt-dlp reported success but no output video file was found on disk.');
@@ -172,7 +177,26 @@ class UrlVideoDownloader
         return [
             'path' => reset($videoCandidates),
             'title' => $title,
+            'channel_name' => $channelName,
             'captions' => $this->findCaptions($destinationDir),
+        ];
+    }
+
+    /**
+     * @return array{0: ?string, 1: ?string} [title, channel_name]
+     */
+    private function parseTitleAndChannel(string $output): array
+    {
+        // The last non-empty line is the one from our own --print (a "player
+        // client" retry can emit multiple such lines across attempts; only the
+        // final successful one matters).
+        $lines = array_values(array_filter(explode("\n", str_replace("\r", '', trim($output)))));
+        $lastLine = end($lines) ?: '';
+        [$title, $channelName] = array_pad(explode("\t", $lastLine, 2), 2, null);
+
+        return [
+            trim((string) $title) ?: null,
+            trim((string) $channelName) ?: null,
         ];
     }
 

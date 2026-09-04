@@ -14,26 +14,37 @@ use Illuminate\Support\Facades\Log;
  * - YouTube: the official YouTube Data API v3 search.list endpoint (same
  *   services.trending.youtube_api_key already used for real trending data) —
  *   accurate, real video pages, no dependence on any 9Router search provider.
- * - TikTok/Instagram: web search (domain-filtered), same "best-effort, not
- *   guaranteed" spirit as AbstractNineRouterSearchTrendingProvider. No free
- *   official search API exists for these, so quality depends entirely on
- *   whichever provider services.nine_router.web_search_model points at actually
- *   honoring domain_filter and returning real page URLs — many don't (e.g. a
- *   Gemini web-grounding combo returns opaque redirect URLs instead), so results
- *   here can legitimately be empty until a domain-respecting provider (tavily,
- *   brave-search, serper, a correctly-configured exa, ...) is registered.
+ * - TikTok/Instagram: web search, one call per platform with the platform name
+ *   folded into the query text (e.g. "{topic} video tiktok") rather than passed
+ *   as a domain_filter parameter — verified live 2026-09-03 that 9Router's
+ *   /v1/search throws server-side on a single (non-combo) provider the instant
+ *   ANY extra field beyond {model, query} is sent (see
+ *   NineRouterWebSearchProvider's docblock), so domain_filter is unusable there
+ *   regardless of which provider is registered. Mentioning the platform in the
+ *   query text nudges a real search engine (confirmed working: Tavily) toward
+ *   surfacing actual tiktok.com/instagram.com pages, which toCandidateVideo()
+ *   below then confirms/filters by host — best-effort, not guaranteed, same
+ *   spirit as AbstractNineRouterSearchTrendingProvider.
  */
 class RelevantVideoFinder
 {
     private const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
 
-    private const DOMAIN_FILTER = 'tiktok.com,instagram.com';
+    private const OTHER_PLATFORMS = ['tiktok', 'instagram'];
 
     /**
-     * Path segments that indicate a channel/profile/hashtag/search landing page
-     * rather than a single video/post — filtered out on a best-effort basis.
+     * Only a path matching one of these regexes is kept as an actual video/post
+     * page — an allowlist rather than a blocklist of "bad" markers. Started as a
+     * blocklist (reject any path containing e.g. "/@") but that's wrong: TikTok's
+     * own real video URL shape, /@username/video/1234567890, contains "/@" too —
+     * a blocklist on that substring silently threw out every genuine TikTok video
+     * result. Confirmed shapes: TikTok "/@user/video/<numeric id>"; Instagram
+     * "/reel|reels|p|tv/<shortcode>".
      */
-    private const NON_VIDEO_PATH_MARKERS = ['/channel/', '/@', '/hashtag/', '/tag/', '/search', '/c/', '/user/'];
+    private const VIDEO_PATH_PATTERNS = [
+        'tiktok' => '#^/@[\w.\-]+/video/\d+#',
+        'instagram' => '#^/(reel|reels|p|tv)/[\w\-]+#',
+    ];
 
     public function __construct(private readonly WebSearchProvider $webSearch)
     {
@@ -44,19 +55,46 @@ class RelevantVideoFinder
      */
     public function find(string $topic, int $maxResults = 8): array
     {
-        $youtube = $this->findYouTube($topic, $maxResults);
+        // YouTube search reliably returns a full page of matches for almost any
+        // topic, so simply concatenating [youtube..., others...] before slicing to
+        // $maxResults would crowd TikTok/Instagram out entirely every time.
+        // Interleaving instead guarantees the other platforms get a fair share of
+        // whatever slots $maxResults allows.
+        $buckets = [$this->findYouTube($topic, $maxResults)];
 
-        $webResults = $this->webSearch->search(
-            query: "{$topic} video",
-            maxResults: $maxResults,
-            domainFilter: self::DOMAIN_FILTER,
-        );
-        $others = array_values(array_filter(array_map(
-            fn (WebSearchResult $r) => $this->toCandidateVideo($r),
-            $webResults
-        )));
+        foreach (self::OTHER_PLATFORMS as $platform) {
+            $webResults = $this->webSearch->search(query: "{$topic} video {$platform}", maxResults: $maxResults);
+            $bucket = [];
+            foreach ($webResults as $result) {
+                $candidate = $this->toCandidateVideo($result);
+                if ($candidate !== null) {
+                    $bucket[] = $candidate;
+                }
+            }
+            $buckets[] = $bucket;
+        }
 
-        return array_slice([...$youtube, ...$others], 0, $maxResults);
+        return array_slice($this->interleave($buckets), 0, $maxResults);
+    }
+
+    /**
+     * @param  array<int, array<int, array{title: string, url: string, platform: string, thumbnail_url: ?string}>>  $buckets
+     * @return array<int, array{title: string, url: string, platform: string, thumbnail_url: ?string}>
+     */
+    private function interleave(array $buckets): array
+    {
+        $merged = [];
+        $longest = $buckets === [] ? 0 : max(array_map('count', $buckets));
+
+        for ($i = 0; $i < $longest; $i++) {
+            foreach ($buckets as $bucket) {
+                if (isset($bucket[$i])) {
+                    $merged[] = $bucket[$i];
+                }
+            }
+        }
+
+        return $merged;
     }
 
     /**
@@ -124,11 +162,10 @@ class RelevantVideoFinder
             return null;
         }
 
+        $pattern = self::VIDEO_PATH_PATTERNS[$platform] ?? null;
         $path = parse_url($result->url, PHP_URL_PATH) ?: '';
-        foreach (self::NON_VIDEO_PATH_MARKERS as $marker) {
-            if (str_contains($path, $marker)) {
-                return null;
-            }
+        if ($pattern !== null && ! preg_match($pattern, $path)) {
+            return null;
         }
 
         return [

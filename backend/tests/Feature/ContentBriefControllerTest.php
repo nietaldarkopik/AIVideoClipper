@@ -106,6 +106,45 @@ class ContentBriefControllerTest extends TestCase
         Queue::assertPushed(GenerateContentBriefJob::class, fn ($job) => $job->contentBriefId === $brief->id && $job->scriptOnly);
     }
 
+    public function test_search_videos_rejects_when_still_active(): void
+    {
+        $user = User::factory()->create();
+        $brief = $user->contentBriefs()->create(['topic' => 'Topic', 'status' => ContentBrief::STATUS_SEARCHING]);
+
+        $this->actingAs($user)
+            ->postJson("/api/content-briefs/{$brief->id}/search-videos")
+            ->assertUnprocessable();
+    }
+
+    public function test_search_videos_appends_new_results_without_duplicates(): void
+    {
+        $user = User::factory()->create();
+        $brief = $user->contentBriefs()->create([
+            'topic' => 'Topic',
+            'status' => ContentBrief::STATUS_COMPLETED,
+            'candidate_videos' => [],
+        ]);
+
+        $first = $this->actingAs($user)
+            ->postJson("/api/content-briefs/{$brief->id}/search-videos")
+            ->assertOk()
+            ->json();
+
+        $this->assertGreaterThan(0, $first['added']);
+        $countAfterFirst = count($first['data']['candidate_videos']);
+        $this->assertSame($countAfterFirst, $first['added']);
+
+        // Searching again with the exact same query/results should not duplicate
+        // anything already stored.
+        $second = $this->actingAs($user)
+            ->postJson("/api/content-briefs/{$brief->id}/search-videos")
+            ->assertOk()
+            ->json();
+
+        $this->assertSame(0, $second['added']);
+        $this->assertSame($countAfterFirst, count($second['data']['candidate_videos']));
+    }
+
     public function test_destroy_flags_cancellation_instead_of_deleting_an_active_brief(): void
     {
         $user = User::factory()->create();

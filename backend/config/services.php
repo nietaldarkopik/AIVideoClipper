@@ -169,6 +169,17 @@ return [
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
     ],
 
+    'groq' => [
+        // From console.groq.com/keys — free tier, OpenAI-compatible /audio/
+        // transcriptions endpoint. Used for AI_TRANSCRIPTION_PROVIDER=groq, a
+        // fallback when OpenAI's account runs out of credit and self-hosted
+        // whisper_engine isn't an option (CPU load triggering reboots).
+        'api_key' => env('GROQ_API_KEY'),
+        // "whisper-large-v3-turbo" is faster/cheaper; "whisper-large-v3" is the
+        // more accurate (slower) full model — swap if turbo's accuracy isn't enough.
+        'transcribe_model' => env('GROQ_TRANSCRIBE_MODEL', 'whisper-large-v3-turbo'),
+    ],
+
     'nine_router' => [
         // Self-hosted OpenAI-compatible LLM gateway (https://9router.com) — routes
         // each request across many upstream providers, picking the cheapest one
