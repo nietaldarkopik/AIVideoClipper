@@ -12,6 +12,7 @@ const tabs = [
   { href: "/admin/users", label: "Users" },
   { href: "/admin/processing", label: "Processing" },
   { href: "/admin/ai-logs", label: "AI Logs" },
+  { href: "/admin/backups", label: "Backups" },
   { href: "/admin/settings", label: "AI Configuration" },
 ];
 

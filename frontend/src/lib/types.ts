@@ -52,6 +52,10 @@ export interface Project {
   status: ProjectStatus;
   failure_reason: string | null;
   video: Video | null;
+  // Every video in the project, not just the latest — only populated when
+  // fetched via GET /projects/{id} (the list view still only loads the
+  // latest). Used by the clip editor's "additional video clips" picker.
+  videos?: Video[];
   clip_candidates_count?: number;
   clips_count?: number;
   clip_candidates?: ClipCandidate[];
@@ -97,9 +101,37 @@ export type ReactionLayout = "pip_bottom_right" | "pip_bottom_left" | "split_top
 // One cut range in a multi-segment ("jump cut") selection — absolute source-video
 // seconds. clips.segments is a list of these; null/one-entry means "plain trim",
 // matching start_time/end_time exactly (see RenderClipJob::resolveSegments()).
+export type TransitionType = "fade" | "dissolve";
+
+// A crossfade FROM whichever segment ends up immediately before this one (once
+// segments are sorted by start — see RenderClipJob::resolveSegments()) INTO this
+// one. Meaningless on a clip's first segment (nothing precedes it) — the backend
+// silently ignores it there rather than rejecting it, since validation has no
+// way to know in advance which segment will end up first. null/absent is a hard
+// cut, the only behavior before this feature. See
+// FFmpegService::extractWithoutSilence()'s $transitions param.
+export interface TransitionIn {
+  type: TransitionType;
+  duration: number;
+}
+
 export interface Segment {
   start: number;
   end: number;
+  transition_in?: TransitionIn | null;
+}
+
+// A whole extra video appended AFTER the main clip's own segments, cut from a
+// DIFFERENT Video in the same project — see
+// RenderClipJob::renderAdditionalVideoClips(). start/end are SOURCE-time on
+// THAT video (not the main clip's video). transition_in is the crossfade FROM
+// whatever precedes this entry (the main clip's own output, or the previous
+// additional clip) INTO it — same shape and convention as Segment's own.
+export interface AdditionalVideoClip {
+  video_id: number;
+  start: number;
+  end: number;
+  transition_in?: TransitionIn | null;
 }
 
 // A manual crop keyframe — SOURCE VIDEO PIXEL coordinates (not fractions, unlike
@@ -118,6 +150,22 @@ export interface CropConfig {
   keyframes: CropKeyframe[];
 }
 
+// Read-only — from Subtitle.segments (populated after a render). Clip-relative
+// seconds. `words` is empty for cues sourced from a custom uploaded .srt/.ass
+// (no word-level timing available there), populated for auto-generated captions.
+export interface SubtitleCueWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+export interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
+  words: SubtitleCueWord[];
+}
+
 export interface Clip {
   id: number;
   project_id: number;
@@ -125,6 +173,16 @@ export interface Clip {
   clip_candidate_id: number | null;
   template: Template | null;
   template_version_id: number | null;
+  cover_template_id: number | null;
+  cover_template: CoverTemplate | null;
+  cover_text: string | null;
+  cover_kicker: string | null;
+  cover_subline: string | null;
+  cover_url: string | null;
+  // Short thumbnail-text variants written by the clip analysis (only present
+  // when the clip's candidate is loaded — see ClipResource).
+  cover_title_options?: string[];
+  cover_subtitle_options?: string[];
   title: string | null;
   caption: string | null;
   hashtags: string[];
@@ -140,8 +198,14 @@ export interface Clip {
   subtitles_enabled: boolean;
   subtitle_config: Record<string, unknown> | null;
   custom_subtitle_format: "srt" | "ass" | null;
+  // Hand-edited caption cues (clip-relative seconds). Null = captions are still
+  // regenerated from the transcript on every render, the pre-editing behavior.
+  // The editor reads its working copy from /preview-config's subtitle_cues,
+  // which already prefers these over the last render's transcript-derived ones.
+  caption_cues: SubtitleCue[] | null;
   layer_overrides: LayerOverrides | null;
   segments: Segment[] | null;
+  additional_video_clips: AdditionalVideoClip[] | null;
   reaction_layout: ReactionLayout | null;
   reaction_script: string | null;
   reaction_tone: "positive" | "satire" | null;
@@ -183,7 +247,22 @@ export interface TemplateVersion {
 // A single entry in template_versions.config.layers (config version >= 2) — see
 // LayerCompositionService on the backend for how each type turns into an FFmpeg
 // filter. x/y/width/height are 0..1 fractions of the target resolution.
-export type LayerType = "text" | "image" | "logo" | "pip_video" | "audio" | "progress_bar" | "rect";
+export type LayerType =
+  | "text"
+  | "image"
+  | "logo"
+  | "pip_video"
+  | "audio"
+  | "progress_bar"
+  | "rect"
+  // Timed pixel transforms of the footage — one FFmpeg implementation
+  // (LayerCompositionService::buildColorLayer()), two editor affordances:
+  // "effect" is a single timed adjustment, "filter" a named colour-grade preset
+  // that normally spans the whole clip. Both render BEFORE the caption burn-in
+  // regardless of z_index, so neither grades the captions or overlays — see
+  // FFmpegService::partitionLayersAroundCaption().
+  | "effect"
+  | "filter";
 
 export interface LayerTiming {
   start: number;
@@ -212,6 +291,40 @@ export interface AudioLayerProps {
   volume?: number;
   fade_in?: number;
   fade_out?: number;
+  // Waveform PNG generated beside the uploaded audio (see
+  // MediaUploadController::makeWaveform) and drawn behind the layer's block on
+  // the timeline. Purely cosmetic and always optional — audio picked by typing a
+  // path, or whose waveform pass failed, simply has none.
+  waveform_path?: string | null;
+}
+
+/**
+ * One entry in the built-in sticker set (GET /api/stickers). Picking one adds an
+ * ordinary image layer pointing at `path` — there is no separate sticker layer
+ * type, on either side of the wire. See StickerLibrary.
+ */
+export interface Sticker {
+  path: string;
+  url: string;
+  name: string;
+  shape: string;
+  color: string;
+}
+
+/**
+ * An asset in the user's media library — what image/logo layers' `image_path`
+ * and audio layers' `audio_path` point at. See MediaUploadController; `path` is
+ * disk-relative (the value stored on the layer), `url` is servable directly.
+ */
+export interface MediaUpload {
+  path: string;
+  url: string;
+  kind: "image" | "audio";
+  name: string;
+  size_bytes: number;
+  uploaded_at: string;
+  waveform_path: string | null;
+  waveform_url: string | null;
 }
 
 export interface ProgressBarLayerProps {
@@ -225,6 +338,24 @@ export interface RectLayerProps {
   color?: string;
 }
 
+// The five timed effects and six grade presets FFmpeg actually implements —
+// keep these in sync with LayerCompositionService::buildColorLayer()'s match()
+// and with EFFECTS/FILTERS in @/lib/videoFx (which mirrors each one as a CSS
+// approximation for the preview).
+export type EffectName = "blur" | "grayscale" | "brightness" | "contrast" | "vignette";
+export type FilterPreset = "normal" | "warm" | "cool" | "bw" | "vintage" | "high_contrast";
+
+export interface EffectLayerProps {
+  effect?: EffectName;
+  // 0..1 — 1.0 is the effect at full strength, 0 renders nothing at all.
+  intensity?: number;
+}
+
+export interface FilterLayerProps {
+  preset?: FilterPreset;
+  intensity?: number;
+}
+
 export interface TemplateLayer {
   id: string;
   type: LayerType;
@@ -234,9 +365,38 @@ export interface TemplateLayer {
   width?: number | null;
   height?: number | null;
   opacity?: number;
+  // Degrees clockwise, about the layer's own centre. Only image/logo layers act
+  // on it today (LayerCompositionService::buildImageLayer) — mainly for
+  // stickers, which look placed rather than pasted when they're slightly
+  // turned. Absent/0 on every layer that predates it.
+  rotation?: number;
   timing?: LayerTiming;
-  props?: TextLayerProps | ImageLayerProps | AudioLayerProps | ProgressBarLayerProps | RectLayerProps | Record<string, unknown>;
+  props?:
+    | TextLayerProps
+    | ImageLayerProps
+    | AudioLayerProps
+    | ProgressBarLayerProps
+    | RectLayerProps
+    | EffectLayerProps
+    | FilterLayerProps
+    | Record<string, unknown>;
 }
+
+/**
+ * What the editor currently has selected, across every kind of thing the
+ * timeline can hold. One selection state (rather than one per track type) is
+ * what lets the inspector, the timeline and the video preview always agree on
+ * what's being edited — selecting a caption block has to be able to *deselect*
+ * a text layer, which two independent states can't express.
+ */
+export type EditorSelection =
+  | { kind: "layer"; id: string }
+  | { kind: "caption"; index: number }
+  | { kind: "segment"; index: number }
+  // The crossfade INTO segments[index] from segments[index - 1] — index is
+  // always >= 1 (a first segment has nothing before it to transition from).
+  | { kind: "transition"; index: number }
+  | null;
 
 // Full-width-band shorthand the Template editor UI exposes for
 // FFmpegService::renderClip()'s $videoRegion param — x/width are implicitly 0/1;
@@ -313,6 +473,8 @@ export interface Template {
   slug: string;
   description: string | null;
   thumbnail_url: string | null;
+  preview_url: string | null;
+  preview_status: "generating" | "ready" | "failed" | null;
   category: TemplateCategory | null;
   aspect_ratio: "9:16" | "1:1" | "16:9";
   resolution: { width: number; height: number };
@@ -320,6 +482,92 @@ export interface Template {
   is_system: boolean;
   current_version: TemplateVersion | null;
   versions?: TemplateVersion[];
+  created_at: string;
+  updated_at: string;
+}
+
+// Mirrors DefaultCoverTemplateConfig on the backend — see
+// FFmpegService::renderCoverImage() for how each field is drawn, and
+// CoverLivePreview for the CSS twin of that layout.
+export interface CoverTemplateTextConfig {
+  font_size?: number | null;
+  font_scale?: number;
+  color?: string;
+  highlight_color?: string;
+  highlight_mode?: "none" | "first_line" | "last_line" | "alternate";
+  stroke_color?: string;
+  stroke_width?: number;
+  shadow_color?: string;
+  shadow_x?: number;
+  shadow_y?: number;
+  block_style?: "band" | "lines" | "none";
+  background?: string;
+  background_opacity?: number;
+  position?: "top" | "center" | "bottom";
+  align?: "center" | "left";
+  uppercase?: boolean;
+  wrap_chars?: number;
+}
+
+export interface CoverTemplateKickerConfig {
+  enabled?: boolean;
+  text?: string;
+  color?: string;
+  background?: string;
+  background_opacity?: number;
+  font_scale?: number;
+}
+
+export interface CoverTemplateSublineConfig {
+  enabled?: boolean;
+  text?: string;
+  color?: string;
+  background?: string;
+  background_opacity?: number;
+  font_scale?: number;
+}
+
+export interface CoverTemplateBadgeConfig {
+  enabled?: boolean;
+  text?: string;
+  color?: string;
+  text_color?: string;
+}
+
+export interface CoverTemplateGradientConfig {
+  enabled?: boolean;
+  color?: string;
+  opacity?: number;
+  position?: "top" | "bottom";
+  size?: number;
+}
+
+export interface CoverTemplateBackgroundConfig {
+  source?: "clip_frame" | "ai_generated";
+  ai_prompt?: string | null;
+  overlay_color?: string;
+  overlay_opacity?: number;
+  gradient?: CoverTemplateGradientConfig;
+}
+
+export interface CoverTemplateConfig {
+  background?: CoverTemplateBackgroundConfig;
+  kicker?: CoverTemplateKickerConfig;
+  text?: CoverTemplateTextConfig;
+  subline?: CoverTemplateSublineConfig;
+  badge?: CoverTemplateBadgeConfig;
+}
+
+export interface CoverTemplate {
+  id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  thumbnail_url: string | null;
+  aspect_ratio: "9:16" | "1:1" | "16:9";
+  config: CoverTemplateConfig;
+  status: "draft" | "published" | "archived";
+  is_system: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -342,6 +590,8 @@ export interface SocialAccount {
   token_status: "valid" | "expired";
   permissions: string[];
   auto_publish_enabled: boolean;
+  default_cover_template_id: number | null;
+  default_cover_template: CoverTemplate | null;
   last_synced_at: string | null;
   created_at: string;
 }
@@ -386,6 +636,9 @@ export interface SocialPost {
   post_url: string | null;
   error_message: string | null;
   retry_count: number;
+  thumbnail_status: "pending" | "uploaded" | "failed" | null;
+  thumbnail_uploaded_at: string | null;
+  thumbnail_error: string | null;
   metrics: Record<string, number> | null;
   metrics_synced_at: string | null;
   created_at: string;
@@ -401,6 +654,8 @@ export interface ProcessingJob {
   progress: number;
   message: string | null;
   error: string | null;
+  request_payload: string | null;
+  response_payload: string | null;
   started_at: string | null;
   finished_at: string | null;
 }
@@ -596,4 +851,287 @@ export interface Paginated<T> {
     last_page: number;
     total: number;
   };
+}
+
+// --- Content Research Engine ---
+// "Content channels" are brand/persona channels the research engine generates
+// ideas for. Distinct from ChannelWatch (a watched YouTube upload feed).
+
+export interface Platform {
+  id: number;
+  key: string;
+  name: string;
+  type: string;
+  default_strategy: Record<string, unknown>;
+  enabled: boolean;
+  sort_order: number;
+}
+
+export interface ChannelTemplate {
+  id: number;
+  key: string;
+  name: string;
+  description: string | null;
+  platform_key: string | null;
+  defaults: ChannelTemplateDefaults;
+  sort_order: number;
+}
+
+export interface ChannelTemplateDefaults {
+  niche?: string;
+  sub_niches?: string[];
+  keywords?: string[];
+  content_style?: string[];
+  content_types?: string[];
+  content_formats?: string[];
+  tone?: string;
+  research_frequency?: ResearchFrequency;
+  research_times?: string[];
+  interval_hours?: number;
+  ideas_per_run?: number;
+  research_source_keys?: string[];
+}
+
+export type ResearchFrequency = "daily" | "twice_daily" | "every_n_hours" | "custom";
+
+/** One field a provider accepts in its per-channel configuration. */
+export interface ResearchSourceConfigField {
+  key: string;
+  label: string;
+  type: "list" | "number" | "text" | "boolean" | "select";
+  help?: string;
+  default?: unknown;
+  options?: string[];
+}
+
+export interface ResearchSource {
+  id: number;
+  key: string;
+  provider: string;
+  name: string;
+  type: string;
+  description: string | null;
+  enabled: boolean;
+  configuration: Record<string, unknown>;
+  /** False when the provider class is missing from the app's registry. */
+  registered: boolean;
+  requires_credentials: boolean;
+  is_configured: boolean;
+  config_schema: ResearchSourceConfigField[];
+  health: {
+    last_success_at: string | null;
+    last_failure_at: string | null;
+    last_error: string | null;
+    consecutive_failures: number;
+    /** Skipped by the engine until a manual test passes. */
+    circuit_open: boolean;
+  };
+  /** Only present when the source is loaded through a channel. */
+  pivot?: {
+    enabled: boolean;
+    weight: number;
+    priority: number;
+    configuration: Record<string, unknown>;
+  };
+}
+
+export interface ScoringWeights {
+  trend: number;
+  relevance: number;
+  originality: number;
+  freshness: number;
+  engagement: number;
+  cross_source: number;
+}
+
+export interface ContentChannel {
+  id: number;
+  name: string;
+  handle: string | null;
+  description: string | null;
+  language: string;
+  timezone: string;
+  is_active: boolean;
+
+  platform_id: number;
+  platform?: Platform;
+
+  niche: string | null;
+  sub_niches: string[];
+  keywords: string[];
+  excluded_keywords: string[];
+  target_audience: string | null;
+
+  content_style: string[];
+  content_types: string[];
+  content_formats: string[];
+  tone: string | null;
+  hook_styles: string[];
+
+  scheduler_enabled: boolean;
+  research_frequency: ResearchFrequency;
+  /** As stored. Empty for every_n_hours — use schedule_times to display. */
+  research_times: string[];
+  /** The expanded schedule the engine actually uses, in the channel's timezone. */
+  schedule_times: string[];
+  interval_hours: number | null;
+  ideas_per_run: number;
+  min_relevance_score: number;
+  min_trend_score: number;
+  scoring_weights: ScoringWeights;
+
+  last_research_at: string | null;
+  next_research_at: string | null;
+
+  research_sources?: ResearchSource[];
+  ideas_count?: number;
+  runs_count?: number;
+
+  created_at: string;
+  updated_at: string;
+}
+
+export type ResearchRunStatus = "running" | "success" | "partial" | "failed";
+
+export interface ResearchProviderOutcome {
+  source_key: string;
+  items?: number;
+  error?: string;
+  /** True when the source was skipped (no credentials, open circuit) rather than failing. */
+  skipped?: boolean;
+}
+
+export interface ResearchRun {
+  id: number;
+  content_channel_id: number;
+  channel?: ContentChannel;
+  trigger: "scheduled" | "manual";
+  status: ResearchRunStatus;
+  progress: number;
+  message: string | null;
+  topics_found: number;
+  results_collected: number;
+  ideas_generated: number;
+  duplicates_skipped: number;
+  providers_used: ResearchProviderOutcome[];
+  providers_failed: ResearchProviderOutcome[];
+  error_message: string | null;
+  duration_ms: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  results?: ResearchResult[];
+  ideas?: ContentIdea[];
+}
+
+export interface ResearchResult {
+  id: number;
+  source_key: string;
+  title: string;
+  url: string;
+  summary: string | null;
+  author: string | null;
+  published_at: string | null;
+  discovered_at: string | null;
+  engagement: Record<string, number>;
+  source_score: number;
+  topic_key: string | null;
+}
+
+export interface ContentIdeaSource {
+  id: number;
+  source_key: string;
+  source_title: string;
+  source_url: string;
+  extracted_summary: string | null;
+  engagement_metrics: Record<string, number>;
+  source_score: number;
+  published_at: string | null;
+  discovered_at: string | null;
+}
+
+export type ContentIdeaStatus =
+  | "idea"
+  | "selected"
+  | "scripting"
+  | "draft"
+  | "approved"
+  | "published"
+  | "rejected";
+
+export interface ContentIdea {
+  id: number;
+  content_channel_id: number;
+  channel?: ContentChannel;
+  research_run_id: number | null;
+  research_date: string | null;
+
+  topic: string;
+  title: string;
+  alternative_titles: string[];
+  short_description: string | null;
+  content_angle: string | null;
+  why_this_topic: string | null;
+  target_audience: string | null;
+  keywords: string[];
+  source_summary: string | null;
+
+  scores: {
+    trend: number;
+    relevance: number;
+    originality: number;
+    freshness: number;
+    engagement: number;
+    cross_source: number;
+    priority: number;
+  };
+  priority_score: number;
+  trend_score: number;
+
+  suggested_content_type: string | null;
+  suggested_format: string | null;
+  status: ContentIdeaStatus;
+  notes: string | null;
+  selected_at: string | null;
+  sources?: ContentIdeaSource[];
+  sources_count?: number;
+  created_at: string;
+}
+
+export interface ResearchDashboard {
+  summary: {
+    channels_total: number;
+    channels_scheduled: number;
+    ideas_today: number;
+    ideas_total: number;
+    ideas_waiting_review: number;
+    ideas_high_priority: number;
+    ideas_selected: number;
+  };
+  ideas_by_channel: {
+    id: number;
+    name: string;
+    niche: string | null;
+    scheduler_enabled: boolean;
+    ideas_count: number;
+    ideas_today_count: number;
+    last_research_at: string | null;
+    next_research_at: string | null;
+  }[];
+  top_ideas: ContentIdea[];
+  recent_runs: ResearchRun[];
+  scheduler: {
+    last_success_at: string | null;
+    next_research_at: string | null;
+    runs_failed_24h: number;
+    running: number;
+  };
+  provider_health: ResearchSource[];
+  trending_topics: {
+    topic_key: string;
+    title: string;
+    mentions: number;
+    sources: number;
+    research_date: string;
+  }[];
 }

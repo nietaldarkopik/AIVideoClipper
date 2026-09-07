@@ -321,26 +321,36 @@ class AutoPublishScheduler
             $cursor = now();
 
             // Only spread gaps out to fill the day when this account actually HAS
-            // enough posts in this batch to make that meaningful — capping the
-            // spread divisor at the account's own post count (not the bare
-            // $maxPostsPerDayPerAccount ceiling) means rescheduling a small handful
-            // of posts for a channel still gets the tight, caller-specified gap
-            // (the ceiling is a safety cap for busy days, not a target every batch
-            // is assumed to fill) while a large backlog — the case that actually
-            // produced empty afternoons — spreads properly.
+            // enough posts in this batch to make that meaningful
             $spreadDivisor = min($maxPostsPerDayPerAccount, $ordered->count());
 
             foreach ($ordered as $post) {
                 $slot = $this->nextAvailableSlot($account, $cursor, $maxPostsPerDayPerAccount, $windowStartHour, $windowEndHour);
 
                 $post->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $slot]);
-                // Stale original delayed job (if any) is a guarded no-op — see
-                // PublishClipJob::handle()'s scheduled_at->isFuture() check.
                 PublishClipJob::dispatch($post->id)->delay($slot);
                 $rescheduledCount++;
 
                 $gap = $this->spreadGapSeconds($staggerMinSeconds, $staggerMaxSeconds, $spreadDivisor, $windowStartHour, $windowEndHour);
-                $cursor = $slot->clone()->addSeconds($gap);
+                $nextTime = $slot->clone()->addSeconds($gap);
+
+                Log::info('RescheduleBulk Debug', [
+                    'post_id' => $post->id,
+                    'account_id' => $account->id,
+                    'slot' => $slot->toDateTimeString(),
+                    'gap_minutes' => round($gap / 60, 1),
+                    'spread_divisor' => $spreadDivisor,
+                    'next_time' => $nextTime->toDateTimeString(),
+                ]);
+
+                // If adding gap overshoots the windowEndHour, push cursor to start of next day's window
+                if ($windowStartHour !== null && $windowEndHour !== null && $windowStartHour < $windowEndHour) {
+                    if ($nextTime->hour >= $windowEndHour || ($nextTime->hour < $windowStartHour && $nextTime->isSameDay($slot))) {
+                        $nextTime = $slot->clone()->startOfDay()->addDay()->addHours($windowStartHour);
+                    }
+                }
+
+                $cursor = $nextTime;
             }
         }
 
@@ -362,39 +372,69 @@ class AutoPublishScheduler
      * day with THAT MANY posts (the caller caps this at the smaller of the
      * account's real post count in this batch and the day cap — see
      * rescheduleBulk()'s $spreadDivisor — so a handful of posts isn't force-
-     * spread across a whole day just because the cap allows more) — and only
-     * ever WIDEN $min/$max to hit that target, never narrow them, so an
-     * explicitly tight caller-supplied gap still gets respected as a floor.
+     * spread across a whole day just because the cap allows more).
+     *
+     * That target is a PREFERENCE inside the caller's [$minSeconds,
+     * $maxSeconds] band, never an override of it. It used to be allowed to push
+     * both ends past $maxSeconds, which is what produced the huge holes this
+     * was meant to prevent: a channel with only 2 posts in the batch got
+     * target = 12h/2 = 6h, so two posts asked to be 10-120 minutes apart landed
+     * ~6 hours apart and the whole morning read as "this channel posted
+     * nothing". Saturating at $maxSeconds instead means a channel with few
+     * posts simply doesn't fill the day — which is exactly what asking for a
+     * ≤120-minute gap means.
      */
-    private function spreadGapSeconds(int $minSeconds, int $maxSeconds, int $postsPerDayEstimate, ?int $windowStartHour, ?int $windowEndHour): int
-    {
+    private function spreadGapSeconds(
+        int $minSeconds,
+        int $maxSeconds,
+        int $postsPerDayEstimate,
+        ?int $windowStartHour,
+        ?int $windowEndHour
+    ): int {
+        // 1. Validasi input dasar untuk mencegah ValueError pada random_int
+        if ($minSeconds > $maxSeconds) {
+            throw new \InvalidArgumentException('$minSeconds tidak boleh lebih besar dari $maxSeconds');
+        }
+
+        if ($minSeconds === $maxSeconds) {
+            return $minSeconds;
+        }
+
+        $postsCount = max(1, $postsPerDayEstimate);
         $startHour = $windowStartHour ?? self::OVERFLOW_DAY_START_HOUR;
         $endHour = $windowEndHour ?? self::DEFAULT_SPREAD_END_HOUR;
 
-        if ($endHour <= $startHour) {
-            // Inverted/degenerate window (shouldn't normally reach here — callers
-            // validate start < end for an explicit window) — fall back to the
-            // caller's own gap rather than divide by a non-positive span.
-            return random_int($minSeconds, $maxSeconds);
+        // 2. Hitung total jam jendela posting (mendukung rentang normal dan lintas hari/overnight)
+        if ($startHour === $endHour) {
+            $windowHours = 24; // Bebas posting 24 jam full
+        } else {
+            $windowHours = ($endHour - $startHour + 24) % 24;
         }
 
-        // If chaining $postsPerDayEstimate posts at the caller's OWN average gap
-        // would already reach (or overshoot) the window on its own, there's no
-        // clustering problem to correct — widening further would only push
-        // gaps past what the caller actually asked for. Only step in when the
-        // caller's own gap would otherwise bunch everything into a fraction of
-        // the window (the actual bug: 5 posts at a 30-120min gap span at most
-        // ~2-8h of a 12h window, leaving the rest of the day untouched).
-        $windowSeconds = ($endHour - $startHour) * 3600;
-        $naiveSpan = $postsPerDayEstimate * (($minSeconds + $maxSeconds) / 2);
+        $windowSeconds = $windowHours * 3600;
+
+        // 3. Jika estimasi posting awal sudah memenuhi/melebihi window, gunakan gap standar dari caller
+        $naiveSpan = $postsCount * (($minSeconds + $maxSeconds) / 2);
         if ($naiveSpan >= $windowSeconds) {
             return random_int($minSeconds, $maxSeconds);
         }
 
-        $targetSeconds = (int) round($windowSeconds / max(1, $postsPerDayEstimate));
-        $min = max($minSeconds, (int) round($targetSeconds * 0.85));
-        $max = max($maxSeconds, (int) round($targetSeconds * 1.15));
-        $max = max($min, $max);
+        // 4. Hitung target jeda ideal per postingan
+        $targetSeconds = (int) round($windowSeconds / $postsCount);
+
+        // 5. Tentukan rentang acak sekitar target (±15%), dibatasi oleh [$minSeconds, $maxSeconds]
+        $min = min(max($minSeconds, (int) round($targetSeconds * 0.85)), $maxSeconds);
+        $max = min($maxSeconds, max($min, (int) round($targetSeconds * 1.15)));
+
+        // 6. Jika batas mentok di ceiling ($min >= $max), buatkan variasi acak (jitter) di bawahnya
+        if ($min >= $max) {
+            $min = max($minSeconds, (int) round($max * 0.8));
+        }
+
+        // Guard clause tambahan untuk memastikan $min tidak pernah melebihi $max
+        if ($min > $max) {
+            $min = $max;
+        }
 
         return random_int($min, $max);
     }

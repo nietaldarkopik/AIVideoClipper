@@ -2,10 +2,12 @@
 
 namespace App\Jobs;
 
+use App\Models\ProcessingJob;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
 use App\Models\VideoBatchItem;
 use App\Services\Social\SocialProviderManager;
+use App\Services\Video\CoverGeneratorService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -26,16 +28,14 @@ class PublishClipJob implements ShouldQueue
 
     public int $tries = 4;
 
-    public function __construct(public int $socialPostId)
-    {
-    }
+    public function __construct(public int $socialPostId) {}
 
     public function backoff(): array
     {
         return [30, 120, 300];
     }
 
-    public function handle(SocialProviderManager $manager): void
+    public function handle(SocialProviderManager $manager, CoverGeneratorService $covers): void
     {
         $post = SocialPost::with(['clip', 'socialAccount'])->findOrFail($this->socialPostId);
 
@@ -92,10 +92,64 @@ class PublishClipJob implements ShouldQueue
 
         $post->update(['status' => SocialPost::STATUS_UPLOADING]);
         $provider = $manager->resolve($post->platform);
-        $clipPath = Storage::disk('media')->path($post->clip->output_path);
+        $disk = Storage::disk('media');
+        $clipPath = $disk->path($post->clip->output_path);
+
+        // A cover normally already exists by now — RenderClipJob makes one as
+        // soon as the video finishes. This is the catch-up path for clips
+        // rendered before that existed, or whose cover generation failed then:
+        // resolveTemplate() prefers THIS destination channel's configured
+        // default, which render time couldn't know. A clip that already has a
+        // cover is left alone rather than restyled per channel.
+        $clip = $post->clip;
+        if (! $clip->cover_path) {
+            try {
+                $covers->generateForClip($clip, $post->socialAccount);
+                // generateForClip() mutates the DB row via $clip->update([...]) but
+                // this in-memory $clip object keeps its original null cover_path —
+                // reload it so the fallback chain below sees whatever was just written.
+                $clip->refresh();
+            } catch (Throwable $e) {
+                Log::warning('Auto cover generation failed before publish, continuing without one', [
+                    'post_id' => $post->id,
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Primary: custom cover image (CoverGeneratorService output).
+        // Fallback 1: plain frame thumbnail (RenderClipJob always generates this).
+        // Fallback 2: intro_cover_path (reaction clips only).
+        // Publishing should NEVER have a null cover when a fallback exists —
+        // platforms that support custom thumbnails get visibly worse results
+        // (auto-generated YouTube 3-frame choice, Facebook mid-video frame, ...)
+        // when we don't hand them SOMETHING explicit.
+        $coverPath = null;
+        $coverRelativePath = null;
+        if ($clip->cover_path && $disk->exists($clip->cover_path)) {
+            $coverPath = $disk->path($clip->cover_path);
+            $coverRelativePath = $clip->cover_path;
+        } elseif ($clip->thumbnail_path && $disk->exists($clip->thumbnail_path)) {
+            $coverPath = $disk->path($clip->thumbnail_path);
+            $coverRelativePath = $clip->thumbnail_path;
+            Log::info('Publish using thumbnail_path as cover fallback (no custom cover available)', [
+                'post_id' => $post->id,
+                'clip_id' => $clip->id,
+                'platform' => $post->platform,
+            ]);
+        } elseif ($clip->intro_cover_path && $disk->exists($clip->intro_cover_path)) {
+            $coverPath = $disk->path($clip->intro_cover_path);
+            $coverRelativePath = $clip->intro_cover_path;
+            Log::info('Publish using intro_cover_path as cover fallback (last-resort, reaction clip only)', [
+                'post_id' => $post->id,
+                'clip_id' => $clip->id,
+                'platform' => $post->platform,
+            ]);
+        }
 
         $post->update(['status' => SocialPost::STATUS_PUBLISHING]);
-        $result = $provider->publish($post, $clipPath);
+        $result = $provider->publish($post, $clipPath, $coverPath);
 
         if (! $result['success']) {
             $post->increment('retry_count');
@@ -120,6 +174,9 @@ class PublishClipJob implements ShouldQueue
             'post_url' => $result['post_url'] ?? null,
             'external_post_id' => $result['external_post_id'] ?? null,
             'error_message' => null,
+            'thumbnail_status' => $result['thumbnail_status'] ?? null,
+            'thumbnail_uploaded_at' => ($result['thumbnail_status'] ?? null) === SocialPost::THUMBNAIL_STATUS_UPLOADED ? now() : null,
+            'thumbnail_error' => $result['thumbnail_error'] ?? null,
         ]);
 
         Log::info('Clip published successfully', [
@@ -127,6 +184,28 @@ class PublishClipJob implements ShouldQueue
             'platform' => $post->platform,
             'post_url' => $result['post_url'] ?? null,
         ]);
+
+        // YouTube quirk, not a bug in the upload above: a thumbnail set right after
+        // upload can look correct in Studio for a while and then get silently reset
+        // to an auto-picked video frame once YouTube's own processing pipeline
+        // finishes. There's no webhook for that, so a follow-up job polls and
+        // re-applies the thumbnail once the video is actually done — see
+        // ReapplyYoutubeThumbnailJob and YouTubeProvider::reapplyThumbnail().
+        if ($post->platform === 'youtube' && $coverRelativePath && ($result['external_post_id'] ?? null)) {
+            $processingJob = ProcessingJob::create([
+                'project_id' => $post->clip->project_id,
+                'video_id' => $post->clip->video_id,
+                'clip_id' => $post->clip->id,
+                'type' => 'youtube_thumbnail',
+                'status' => ProcessingJob::STATUS_QUEUED,
+                'message' => 'Waiting for YouTube to finish processing before re-applying the thumbnail...',
+                'started_at' => now(),
+            ]);
+
+            ReapplyYoutubeThumbnailJob::dispatch(
+                $post->id, $coverRelativePath, $result['external_post_id'], 1, $processingJob->id
+            )->delay(now()->addSeconds(90));
+        }
 
         // Batch autobot publishes are staggered (see ProcessBatchItemJob) and finish
         // long after the batch item itself is marked "completed" — this is what

@@ -35,6 +35,26 @@ return [
         'redirect_uri' => env('GOOGLE_REDIRECT_URI'),
     ],
 
+    'tiktok' => [
+        // TikTok for Developers app (developers.tiktok.com) with Login Kit and
+        // Content Posting API both enabled, requesting the user.info.basic,
+        // user.info.profile, video.publish, and video.list scopes. Register
+        // redirect_uri below verbatim as a Redirect URI in the app's Login Kit
+        // settings — TikTok requires an exact HTTPS match (no bare "localhost").
+        //
+        // Publishing lands as PRIVATE (or sent to the creator's TikTok inbox for
+        // manual review, never immediately public) until this app passes TikTok's
+        // audit — see TikTokProvider's class docblock.
+        'client_key' => env('TIKTOK_CLIENT_KEY'),
+        'client_secret' => env('TIKTOK_CLIENT_SECRET'),
+        'redirect_uri' => env('TIKTOK_REDIRECT_URI'),
+        // Separate Redirect URI for the "Login/Sign up with TikTok" flow
+        // (AuthController::tiktokCallback) — must be registered as its own
+        // entry in the TikTok app's Login Kit settings alongside redirect_uri
+        // above, since the two land on different backend routes.
+        'login_redirect_uri' => env('TIKTOK_LOGIN_REDIRECT_URI'),
+    ],
+
     'facebook' => [
         // Meta for Developers app (developers.facebook.com) with Facebook Login
         // configured. Meta's "App Domains" field rejects bare "localhost"/wildcard
@@ -96,6 +116,12 @@ return [
         'default_font_file' => env('DEFAULT_FONT_FILE'),
     ],
 
+    'backup' => [
+        'pg_dump_bin' => env('PG_DUMP_BIN', 'pg_dump'),
+        'psql_bin' => env('PSQL_BIN', 'psql'),
+        'tar_bin' => env('TAR_BIN', 'tar'),
+    ],
+
     'trending' => [
         // Every non-YouTube platform has no viable free/ToS-safe trending API and
         // stays mock. YouTube defaults to mock too (zero-setup, like every other
@@ -142,6 +168,10 @@ return [
         // Long-form Indonesian video narrative/script generation from gathered
         // research — see VideoNarrativeProvider / GenerateContentBriefJob.
         'video_narrative_provider' => env('AI_VIDEO_NARRATIVE_PROVIDER', 'mock'),
+        // Daily content-idea generation from multi-source research — see
+        // ContentIdeaProvider / ResearchChannelJob. Overridable at runtime from the
+        // admin settings panel via the `content_idea_model` setting.
+        'content_idea_provider' => env('AI_CONTENT_IDEA_PROVIDER', 'mock'),
         // AI-generated background for the reaction intro cover — see
         // RenderClipJob::composeIntroOutro().
         'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
@@ -221,6 +251,10 @@ return [
         // chat completion, same endpoint as `model` above). Falls back to `model`
         // when unset — see AIServiceProvider.
         'video_narrative_model' => env('NINE_ROUTER_VIDEO_NARRATIVE_MODEL'),
+        // Separate model id for daily content-idea generation. Falls back to `model`
+        // when unset — see AIServiceProvider. Worth pointing at a stronger model than
+        // clip scoring: this prompt carries a whole run's research evidence.
+        'content_idea_model' => env('NINE_ROUTER_CONTENT_IDEA_MODEL'),
         // Model id for the /images/generations endpoint — check GET {base_url}/models/image.
         'image_model' => env('NINE_ROUTER_IMAGE_MODEL'),
     ],
@@ -262,7 +296,17 @@ return [
         // patches this, so it's a comma-separated, tunable list rather than one
         // hardcoded value. Tried in order — UrlVideoDownloader moves to the next
         // client on a 403/blocked error instead of retrying the same one.
-        'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'android,tv,web'),
+        //
+        // These are FALLBACKS ONLY: UrlVideoDownloader::playerClients() always
+        // tries yt-dlp's own default first. "android" used to lead this list,
+        // which quietly capped every YouTube import at 360p — YouTube serves that
+        // client a single progressive stream with no adaptive formats, so the
+        // download succeeded and the better clients were never reached.
+        'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'tv_simply,android'),
+        // Height ceiling for downloaded sources — see UrlVideoDownloader's
+        // $maxHeight for why this app cares more about source resolution than
+        // most (the 9:16 crop throws away ~44% of the width, then upscales).
+        'max_height' => (int) env('YTDLP_MAX_HEIGHT', 1440),
         // Routes every yt-dlp request (video + captions) through this proxy when
         // set — yt-dlp's own --proxy syntax, e.g. "http://user:pass@host:port" or
         // "socks5://host:port". Needed when a platform blocks this server's IP

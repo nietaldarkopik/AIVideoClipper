@@ -1,8 +1,17 @@
 <?php
 
+use App\Providers\AIServiceProvider;
+use App\Providers\AppServiceProvider;
+use App\Providers\BackupServiceProvider;
+use App\Providers\ResearchServiceProvider;
+use App\Providers\SocialServiceProvider;
+use App\Providers\TrendingServiceProvider;
+
 return [
-    App\Providers\AIServiceProvider::class,
-    App\Providers\AppServiceProvider::class,
-    App\Providers\SocialServiceProvider::class,
-    App\Providers\TrendingServiceProvider::class,
+    AIServiceProvider::class,
+    AppServiceProvider::class,
+    BackupServiceProvider::class,
+    ResearchServiceProvider::class,
+    SocialServiceProvider::class,
+    TrendingServiceProvider::class,
 ];

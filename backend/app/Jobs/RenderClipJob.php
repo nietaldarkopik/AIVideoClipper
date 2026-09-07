@@ -5,14 +5,16 @@ namespace App\Jobs;
 use App\Exceptions\JobCancelledException;
 use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\Clip;
-use App\Models\Project;
 use App\Models\ProcessingJob;
+use App\Models\Project;
 use App\Models\Subtitle;
+use App\Models\Video;
 use App\Models\VideoBatchItem;
 use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\Social\AutoPublishScheduler;
+use App\Services\Video\CoverGeneratorService;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
 use App\Services\Video\LayerOverrideMerger;
@@ -34,11 +36,10 @@ class RenderClipJob implements ShouldQueue
     use ChecksCancellation, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 2;
+
     public int $timeout = 1800;
 
-    public function __construct(public int $clipId)
-    {
-    }
+    public function __construct(public int $clipId) {}
 
     public function handle(
         FFmpegService $ffmpeg,
@@ -48,6 +49,7 @@ class RenderClipJob implements ShouldQueue
         SilenceTrimmer $silenceTrimmer,
         TextToSpeechProvider $tts,
         ImageGenerationProvider $imageGen,
+        CoverGeneratorService $covers,
     ): void {
         $clip = Clip::with(['video', 'template', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
@@ -111,11 +113,31 @@ class RenderClipJob implements ShouldQueue
             // exactly the shape extractWithoutSilence()/remapWords()/
             // remapKeyframes() already expect, so nothing downstream needs to know
             // segments exist at all.
+            // Hand-edited caption cues are timed against the clip's own rendered
+            // timeline as the editor showed it, and (unlike transcript words) carry
+            // no source-time anchor that remapWords() could re-derive them from — so
+            // a clip with edited cues opts out of silence removal for the same
+            // reason a custom .srt/.ass does: better to keep the user's cue timing
+            // exact than to shorten the video underneath it and desync every line.
+            // Multi-segment gap removal below is unaffected (segments are the user's
+            // own explicit cuts, and the editor's caption track is drawn against
+            // them).
+            $hasEditedCaptions = ! empty($clip->caption_cues);
+
+            // Keyed by the KEEPINTERVAL index a crossfade should sit before — see
+            // FFmpegService::extractWithoutSilence()'s $transitions param. Only
+            // ever set at a boundary between two of the user's OWN segments
+            // (segment index > 0, first sub-interval of that segment): the
+            // possibly-many internal cuts AI silence-removal makes WITHIN one
+            // segment always stay plain hard cuts, both loops below only attach
+            // an entry at that one boundary per segment.
+            $transitionsByBoundary = [];
+
             $keepIntervals = [];
-            if (! $clip->webcam_path && ! $customSubtitlePath) {
+            if (! $clip->webcam_path && ! $customSubtitlePath && ! $hasEditedCaptions) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(10, 'Detecting silence...');
-                foreach ($segments as $segment) {
+                foreach ($segments as $segIndex => $segment) {
                     $segStart = (float) $segment['start'];
                     $segDuration = max(0.01, (float) $segment['end'] - $segStart);
                     $silences = $ffmpeg->detectSilence(
@@ -125,7 +147,11 @@ class RenderClipJob implements ShouldQueue
                         SilenceTrimmer::NOISE_THRESHOLD_DB,
                         SilenceTrimmer::MIN_SILENCE_SECONDS
                     );
-                    foreach ($silenceTrimmer->computeKeepIntervals($silences, $segDuration) as $k) {
+                    $subIntervals = $silenceTrimmer->computeKeepIntervals($silences, $segDuration);
+                    foreach ($subIntervals as $subIndex => $k) {
+                        if ($subIndex === 0 && $segIndex > 0 && ! empty($segment['transition_in']['type'])) {
+                            $transitionsByBoundary[count($keepIntervals)] = $segment['transition_in'];
+                        }
                         $keepIntervals[] = [
                             'start' => ($segStart - $clipStart) + $k['start'],
                             'end' => ($segStart - $clipStart) + $k['end'],
@@ -133,7 +159,10 @@ class RenderClipJob implements ShouldQueue
                     }
                 }
             } else {
-                foreach ($segments as $segment) {
+                foreach ($segments as $segIndex => $segment) {
+                    if ($segIndex > 0 && ! empty($segment['transition_in']['type'])) {
+                        $transitionsByBoundary[count($keepIntervals)] = $segment['transition_in'];
+                    }
                     $keepIntervals[] = ['start' => (float) $segment['start'] - $clipStart, 'end' => (float) $segment['end'] - $clipStart];
                 }
             }
@@ -163,13 +192,22 @@ class RenderClipJob implements ShouldQueue
                     $keyframeArrays = $clip->crop_config['keyframes'];
                 } else {
                     $processingJob->markProgress(15, 'Calculating smart crop...');
+                    // Shaped to the same $targetWidth:$targetHeight the final scale
+                    // step below uses (Clip::targetResolution() — template's own
+                    // canvas wins over clip.aspect_ratio when a template is
+                    // attached), not the raw clip.aspect_ratio bucket. Letting
+                    // those two disagree is what stretched/distorted the output:
+                    // FFmpegService::renderClip() crops to this ratio, then hard-
+                    // scales the crop into $targetWidth x $targetHeight with no
+                    // letterboxing — any mismatch between the two ratios shows up
+                    // as non-uniform stretching.
                     $keyframes = $reframing->detectCropKeyframes(
                         $sourcePath,
                         $clipStart,
                         $clipEnd,
                         (int) $video->width,
                         (int) $video->height,
-                        $clip->aspect_ratio
+                        "{$targetWidth}:{$targetHeight}"
                     );
                     $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
                 }
@@ -193,7 +231,7 @@ class RenderClipJob implements ShouldQueue
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(25, 'Removing silence...');
                 $noSilenceRelative = "clips/{$clip->id}/no_silence.mp4";
-                $ffmpeg->extractWithoutSilence($sourcePath, $disk->path($noSilenceRelative), $clipStart, $keepIntervals);
+                $ffmpeg->extractWithoutSilence($sourcePath, $disk->path($noSilenceRelative), $clipStart, $keepIntervals, $transitionsByBoundary);
                 $renderSourcePath = $disk->path($noSilenceRelative);
                 $renderClipStart = 0.0;
                 $renderClipEnd = $silenceTrimmer->totalDuration($keepIntervals);
@@ -230,6 +268,38 @@ class RenderClipJob implements ShouldQueue
                     $disk->put($assRelative, $ass);
                     $assPath = $disk->path($assRelative);
                 }
+            } elseif ($clip->subtitles_enabled && $hasEditedCaptions) {
+                // The user owns these cues now — burn them in verbatim rather than
+                // rebuilding from the transcript (which would throw away every text
+                // fix and retimed line on the very next render). Word-level timing
+                // is preserved when it survived the edit; toAss() already renders a
+                // wordless segment as a plain styled line, so a cue whose text was
+                // rewritten (and whose stale word list the editor therefore dropped)
+                // degrades to "no per-word highlight" instead of mis-highlighting.
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(35, 'Applying edited captions...');
+
+                $segments = array_values(array_map(fn (array $cue) => [
+                    'start' => (float) $cue['start'],
+                    'end' => (float) $cue['end'],
+                    'text' => (string) $cue['text'],
+                    'words' => array_values($cue['words'] ?? []),
+                ], $clip->caption_cues));
+
+                $srt = $subtitleService->toSrt($segments);
+                $ass = $subtitleService->toAss($segments, $captionConfig, $targetWidth, $targetHeight);
+
+                $srtRelative = "subtitles/{$clip->id}/{$clip->subtitle_language}.srt";
+                $assRelative = "subtitles/{$clip->id}/{$clip->subtitle_language}.ass";
+                $disk->put($srtRelative, $srt);
+                $disk->put($assRelative, $ass);
+
+                Subtitle::updateOrCreate(
+                    ['clip_id' => $clip->id, 'language' => $clip->subtitle_language],
+                    ['segments' => $segments, 'srt_path' => $srtRelative, 'ass_path' => $assRelative]
+                );
+
+                $assPath = $disk->path($assRelative);
             } elseif ($clip->subtitles_enabled && $video->transcript) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(35, 'Generating captions...');
@@ -349,6 +419,47 @@ class RenderClipJob implements ShouldQueue
                 $disk->delete($noSilenceRelative);
             }
 
+            // Additional video clips — each cut from a DIFFERENT Video in the
+            // project, independently rendered (own smart-crop, own audio; no
+            // captions/layers of its own in this pass — those are keyed to this
+            // clip's own template/transcript and have no per-additional-clip
+            // equivalent yet) and appended after the main clip's own output.
+            // Folded in here, BEFORE the thumbnail grab and intro/outro below,
+            // so both naturally treat the joined result as "the clip" — the
+            // thumbnail becomes representative of the whole thing, and
+            // composeIntroOutro() wraps intro/outro cards around all of it
+            // rather than just the main clip's own portion.
+            $additionalClips = $this->renderAdditionalVideoClips($clip, $ffmpeg, $reframing, $disk, $targetWidth, $targetHeight, $watermarkPath, $watermarkOpacity);
+            if (! empty($additionalClips)) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(88, 'Joining additional video clips...');
+
+                $transitionsByBoundary = [];
+                foreach ($additionalClips as $i => $additionalClip) {
+                    if (! empty($additionalClip['transition_in']['type'])) {
+                        // +1: index 0 in the joined segment list below is the
+                        // main clip's own output, not this additional clip.
+                        $transitionsByBoundary[$i + 1] = $additionalClip['transition_in'];
+                    }
+                }
+
+                $joinedRelative = "clips/{$clip->id}/joined.mp4";
+                $ffmpeg->concatSegments(
+                    array_map(fn (string $p) => $disk->path($p), [$outputRelative, ...array_column($additionalClips, 'path')]),
+                    $disk->path($joinedRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    null,
+                    $transitionsByBoundary,
+                );
+
+                $disk->delete($outputRelative);
+                foreach (array_column($additionalClips, 'path') as $p) {
+                    $disk->delete($p);
+                }
+                $outputRelative = $joinedRelative;
+            }
+
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(90, 'Generating thumbnail...');
             $thumbRelative = "clips/{$clip->id}/thumbnail.jpg";
@@ -371,6 +482,24 @@ class RenderClipJob implements ShouldQueue
                 'output_size_bytes' => $disk->exists($finalOutputRelative) ? $disk->size($finalOutputRelative) : null,
                 'rendered_at' => now(),
             ]);
+
+            // The social cover is grabbed from the finished video, so this is the
+            // first moment it can exist at all — and doing it here (rather than
+            // only on the way to a platform, as before) means every clip has one
+            // ready to look at and swap in the Cover tab instead of it appearing
+            // silently at publish time. CoverGeneratorService::resolveTemplate()
+            // falls back to a random published template when nothing has been
+            // configured, so this works for an account that never picked one.
+            // Never fatal: a clip without a cover is still a finished clip.
+            try {
+                $processingJob->markProgress(97, 'Generating cover...');
+                $covers->generateForClip($clip);
+            } catch (Throwable $e) {
+                Log::warning('Cover generation failed after render, clip kept without one', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
 
             $processingJob->markCompleted('Clip rendered');
             $this->settleProjectStatus($clip->project_id, $publishScheduler);
@@ -398,6 +527,98 @@ class RenderClipJob implements ShouldQueue
      * intro_enabled but reaction_script was never generated), $outputRelative
      * unchanged, so callers always get back a valid, playable clip path.
      */
+    /**
+     * Independently renders each entry in $clip->additional_video_clips — own
+     * source video, own smart-crop to the target resolution, own watermark
+     * (matching the main clip's, for a consistent look across the whole
+     * joined result) — into its own file. No captions, no template layers, no
+     * silence removal on these in this pass: those are keyed to the MAIN
+     * clip's own template/transcript, and there's no obvious per-additional-
+     * clip equivalent yet without a much larger redesign.
+     *
+     * An entry whose video is missing/deleted, or whose start/end no longer
+     * make sense, is silently skipped rather than failing the whole render —
+     * same defensiveness this app already applies to a dangling image/audio
+     * layer path.
+     *
+     * @return list<array{path: string, transition_in: ?array}> disk-relative paths in order, paired with each one's own transition_in so a skipped entry can never desync the pairing the caller builds its $transitions boundary map from
+     */
+    private function renderAdditionalVideoClips(
+        Clip $clip,
+        FFmpegService $ffmpeg,
+        ReframingProvider $reframing,
+        Filesystem $disk,
+        int $targetWidth,
+        int $targetHeight,
+        ?string $watermarkPath,
+        float $watermarkOpacity,
+    ): array {
+        $entries = $clip->additional_video_clips ?? [];
+        if (empty($entries)) {
+            return [];
+        }
+
+        $results = [];
+
+        foreach ($entries as $i => $entry) {
+            $video = isset($entry['video_id']) ? Video::find($entry['video_id']) : null;
+            if (! $video || ! $video->disk_path || ! $disk->exists($video->disk_path)) {
+                Log::warning('Skipping an additional video clip whose source video is missing', [
+                    'clip_id' => $clip->id, 'video_id' => $entry['video_id'] ?? null,
+                ]);
+
+                continue;
+            }
+
+            $start = max(0.0, (float) ($entry['start'] ?? 0));
+            $end = (float) ($entry['end'] ?? 0);
+            if ($end <= $start) {
+                continue;
+            }
+
+            $keyframes = [];
+            try {
+                // Same $targetWidth:$targetHeight this additional clip is about to
+                // be scaled to below (renderClip() call) — see the primary crop
+                // detection call above for why this must match, not clip.aspect_ratio.
+                $detected = $reframing->detectCropKeyframes(
+                    $disk->path($video->disk_path),
+                    $start,
+                    $end,
+                    (int) $video->width,
+                    (int) $video->height,
+                    "{$targetWidth}:{$targetHeight}"
+                );
+                $keyframes = array_map(fn ($k) => $k->toArray(), $detected);
+            } catch (Throwable $e) {
+                // A center-crop fallback (renderClip() with empty keyframes)
+                // beats failing the whole render over one additional clip's
+                // framing.
+                Log::warning('Smart crop failed for an additional video clip, falling back to a center crop', [
+                    'clip_id' => $clip->id, 'video_id' => $video->id, 'error' => $e->getMessage(),
+                ]);
+            }
+
+            $relative = "clips/{$clip->id}/additional_{$i}.mp4";
+            $ffmpeg->renderClip(
+                $disk->path($video->disk_path),
+                $disk->path($relative),
+                $start,
+                $end,
+                $targetWidth,
+                $targetHeight,
+                $keyframes,
+                null,
+                $watermarkPath,
+                $watermarkOpacity,
+            );
+
+            $results[] = ['path' => $relative, 'transition_in' => $entry['transition_in'] ?? null];
+        }
+
+        return $results;
+    }
+
     private function composeIntroOutro(
         Clip $clip,
         FFmpegService $ffmpeg,
@@ -521,7 +742,7 @@ class RenderClipJob implements ShouldQueue
 
         return sprintf(
             'Eye-catching vertical video cover thumbnail, dramatic and high-contrast, no text or logos. '
-            . 'Illustrates: %s. Mood/type: %s.',
+            .'Illustrates: %s. Mood/type: %s.',
             $clip->reaction_script ?: ($candidate?->hook_text ?? $clip->title ?: 'a short video clip'),
             $candidate?->moment_type ?? 'engaging moment'
         );
@@ -546,7 +767,17 @@ class RenderClipJob implements ShouldQueue
         }
 
         $segments = collect($clip->segments)
-            ->map(fn ($s) => ['start' => (float) $s['start'], 'end' => (float) $s['end']])
+            // transition_in (see FFmpegService::extractWithoutSilence()'s
+            // $transitions param) travels with its segment through the sort
+            // below, exactly like start/end — it describes the cut INTO this
+            // segment from whichever one ends up immediately before it once
+            // segments are ordered, so it has to survive that reordering
+            // together with the segment it belongs to.
+            ->map(fn ($s) => [
+                'start' => (float) $s['start'],
+                'end' => (float) $s['end'],
+                'transition_in' => $s['transition_in'] ?? null,
+            ])
             ->filter(fn ($s) => $s['end'] > $s['start'])
             ->sortBy('start')
             ->values()

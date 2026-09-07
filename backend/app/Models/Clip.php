@@ -14,15 +14,19 @@ class Clip extends Model
     use HasFactory;
 
     public const STATUS_QUEUED = 'queued';
+
     public const STATUS_RENDERING = 'rendering';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_FAILED = 'failed';
 
     protected $fillable = [
         'project_id', 'video_id', 'clip_candidate_id', 'template_id', 'template_version_id',
+        'cover_template_id', 'cover_text', 'cover_kicker', 'cover_subline', 'cover_path',
         'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'speed', 'volume', 'aspect_ratio',
         'crop_config', 'scenes', 'subtitle_language', 'subtitles_enabled', 'subtitle_config',
-        'custom_subtitle_path', 'layer_overrides', 'segments',
+        'custom_subtitle_path', 'caption_cues', 'layer_overrides', 'segments', 'additional_video_clips',
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
         'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
         'reaction_script', 'reaction_tone', 'intro_enabled', 'outro_enabled',
@@ -35,6 +39,8 @@ class Clip extends Model
         'crop_config' => 'array',
         'scenes' => 'array',
         'subtitle_config' => 'array',
+        'caption_cues' => 'array',
+        'additional_video_clips' => 'array',
         'layer_overrides' => 'array',
         'segments' => 'array',
         'embedding' => 'array',
@@ -72,6 +78,11 @@ class Clip extends Model
     public function templateVersion(): BelongsTo
     {
         return $this->belongsTo(TemplateVersion::class);
+    }
+
+    public function coverTemplate(): BelongsTo
+    {
+        return $this->belongsTo(CoverTemplate::class);
     }
 
     /**

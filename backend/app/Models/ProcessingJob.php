@@ -19,6 +19,7 @@ class ProcessingJob extends Model
     protected $fillable = [
         'project_id', 'video_id', 'clip_id', 'type', 'status', 'progress',
         'message', 'error', 'attempts', 'started_at', 'finished_at',
+        'request_payload', 'response_payload',
     ];
 
     protected $casts = [
@@ -74,6 +75,23 @@ class ProcessingJob extends Model
             'status' => self::STATUS_FAILED,
             'error' => $error,
             'finished_at' => now(),
+        ]);
+    }
+
+    /**
+     * Records the raw outbound request and inbound response of a third-party API
+     * call this job made, so a failure can be debugged from the admin Processing
+     * tab instead of digging through the Laravel log. Safe to call more than once
+     * per job (e.g. once per polling attempt) — each call overwrites with the
+     * latest attempt's payload.
+     */
+    public function recordApiCall(array $request, ?array $response = null): void
+    {
+        $this->update([
+            'request_payload' => json_encode($request, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
+            'response_payload' => $response !== null
+                ? json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+                : $this->response_payload,
         ]);
     }
 

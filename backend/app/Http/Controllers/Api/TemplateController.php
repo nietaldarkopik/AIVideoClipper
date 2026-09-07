@@ -4,10 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\TemplateResource;
+use App\Jobs\GenerateTemplatePreviewJob;
 use App\Models\Template;
 use App\Models\TemplateVersion;
 use App\Services\AI\Contracts\ImageGenerationProvider;
+use App\Services\Video\AspectRatio;
 use App\Services\Video\DefaultTemplateConfig;
+use App\Services\Video\TemplatePreviewService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -40,6 +43,17 @@ class TemplateController extends Controller
     }
 
     /**
+     * The raw demo source clip (see TemplatePreviewService::demoSource()) the
+     * template editor's live preview plays behind its caption/layer overlay,
+     * so an admin edits against real footage instead of an abstract
+     * placeholder. Same video/window every real preview.mp4 is rendered from.
+     */
+    public function demoSource()
+    {
+        return response()->json(TemplatePreviewService::demoSource());
+    }
+
+    /**
      * Admin only (see routes/api.php middleware): create a new template + its v1.
      */
     public function store(Request $request)
@@ -54,13 +68,13 @@ class TemplateController extends Controller
             'config' => ['nullable', 'array'],
         ]);
 
-        [$defaultW, $defaultH] = \App\Services\Video\AspectRatio::resolution($data['aspect_ratio']);
+        [$defaultW, $defaultH] = AspectRatio::resolution($data['aspect_ratio']);
 
         $template = Template::create([
             'template_category_id' => $data['template_category_id'] ?? null,
             'created_by' => $request->user()->id,
             'name' => $data['name'],
-            'slug' => Str::slug($data['name']) . '-' . Str::random(4),
+            'slug' => Str::slug($data['name']).'-'.Str::random(4),
             'description' => $data['description'] ?? null,
             'aspect_ratio' => $data['aspect_ratio'],
             'resolution_width' => $data['resolution_width'] ?? $defaultW,
@@ -77,7 +91,8 @@ class TemplateController extends Controller
             'config' => array_replace_recursive(DefaultTemplateConfig::config(), $data['config'] ?? []),
         ]);
 
-        $template->update(['current_version_id' => $version->id]);
+        $template->update(['current_version_id' => $version->id, 'preview_status' => 'generating']);
+        GenerateTemplatePreviewJob::dispatch($template->id);
 
         return TemplateResource::make($template->load(['category', 'currentVersion']))->response()->setStatusCode(201);
     }
@@ -129,13 +144,14 @@ class TemplateController extends Controller
             $version = TemplateVersion::create([
                 'template_id' => $template->id,
                 'version_number' => $nextVersionNumber,
-                'label' => $data['label'] ?? ('v' . $nextVersionNumber),
+                'label' => $data['label'] ?? ('v'.$nextVersionNumber),
                 'is_published' => true,
                 'created_by' => $request->user()->id,
                 'config' => array_replace_recursive($baseConfig, $incomingConfig),
             ]);
 
-            $template->update(['current_version_id' => $version->id]);
+            $template->update(['current_version_id' => $version->id, 'preview_status' => 'generating']);
+            GenerateTemplatePreviewJob::dispatch($template->id);
         }
 
         return TemplateResource::make($template->fresh(['category', 'currentVersion']));
@@ -144,8 +160,8 @@ class TemplateController extends Controller
     public function duplicate(Request $request, Template $template)
     {
         $copy = $template->replicate(['slug', 'current_version_id']);
-        $copy->name = $template->name . ' (Copy)';
-        $copy->slug = Str::slug($copy->name) . '-' . Str::random(4);
+        $copy->name = $template->name.' (Copy)';
+        $copy->slug = Str::slug($copy->name).'-'.Str::random(4);
         $copy->status = 'draft';
         $copy->is_system = false;
         $copy->created_by = $request->user()->id;
@@ -160,7 +176,8 @@ class TemplateController extends Controller
                 'created_by' => $request->user()->id,
                 'config' => $template->currentVersion->config,
             ]);
-            $copy->update(['current_version_id' => $version->id]);
+            $copy->update(['current_version_id' => $version->id, 'preview_status' => 'generating']);
+            GenerateTemplatePreviewJob::dispatch($copy->id);
         }
 
         return TemplateResource::make($copy->load(['category', 'currentVersion']))->response()->setStatusCode(201);
@@ -189,8 +206,22 @@ class TemplateController extends Controller
                 'error' => $e->getMessage(),
             ]);
 
-            return response()->json(['message' => 'Cover generation failed: ' . $e->getMessage()], 422);
+            return response()->json(['message' => 'Cover generation failed: '.$e->getMessage()], 422);
         }
+
+        return TemplateResource::make($template->fresh(['category', 'currentVersion']));
+    }
+
+    /**
+     * Admin only: (re)generate a template's real sample preview video via
+     * TemplatePreviewService — queued (unlike generateThumbnail() above) since
+     * an FFmpeg render takes real time, and the picker card degrades fine to
+     * its static thumbnail while preview_status is "generating".
+     */
+    public function generatePreview(Template $template)
+    {
+        $template->update(['preview_status' => 'generating']);
+        GenerateTemplatePreviewJob::dispatch($template->id);
 
         return TemplateResource::make($template->fresh(['category', 'currentVersion']));
     }
@@ -199,7 +230,7 @@ class TemplateController extends Controller
     {
         return sprintf(
             'Eye-catching %s video template cover thumbnail, dramatic and high-contrast, no text or logos. '
-            . 'Style: %s. Category: %s.',
+            .'Style: %s. Category: %s.',
             $template->aspect_ratio === '16:9' ? 'horizontal' : ($template->aspect_ratio === '1:1' ? 'square' : 'vertical'),
             $template->description ?: $template->name,
             $template->category?->name ?? 'general short-form content',

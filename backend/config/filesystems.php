@@ -57,6 +57,16 @@ return [
             'report' => false,
         ],
 
+        // Database dumps + media file archives, produced by
+        // App\Services\Backup\*BackupService for migrating to another server —
+        // see the backup:* / restore:* artisan commands.
+        'backups' => [
+            'driver' => 'local',
+            'root' => storage_path('app/backups'),
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

@@ -32,8 +32,7 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
         private readonly string $apiKey,
         private readonly string $model = 'gemini-2.5-flash',
         private readonly int $timeoutSeconds = 180,
-    ) {
-    }
+    ) {}
 
     /**
      * Real shot-boundary detection would need a full frame-diff decode pass; kept as
@@ -72,7 +71,7 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt($maxCandidates);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
-        $span = $this->aiLogger()->start('content_analysis', 'gemini', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'gemini', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         $response = Http::timeout($this->timeoutSeconds)
             ->retry(2, 2000)
@@ -93,7 +92,7 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
         if ($response->failed()) {
             $span->failure($response->body());
 
-            throw new RuntimeException('Gemini analysis failed: ' . $response->body());
+            throw new RuntimeException('Gemini analysis failed: '.$response->body());
         }
 
         $raw = $response->json('candidates.0.content.parts.0.text');
@@ -132,6 +131,8 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -171,6 +172,8 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
                             'suggested_title' => ['type' => 'STRING'],
                             'suggested_caption' => ['type' => 'STRING'],
                             'hashtags' => ['type' => 'ARRAY', 'items' => ['type' => 'STRING']],
+                            'cover_titles' => ['type' => 'ARRAY', 'items' => ['type' => 'STRING']],
+                            'cover_subtitles' => ['type' => 'ARRAY', 'items' => ['type' => 'STRING']],
                         ],
                         'required' => ['start_time', 'end_time', 'hook_text', 'suggested_title'],
                     ],
@@ -182,6 +185,8 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
 long video, find the {$maxCandidates} best self-contained "punchline" moments to cut
@@ -194,6 +199,8 @@ Return up to {$maxCandidates} candidates. Each needs: start_time/end_time (secon
 in the transcript's own language), moment_type, 2-4 short reasons, a one-sentence
 explanation, a short punchy suggested_title, a 1-2 sentence suggested_caption, and
 4-6 relevant hashtags.
+
+{$coverInstructions}
 
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the

@@ -16,6 +16,7 @@ class User extends Authenticatable
     use HasApiTokens, HasFactory, Notifiable;
 
     public const ROLE_USER = 'user';
+
     public const ROLE_ADMIN = 'admin';
 
     /**
@@ -86,5 +87,19 @@ class User extends Authenticatable
     public function contentBriefs(): HasMany
     {
         return $this->hasMany(ContentBrief::class);
+    }
+
+    /**
+     * Research channels (brand/persona), distinct from channelWatches() above —
+     * that one is a watched YouTube upload feed.
+     */
+    public function contentChannels(): HasMany
+    {
+        return $this->hasMany(ContentChannel::class);
+    }
+
+    public function contentIdeas(): HasMany
+    {
+        return $this->hasMany(ContentIdea::class);
     }
 }

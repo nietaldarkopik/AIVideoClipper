@@ -67,7 +67,13 @@ return [
     |
     */
 
-    'timezone' => 'UTC',
+    // Read from the environment (it wasn't, so APP_TIMEZONE in .env silently did
+    // nothing) — this app schedules real social posts for a single-timezone
+    // audience, and running the scheduler in UTC while every screen renders in
+    // the browser's local zone meant a "09:00-21:00 posting day" actually landed
+    // at 16:00-04:00 for the user. See the migration that shifted existing
+    // timestamps when this changed.
+    'timezone' => env('APP_TIMEZONE', 'UTC'),
 
     /*
     |--------------------------------------------------------------------------

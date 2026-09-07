@@ -40,8 +40,8 @@ class AdminController extends Controller
     public function users(Request $request)
     {
         $users = User::withCount('projects')
-            ->when($request->filled('q'), fn ($q) => $q->where('name', 'like', '%' . $request->string('q') . '%')
-                ->orWhere('email', 'like', '%' . $request->string('q') . '%'))
+            ->when($request->filled('q'), fn ($q) => $q->where('name', 'like', '%'.$request->string('q').'%')
+                ->orWhere('email', 'like', '%'.$request->string('q').'%'))
             ->orderByDesc('created_at')
             ->paginate($request->integer('per_page', 25));
 
@@ -93,6 +93,11 @@ class AdminController extends Controller
             'clip_scoring_model' => ['sometimes', 'string', 'in:mock,openai,ollama,claude,gemini,nine_router'],
             'reaction_script_model' => ['sometimes', 'string', 'in:mock,openai,ollama,gemini,nine_router'],
             'tts_model' => ['sometimes', 'string', 'in:mock,openai,nine_router'],
+            // Daily content-idea generation for the research engine. Runtime-switchable
+            // like the models above, which matters more here than elsewhere: the
+            // research scheduler runs unattended, so a failing provider has to be
+            // swappable without a queue restart. See ContentIdeaProvider.
+            'content_idea_model' => ['sometimes', 'string', 'in:mock,openai,gemini,nine_router'],
             'default_clip_duration' => ['sometimes', 'integer', 'min:5', 'max:180'],
             'default_template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
             'max_clips_per_video' => ['sometimes', 'integer', 'min:1', 'max:50'],

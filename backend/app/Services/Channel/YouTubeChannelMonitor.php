@@ -79,7 +79,7 @@ class YouTubeChannelMonitor
      */
     public function fetchNewUploads(string $uploadsPlaylistId, ?CarbonInterface $since): array
     {
-        $response = Http::get(self::API_BASE . '/playlistItems', [
+        $response = Http::get(self::API_BASE.'/playlistItems', [
             'part' => 'snippet,contentDetails',
             'playlistId' => $uploadsPlaylistId,
             'maxResults' => 10,
@@ -87,7 +87,7 @@ class YouTubeChannelMonitor
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Failed to fetch channel uploads: ' . $response->body());
+            throw new RuntimeException('Failed to fetch channel uploads: '.$response->body());
         }
 
         $videos = collect($response->json('items', []))
@@ -97,7 +97,19 @@ class YouTubeChannelMonitor
                 return [
                     'video_id' => $item['contentDetails']['videoId'] ?? $snippet['resourceId']['videoId'] ?? null,
                     'title' => $snippet['title'] ?? 'Untitled',
-                    'published_at' => isset($snippet['publishedAt']) ? CarbonImmutable::parse($snippet['publishedAt']) : null,
+                    // Converted to the app's timezone, not left on the API's "Z".
+                    // ChannelWatch::last_video_published_at is where this ends up,
+                    // and Eloquent writes a Carbon to a datetime column by
+                    // formatting its wall clock verbatim — it does NOT convert to
+                    // the app timezone first — while reading it back always
+                    // interprets that wall clock AS the app timezone. So storing a
+                    // UTC-flavoured Carbon under a non-UTC app timezone silently
+                    // moves the instant (7h, for Asia/Jakarta), leaving every
+                    // watermark behind its real value and making the same uploads
+                    // look "new" on every single poll.
+                    'published_at' => isset($snippet['publishedAt'])
+                        ? CarbonImmutable::parse($snippet['publishedAt'])->setTimezone(config('app.timezone'))
+                        : null,
                 ];
             })
             ->filter(fn (array $v) => $v['video_id'] && $v['published_at'])
@@ -130,14 +142,14 @@ class YouTubeChannelMonitor
      */
     private function fetchDurations(array $videoIds): array
     {
-        $response = Http::get(self::API_BASE . '/videos', [
+        $response = Http::get(self::API_BASE.'/videos', [
             'part' => 'contentDetails',
             'id' => implode(',', $videoIds),
             'key' => $this->apiKey(),
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Failed to fetch video durations: ' . $response->body());
+            throw new RuntimeException('Failed to fetch video durations: '.$response->body());
         }
 
         return collect($response->json('items', []))
@@ -165,7 +177,7 @@ class YouTubeChannelMonitor
         }
 
         if (preg_match('#(?:youtube\.com/)?@([\w.-]+)#i', $input, $m)) {
-            return ['forHandle' => '@' . $m[1]];
+            return ['forHandle' => '@'.$m[1]];
         }
 
         if (preg_match('#youtube\.com/(?:c|user)/([\w.-]+)#i', $input, $m)) {
@@ -186,7 +198,7 @@ class YouTubeChannelMonitor
 
     private function fetchFirstChannel(array $params, bool $search = false): ?array
     {
-        $response = Http::get(self::API_BASE . ($search ? '/search' : '/channels'), [
+        $response = Http::get(self::API_BASE.($search ? '/search' : '/channels'), [
             ...$params,
             'part' => $search ? 'snippet' : 'snippet,contentDetails',
             'maxResults' => 1,
@@ -194,7 +206,7 @@ class YouTubeChannelMonitor
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('YouTube API request failed: ' . $response->body());
+            throw new RuntimeException('YouTube API request failed: '.$response->body());
         }
 
         return $response->json('items.0');

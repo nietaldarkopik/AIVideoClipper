@@ -1,11 +1,23 @@
 "use client";
 
 import { useCallback, useReducer } from "react";
-import type { CropKeyframe, Segment, TemplateLayer } from "@/lib/types";
+import type { AdditionalVideoClip, CropKeyframe, Segment, SubtitleCue, TemplateLayer } from "@/lib/types";
 
 export interface EditorSnapshot {
   segments: Segment[];
+  // Extra videos appended after the main clip's own segments — see
+  // AdditionalClipsPanel and RenderClipJob::renderAdditionalVideoClips().
+  additionalVideoClips: AdditionalVideoClip[];
   layers: TemplateLayer[];
+  // Clip-relative caption cues, seeded from the last render's transcript-derived
+  // ones (or the user's own saved edits). Part of the snapshot so retiming or
+  // rewording a caption undoes/redoes alongside every other timeline edit.
+  captionCues: SubtitleCue[];
+  // Whether the user has actually touched a caption yet. Only then does the
+  // editor persist `caption_cues` — saving them unconditionally would freeze
+  // captions for every clip the moment anyone pressed Save, permanently
+  // opting it out of transcript regeneration.
+  captionCuesDirty: boolean;
   cropMode: "smart" | "manual";
   // Single manual crop position (v1 scope — no multi-point manual pan yet, see
   // ManualCropEditor); still stored as a one-item keyframes array on save so the

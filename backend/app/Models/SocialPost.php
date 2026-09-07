@@ -19,10 +19,15 @@ class SocialPost extends Model
     public const STATUS_RETRYING = 'retrying';
     public const STATUS_CANCELLED = 'cancelled';
 
+    public const THUMBNAIL_STATUS_PENDING = 'pending';
+    public const THUMBNAIL_STATUS_UPLOADED = 'uploaded';
+    public const THUMBNAIL_STATUS_FAILED = 'failed';
+
     protected $fillable = [
         'clip_id', 'social_account_id', 'platform', 'title', 'caption', 'hashtags',
         'status', 'scheduled_at', 'published_at', 'post_url', 'external_post_id',
         'error_message', 'retry_count', 'metrics', 'metrics_synced_at',
+        'thumbnail_status', 'thumbnail_uploaded_at', 'thumbnail_error',
     ];
 
     protected $casts = [
@@ -31,6 +36,7 @@ class SocialPost extends Model
         'scheduled_at' => 'datetime',
         'published_at' => 'datetime',
         'metrics_synced_at' => 'datetime',
+        'thumbnail_uploaded_at' => 'datetime',
     ];
 
     public function clip(): BelongsTo

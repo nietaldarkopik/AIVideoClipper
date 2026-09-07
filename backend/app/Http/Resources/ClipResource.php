@@ -27,6 +27,7 @@ class ClipResource extends JsonResource
             'volume' => (float) $this->volume,
             'aspect_ratio' => $this->aspect_ratio,
             'segments' => $this->segments,
+            'additional_video_clips' => $this->additional_video_clips,
             'crop_config' => $this->crop_config,
             'scenes' => $this->scenes,
             'subtitle_language' => $this->subtitle_language,
@@ -35,6 +36,7 @@ class ClipResource extends JsonResource
             'custom_subtitle_format' => $this->custom_subtitle_path
                 ? strtolower(pathinfo($this->custom_subtitle_path, PATHINFO_EXTENSION))
                 : null,
+            'caption_cues' => $this->caption_cues,
             'layer_overrides' => $this->layer_overrides,
             'reaction_layout' => $this->reaction_layout,
             'reaction_script' => $this->reaction_script,
@@ -48,6 +50,16 @@ class ClipResource extends JsonResource
             'failure_reason' => $this->failure_reason,
             'url' => Media::url($this->output_path),
             'thumbnail_url' => Media::url($this->thumbnail_path),
+            'cover_template_id' => $this->cover_template_id,
+            'cover_template' => CoverTemplateResource::make($this->whenLoaded('coverTemplate')),
+            'cover_text' => $this->cover_text,
+            'cover_kicker' => $this->cover_kicker,
+            'cover_subline' => $this->cover_subline,
+            'cover_url' => Media::url($this->cover_path),
+            // Short thumbnail-text variants the analysis produced for this
+            // moment, offered as one-click alternatives in the Cover panel.
+            'cover_title_options' => $this->whenLoaded('clipCandidate', fn () => $this->clipCandidate?->cover_titles ?? []),
+            'cover_subtitle_options' => $this->whenLoaded('clipCandidate', fn () => $this->clipCandidate?->cover_subtitles ?? []),
             'srt_url' => $this->whenLoaded('subtitle', fn () => Media::url($this->subtitle?->srt_path)),
             'output_size_bytes' => $this->output_size_bytes,
             'rendered_at' => $this->rendered_at,

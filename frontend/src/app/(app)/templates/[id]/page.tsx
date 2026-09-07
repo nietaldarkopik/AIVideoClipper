@@ -18,12 +18,11 @@ import { LayerOverlay } from "@/components/clips/timeline/ClipVideoPreview";
 import { CanvasSizeField, nearestAspectRatio } from "@/components/templates/CanvasSizeField";
 import type { Template, TemplateConfig, TemplateLayer, VideoRegion } from "@/lib/types";
 
-// Bundled looping placeholder clip (frontend/public/sample-preview.mp4) so the
-// template builder's preview shows real moving footage — including how a zoom/
-// shake effect actually reads in motion — instead of a static gradient. Content-
-// neutral (an abstract animated gradient, not real footage) since there's no
-// per-template source video at this stage of editing.
-const SAMPLE_PREVIEW_VIDEO = "/sample-preview.mp4";
+// Bundled looping placeholder clip (frontend/public/sample-preview.mp4) — an
+// abstract animated gradient, not real footage — used only as a fallback if
+// the real demo source (below) fails to load, so the preview never goes
+// completely blank.
+const FALLBACK_PREVIEW_VIDEO = "/sample-preview.mp4";
 
 function hexToRgba(hex: string, opacity: number): string {
   const clean = hex.replace("#", "");
@@ -44,6 +43,16 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const { data, isLoading } = useApi<{ data: Template }>(key);
   const template = data?.data;
 
+  // Same footage TemplatePreviewService renders a real templates/{id}/preview.mp4
+  // from (see TemplateController::demoSource()) — playing it here too means the
+  // Live Preview reacts to a caption/layer/effect edit against real video
+  // immediately, without waiting on an FFmpeg re-render, and looks like what
+  // generate-preview will actually produce once queued.
+  const { data: demoSource } = useApi<{ url: string; start: number; duration: number; width: number; height: number }>(
+    "/templates/demo-source"
+  );
+  const previewSrc = demoSource?.url || FALLBACK_PREVIEW_VIDEO;
+
   const [resolutionWidth, setResolutionWidth] = useState(1080);
   const [resolutionHeight, setResolutionHeight] = useState(1920);
   const [caption, setCaption] = useState<NonNullable<TemplateConfig["caption"]>>({});
@@ -58,6 +67,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const [transitionDuration, setTransitionDuration] = useState(0.4);
   const [saving, setSaving] = useState(false);
   const [generatingCover, setGeneratingCover] = useState(false);
+  const [generatingPreview, setGeneratingPreview] = useState(false);
 
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [previewTime, setPreviewTime] = useState(0);
@@ -134,6 +144,19 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
       toast(err instanceof ApiError ? err.message : "Failed to generate cover.", "danger");
     } finally {
       setGeneratingCover(false);
+    }
+  }
+
+  async function handleGeneratePreview() {
+    setGeneratingPreview(true);
+    try {
+      await api.post(`/admin/templates/${templateId}/generate-preview`);
+      await mutate(key);
+      toast("Preview video queued — it'll appear on the template card shortly.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to queue preview.", "danger");
+    } finally {
+      setGeneratingPreview(false);
     }
   }
 
@@ -245,6 +268,15 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 <Sparkles className="size-3.5" />
                 {template.thumbnail_url ? "Regenerate Cover" : "Generate Cover"}
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGeneratePreview}
+                loading={generatingPreview || template.preview_status === "generating"}
+              >
+                <Sparkles className="size-3.5" />
+                {template.preview_url ? "Regenerate Preview" : "Generate Preview"}
+              </Button>
               <Button variant="outline" size="sm" onClick={handleArchive}>
                 <Archive className="size-3.5" />
                 Archive
@@ -272,10 +304,12 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
               }}
             >
               {/* Video region — full-bleed (inset-0) unless a custom area is set below.
-                  A bundled placeholder clip stands in for the eventual source video so
-                  effects/crop framing read as real motion; captions/layers are drawn on
-                  top at the same relative position they'd render on the final canvas
-                  (see FFmpegService::renderClip()'s videoRegion step: captions burn in
+                  Plays the same real demo footage TemplatePreviewService renders an
+                  actual preview.mp4 from (falls back to an abstract placeholder clip
+                  only if that fails to load) so effects/crop framing read as real
+                  motion; captions/layers are drawn on top at the same relative
+                  position they'd render on the final canvas (see
+                  FFmpegService::renderClip()'s videoRegion step: captions burn in
                   before the region crop, so they move/scale with the video box). */}
               <div
                 className="absolute overflow-hidden"
@@ -287,16 +321,33 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 }}
               >
                 <video
+                  key={previewSrc}
                   ref={previewVideoRef}
-                  src={SAMPLE_PREVIEW_VIDEO}
+                  src={previewSrc}
                   autoPlay
                   muted
-                  loop
+                  loop={!demoSource}
                   playsInline
                   className="h-full w-full object-cover"
                   style={{ animation: effectAnimation, transformOrigin: "center" }}
-                  onTimeUpdate={(e) => setPreviewTime(e.currentTarget.currentTime)}
-                  onLoadedMetadata={(e) => setPreviewDuration(e.currentTarget.duration || 6)}
+                  onLoadedMetadata={(e) => {
+                    if (demoSource) {
+                      e.currentTarget.currentTime = demoSource.start;
+                    }
+                    setPreviewDuration(demoSource?.duration || e.currentTarget.duration || 6);
+                  }}
+                  onTimeUpdate={(e) => {
+                    const t = e.currentTarget.currentTime;
+                    // Loop just the trimmed window the real preview render uses
+                    // (demoSource.start..start+duration), not the whole several-
+                    // minute source video, so this stays a short, representative
+                    // loop instead of wandering off into unrelated footage.
+                    if (demoSource && t >= demoSource.start + demoSource.duration) {
+                      e.currentTarget.currentTime = demoSource.start;
+                      return;
+                    }
+                    setPreviewTime(demoSource ? t - demoSource.start : t);
+                  }}
                 />
 
                 {behindCaptionLayers.length > 0 && (

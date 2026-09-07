@@ -97,6 +97,14 @@ class MockContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: $titles[array_rand($titles)],
                 suggestedCaption: $seg['text'],
                 hashtags: $hashtags,
+                // Thumbnail-length variants: the bank's titles trimmed to the
+                // same ceiling a real provider is asked to respect, so the
+                // cover flow behaves identically without an AI key.
+                coverTitles: ClipCandidateData::normalizeCoverStrings($titles, 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings(
+                    [strtoupper(str_replace('_', ' ', $type)), 'VIRAL', 'WAJIB TONTON'],
+                    18
+                ),
             );
         }
 

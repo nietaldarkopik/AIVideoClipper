@@ -13,12 +13,14 @@ class Template extends Model
 
     protected $fillable = [
         'template_category_id', 'created_by', 'name', 'slug', 'description',
-        'thumbnail_path', 'aspect_ratio', 'resolution_width', 'resolution_height',
+        'thumbnail_path', 'preview_path', 'preview_status', 'preview_generated_at',
+        'aspect_ratio', 'resolution_width', 'resolution_height',
         'status', 'current_version_id', 'is_system',
     ];
 
     protected $casts = [
         'is_system' => 'boolean',
+        'preview_generated_at' => 'datetime',
     ];
 
     public function category(): BelongsTo

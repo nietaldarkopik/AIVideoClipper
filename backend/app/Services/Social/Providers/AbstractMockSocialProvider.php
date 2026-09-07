@@ -17,7 +17,7 @@ abstract class AbstractMockSocialProvider implements SocialProvider
      * provider (TikTokProvider, YouTubeProvider, ...) once API keys are available —
      * everything downstream (publish jobs, controllers) only depends on the interface.
      */
-    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string
+    public function getAuthorizationUrl(?User $user, string $redirectUri, string $state): string
     {
         return sprintf(
             '%s/social-accounts/mock-connect?platform=%s&state=%s&redirect_uri=%s',
@@ -30,19 +30,19 @@ abstract class AbstractMockSocialProvider implements SocialProvider
 
     public function connect(User $user, array $payload): SocialAccount
     {
-        $username = $payload['username'] ?? Str::slug($payload['account_name'] ?? 'user' . random_int(1000, 9999));
-        $accountName = $payload['account_name'] ?? ('@' . $username);
+        $username = $payload['username'] ?? Str::slug($payload['account_name'] ?? 'user'.random_int(1000, 9999));
+        $accountName = $payload['account_name'] ?? ('@'.$username);
 
         return SocialAccount::updateOrCreate(
             [
                 'user_id' => $user->id,
                 'platform' => $this->platform(),
-                'external_account_id' => 'mock_' . $this->platform() . '_' . $username,
+                'external_account_id' => 'mock_'.$this->platform().'_'.$username,
             ],
             [
                 'account_name' => $accountName,
                 'username' => $username,
-                'avatar_url' => 'https://api.dicebear.com/9.x/initials/svg?seed=' . urlencode($accountName),
+                'avatar_url' => 'https://api.dicebear.com/9.x/initials/svg?seed='.urlencode($accountName),
                 'status' => SocialAccount::STATUS_CONNECTED,
                 'access_token' => Str::random(48),
                 'refresh_token' => Str::random(48),
@@ -53,8 +53,10 @@ abstract class AbstractMockSocialProvider implements SocialProvider
         );
     }
 
-    public function publish(SocialPost $post, string $videoFilePath): array
+    public function publish(SocialPost $post, string $videoFilePath, ?string $coverImagePath = null): array
     {
+        // Simulated platforms have no real thumbnail-upload API to exercise —
+        // $coverImagePath is accepted only to satisfy the interface.
         if (! file_exists($videoFilePath)) {
             return ['success' => false, 'error' => 'Rendered clip file not found.'];
         }

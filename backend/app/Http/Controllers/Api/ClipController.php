@@ -7,18 +7,22 @@ use App\Http\Resources\ClipResource;
 use App\Jobs\GenerateClipEmbeddingJob;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
+use App\Models\CoverTemplate;
+use App\Models\Template;
 use App\Services\AI\ClipSearchService;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\WebContentFetcher;
 use App\Services\Video\ClipCreditFormatter;
+use App\Services\Video\CoverGeneratorService;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\LayerOverrideMerger;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use ZipArchive;
@@ -91,6 +95,10 @@ class ClipController extends Controller
             'end_time' => ['sometimes', 'numeric', 'min:0'],
             'aspect_ratio' => ['sometimes', Rule::in(['9:16', '1:1', '16:9'])],
             'template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
+            'cover_template_id' => ['sometimes', 'nullable', 'exists:cover_templates,id'],
+            'cover_text' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'cover_kicker' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'cover_subline' => ['sometimes', 'nullable', 'string', 'max:40'],
             // See FFmpegService::renderClip()'s setpts/atempo (speed) and volume=
             // (volume) blocks — 1.0 is a no-op for both, matching every clip
             // before this feature.
@@ -99,11 +107,44 @@ class ClipController extends Controller
             'subtitles_enabled' => ['sometimes', 'boolean'],
             'subtitle_language' => ['sometimes', 'string', 'max:10'],
             'subtitle_config' => ['sometimes', 'array'],
+            // Hand-edited caption cues (clip-relative seconds), same shape as
+            // Subtitle::segments. Null/absent leaves captions transcript-driven,
+            // exactly as before this feature — see RenderClipJob::handle().
+            'caption_cues' => ['sometimes', 'nullable', 'array'],
+            'caption_cues.*.start' => ['required_with:caption_cues', 'numeric', 'min:0'],
+            'caption_cues.*.end' => ['required_with:caption_cues', 'numeric', 'min:0'],
+            'caption_cues.*.text' => ['required_with:caption_cues', 'string'],
+            'caption_cues.*.words' => ['sometimes', 'array'],
             'scenes' => ['sometimes', 'array'],
             'layer_overrides' => ['sometimes', 'nullable', 'array'],
             'segments' => ['sometimes', 'nullable', 'array'],
             'segments.*.start' => ['required_with:segments', 'numeric', 'min:0'],
             'segments.*.end' => ['required_with:segments', 'numeric', 'min:0'],
+            // The cut FROM whichever segment ends up immediately before this one
+            // (once segments are sorted by start) INTO this one — see
+            // FFmpegService::extractWithoutSilence()'s $transitions param and
+            // RenderClipJob::resolveSegments(), which is what carries this
+            // through the sort. Meaningless (and ignored) on a clip's first
+            // segment; 'none' or omitted is a hard cut, unchanged from before
+            // this feature.
+            'segments.*.transition_in' => ['sometimes', 'nullable', 'array'],
+            'segments.*.transition_in.type' => ['sometimes', Rule::in(['none', 'fade', 'dissolve'])],
+            'segments.*.transition_in.duration' => ['sometimes', 'numeric', 'min:0.05', 'max:3'],
+            // Extra video clips appended after the main clip, each cut from a
+            // DIFFERENT Video in the same project — see
+            // RenderClipJob::renderAdditionalVideoClips(). Scoped to this
+            // clip's own project so a request can't reference another
+            // project's (or another user's) video.
+            'additional_video_clips' => ['sometimes', 'nullable', 'array'],
+            'additional_video_clips.*.video_id' => [
+                'required', 'integer',
+                Rule::exists('videos', 'id')->where('project_id', $clip->project_id),
+            ],
+            'additional_video_clips.*.start' => ['required', 'numeric', 'min:0'],
+            'additional_video_clips.*.end' => ['required', 'numeric', 'min:0'],
+            'additional_video_clips.*.transition_in' => ['sometimes', 'nullable', 'array'],
+            'additional_video_clips.*.transition_in.type' => ['sometimes', Rule::in(['none', 'fade', 'dissolve'])],
+            'additional_video_clips.*.transition_in.duration' => ['sometimes', 'numeric', 'min:0.05', 'max:3'],
             'crop_config' => ['sometimes', 'nullable', 'array'],
             'reaction_script' => ['sometimes', 'nullable', 'string'],
             'intro_enabled' => ['sometimes', 'boolean'],
@@ -131,12 +172,22 @@ class ClipController extends Controller
             $data['intro_cover_path'] = null;
         }
 
-        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'scenes', 'layer_overrides', 'segments', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice', 'speed', 'volume'];
+        $reRenderFields = ['start_time', 'end_time', 'aspect_ratio', 'template_id', 'subtitles_enabled', 'subtitle_language', 'subtitle_config', 'caption_cues', 'scenes', 'layer_overrides', 'segments', 'additional_video_clips', 'crop_config', 'reaction_script', 'intro_enabled', 'outro_enabled', 'intro_voice', 'speed', 'volume'];
         $needsRerender = ! empty(array_intersect(array_keys($data), $reRenderFields));
 
         if (array_key_exists('template_id', $data)) {
-            $template = $data['template_id'] ? \App\Models\Template::find($data['template_id']) : null;
+            $template = $data['template_id'] ? Template::find($data['template_id']) : null;
             $data['template_version_id'] = $template?->current_version_id;
+
+            // The template is authoritative for render dimensions once attached —
+            // force aspect_ratio to match it rather than trusting whatever the
+            // request also sent for that field. A mismatched pair here is exactly
+            // what caused the crop-then-stretch distortion on render (crop
+            // detection shaped to one ratio, final scale to another) — see
+            // RenderClipJob's crop-detection calls and Clip::targetResolution().
+            if ($template) {
+                $data['aspect_ratio'] = $template->aspect_ratio;
+            }
         }
 
         // Multiple segments: start_time/end_time become the bounding envelope
@@ -232,7 +283,7 @@ class ClipController extends Controller
     public function previewConfig(Request $request, Clip $clip)
     {
         $this->authorizeClip($request, $clip);
-        $clip->load(['template', 'templateVersion']);
+        $clip->load(['template', 'templateVersion', 'subtitle']);
 
         $config = $clip->templateVersion?->config ?? DefaultTemplateConfig::config();
         $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
@@ -249,6 +300,16 @@ class ClipController extends Controller
                 // Raw template layers (no overrides), for the editor to diff edited
                 // layers against when computing what to save into layer_overrides.
                 'template_layers' => $config['layers'] ?? [],
+                // Cue text + per-word timing for the timeline's captions track,
+                // clip-relative seconds. Prefers the user's hand-edited cues over
+                // the last render's transcript-derived ones, so the editor always
+                // opens on exactly what the next render will burn in. Empty only
+                // when neither exists (clip never rendered and never edited).
+                'subtitle_cues' => $clip->caption_cues ?? $clip->subtitle?->segments ?? [],
+                // True once the cues above are user-owned: the editor shows a
+                // "reset to auto" affordance, and RenderClipJob stops rebuilding
+                // them from the transcript (which would silently discard edits).
+                'caption_cues_edited' => ! empty($clip->caption_cues),
             ],
         ]);
     }
@@ -370,6 +431,62 @@ class ClipController extends Controller
         return ClipResource::make($clip->fresh());
     }
 
+    /**
+     * Renders (or re-renders) this clip's social cover/thumbnail image — a
+     * frame grabbed from its own rendered output with a clickbait-style
+     * headline burned in per the chosen CoverTemplate (see
+     * CoverGeneratorService). Synchronous like TemplateController::
+     * generateThumbnail(): a single still-frame ffmpeg pass is fast enough
+     * not to need a queued job/progress UI, unlike a full clip render.
+     */
+    public function generateCover(Request $request, Clip $clip, CoverGeneratorService $covers)
+    {
+        $this->authorizeClip($request, $clip);
+
+        $data = $request->validate([
+            'cover_template_id' => ['sometimes', 'nullable', 'exists:cover_templates,id'],
+            'text' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'kicker' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'subline' => ['sometimes', 'nullable', 'string', 'max:40'],
+        ]);
+
+        // Persisted BEFORE rendering, for two reasons: CoverGeneratorService
+        // reads them straight off the clip so they apply to this same pass, and
+        // a render that fails (an unrendered clip, an ffmpeg error) must not
+        // throw away label text the user just typed.
+        $labels = [];
+        foreach (['kicker' => 'cover_kicker', 'subline' => 'cover_subline'] as $input => $column) {
+            if (array_key_exists($input, $data)) {
+                $labels[$column] = $data[$input] ?: null;
+            }
+        }
+        if ($labels) {
+            $clip->update($labels);
+        }
+
+        $coverTemplateId = array_key_exists('cover_template_id', $data) ? $data['cover_template_id'] : $clip->cover_template_id;
+        if (! $coverTemplateId) {
+            return response()->json(['message' => 'No cover template selected.'], 422);
+        }
+        $coverTemplate = CoverTemplate::findOrFail($coverTemplateId);
+
+        $text = array_key_exists('text', $data) ? $data['text'] : null;
+
+        try {
+            $relative = $covers->generate($clip->load('clipCandidate'), $coverTemplate, $text);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => 'Cover generation failed: '.$e->getMessage()], 422);
+        }
+
+        $clip->update([
+            'cover_template_id' => $coverTemplate->id,
+            'cover_text' => $text ?? $clip->cover_text ?? $clip->clipCandidate?->cover_titles[0] ?? $clip->clipCandidate?->hook_text ?? $clip->title,
+            'cover_path' => $relative,
+        ]);
+
+        return ClipResource::make($clip->fresh(['coverTemplate', 'clipCandidate']));
+    }
+
     public function duplicate(Request $request, Clip $clip)
     {
         $this->authorizeClip($request, $clip);
@@ -416,17 +533,17 @@ class ClipController extends Controller
             return response()->json(['message' => 'No completed clips matched.'], 422);
         }
 
-        $disk = \Illuminate\Support\Facades\Storage::disk('media');
-        $zipRelative = 'exports/' . $request->user()->id . '_' . now()->timestamp . '.zip';
+        $disk = Storage::disk('media');
+        $zipRelative = 'exports/'.$request->user()->id.'_'.now()->timestamp.'.zip';
         $zipFullPath = $disk->path($zipRelative);
         @mkdir(dirname($zipFullPath), 0775, true);
 
-        $zip = new ZipArchive();
+        $zip = new ZipArchive;
         $zip->open($zipFullPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
 
         foreach ($clips as $clip) {
             if ($clip->output_path && $disk->exists($clip->output_path)) {
-                $name = ($clip->title ? \Illuminate\Support\Str::slug($clip->title) : 'clip-' . $clip->id) . '.mp4';
+                $name = ($clip->title ? Str::slug($clip->title) : 'clip-'.$clip->id).'.mp4';
                 $zip->addFile($disk->path($clip->output_path), $name);
             }
         }
@@ -439,7 +556,7 @@ class ClipController extends Controller
     private function authorizeClip(Request $request, Clip $clip): void
     {
         if ($clip->project->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
     }
 }

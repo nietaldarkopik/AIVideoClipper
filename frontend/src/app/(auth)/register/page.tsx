@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input, Label } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
+import { TikTokLoginButton } from "@/components/auth/TikTokLoginButton";
 import { api, ApiError } from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import type { User } from "@/lib/types";
@@ -49,7 +50,17 @@ export default function RegisterPage() {
         <h1 className="text-lg font-semibold">Create your account</h1>
         <p className="mt-1 text-sm text-muted">Start turning long videos into clips.</p>
 
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+        <div className="mt-6">
+          <TikTokLoginButton label="Sign up with TikTok" />
+        </div>
+
+        <div className="my-5 flex items-center gap-3 text-xs text-muted">
+          <div className="h-px flex-1 bg-border-subtle" />
+          or
+          <div className="h-px flex-1 bg-border-subtle" />
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <Label htmlFor="name">Name</Label>
             <Input id="name" value={name} onChange={(e) => setName(e.target.value)} required />

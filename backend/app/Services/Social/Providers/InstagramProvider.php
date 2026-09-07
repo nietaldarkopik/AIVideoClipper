@@ -40,7 +40,7 @@ class InstagramProvider implements SocialProvider
         return 'Instagram';
     }
 
-    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string
+    public function getAuthorizationUrl(?User $user, string $redirectUri, string $state): string
     {
         throw new RuntimeException('Instagram does not use an OAuth redirect — connect with a username/password instead.');
     }
@@ -50,13 +50,13 @@ class InstagramProvider implements SocialProvider
         $username = $payload['username'] ?? throw new RuntimeException('Instagram username is required.');
         $password = $payload['password'] ?? throw new RuntimeException('Instagram password is required.');
 
-        $response = Http::timeout($this->timeout())->post($this->baseUrl() . '/login', [
+        $response = Http::timeout($this->timeout())->post($this->baseUrl().'/login', [
             'username' => $username,
             'password' => $password,
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Instagram automation service error: ' . $response->body());
+            throw new RuntimeException('Instagram automation service error: '.$response->body());
         }
 
         $result = $response->json();
@@ -73,10 +73,10 @@ class InstagramProvider implements SocialProvider
             [
                 'user_id' => $user->id,
                 'platform' => $this->platform(),
-                'external_account_id' => 'ig_' . $username,
+                'external_account_id' => 'ig_'.$username,
             ],
             [
-                'account_name' => '@' . $username,
+                'account_name' => '@'.$username,
                 'username' => $username,
                 'avatar_url' => null,
                 'status' => SocialAccount::STATUS_CONNECTED,
@@ -89,7 +89,7 @@ class InstagramProvider implements SocialProvider
         );
     }
 
-    public function publish(SocialPost $post, string $videoFilePath): array
+    public function publish(SocialPost $post, string $videoFilePath, ?string $coverImagePath = null): array
     {
         if (! file_exists($videoFilePath)) {
             return ['success' => false, 'error' => 'Rendered clip file not found.'];
@@ -97,17 +97,22 @@ class InstagramProvider implements SocialProvider
 
         $account = $post->socialAccount;
         $hashtags = collect($post->hashtags ?? [])->filter()->values();
-        $caption = trim(($post->caption ?? '') . "\n\n" . $hashtags->map(fn ($h) => '#' . ltrim($h, '#'))->implode(' '));
+        $caption = trim(($post->caption ?? '')."\n\n".$hashtags->map(fn ($h) => '#'.ltrim($h, '#'))->implode(' '));
 
-        $response = Http::timeout($this->timeout())->post($this->baseUrl() . '/publish', [
+        $response = Http::timeout($this->timeout())->post($this->baseUrl().'/publish', [
             'cookies' => json_decode($account->refresh_token ?? '[]', true),
             'video_path' => $videoFilePath,
+            // Best-effort: forwarded to the automation service so it can set a
+            // custom cover frame via Instagram's own upload UI if the script
+            // supports it — silently ignored server-side otherwise, same as
+            // any other extra field an older automation build doesn't read.
+            'cover_path' => $coverImagePath,
             'caption' => $caption,
             'username' => $account->username,
         ]);
 
         if ($response->failed()) {
-            return ['success' => false, 'error' => 'Instagram automation service error: ' . $response->body()];
+            return ['success' => false, 'error' => 'Instagram automation service error: '.$response->body()];
         }
 
         $result = $response->json();
@@ -154,7 +159,7 @@ class InstagramProvider implements SocialProvider
             return false;
         }
 
-        $response = Http::timeout($this->timeout())->post($this->baseUrl() . '/login', [
+        $response = Http::timeout($this->timeout())->post($this->baseUrl().'/login', [
             'username' => $account->username,
             'password' => $account->access_token,
         ]);

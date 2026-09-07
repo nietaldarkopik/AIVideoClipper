@@ -3,6 +3,7 @@
 namespace App\Services\Channel;
 
 use App\Models\ChannelWatch;
+use App\Models\VideoBatchItem;
 use App\Services\Batch\VideoBatchFactory;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -25,8 +26,7 @@ class ChannelWatchPoller
     public function __construct(
         private readonly YouTubeChannelMonitor $monitor,
         private readonly VideoBatchFactory $batchFactory,
-    ) {
-    }
+    ) {}
 
     public function pollOne(ChannelWatch $watch): void
     {
@@ -60,6 +60,30 @@ class ChannelWatchPoller
         ]);
 
         foreach ($videos as $video) {
+            // Belt-and-braces against re-importing something already taken in.
+            // The watermark is supposed to make this impossible, but it's a
+            // single timestamp comparison against a value that has to survive a
+            // round trip through the database — one timezone slip there (which
+            // is exactly what happened) turns every poll into a re-download of
+            // the same uploads, with a fresh project and a fresh 700MB file each
+            // time. This check is cheap and doesn't care WHY a duplicate slipped
+            // through. The watermark still advances below, so a skipped video
+            // stops being reconsidered instead of being re-examined forever.
+            if ($this->alreadyImported($watch, $video['url'])) {
+                Log::info('Channel watch: video already imported, skipping', [
+                    'channel_watch_id' => $watch->id,
+                    'video_id' => $video['video_id'],
+                    'video_url' => $video['url'],
+                ]);
+
+                $watch->update([
+                    'last_video_id' => $video['video_id'],
+                    'last_video_published_at' => $video['published_at'],
+                ]);
+
+                continue;
+            }
+
             try {
                 $batch = $this->batchFactory->createFromUrls(
                     $watch->user,
@@ -100,6 +124,24 @@ class ChannelWatchPoller
         }
 
         $watch->update(['last_checked_at' => now(), 'last_error' => null]);
+    }
+
+    /**
+     * Has this URL already been taken into this user's library, in any state?
+     *
+     * Checks batch ITEMS rather than finished Videos on purpose: an item exists
+     * from the moment a batch is created, so a video still downloading — or one
+     * whose download failed — counts as already imported. Otherwise a poll
+     * landing mid-download would queue the same video a second time, and a
+     * repeatedly-failing video would be retried forever on every poll.
+     * Scoped to the watch's own user so two users watching the same channel
+     * still each get their own copy.
+     */
+    private function alreadyImported(ChannelWatch $watch, string $url): bool
+    {
+        return VideoBatchItem::where('source_url', $url)
+            ->whereHas('videoBatch', fn ($q) => $q->where('user_id', $watch->user_id))
+            ->exists();
     }
 
     /**

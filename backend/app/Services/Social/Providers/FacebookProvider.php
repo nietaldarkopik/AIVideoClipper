@@ -37,7 +37,7 @@ class FacebookProvider implements SocialProvider
         return 'Facebook';
     }
 
-    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string
+    public function getAuthorizationUrl(?User $user, string $redirectUri, string $state): string
     {
         $query = http_build_query([
             'client_id' => $this->appId(),
@@ -47,7 +47,7 @@ class FacebookProvider implements SocialProvider
             'state' => $state,
         ]);
 
-        return sprintf(self::AUTH_URL, $this->graphVersion()) . '?' . $query;
+        return sprintf(self::AUTH_URL, $this->graphVersion()).'?'.$query;
     }
 
     public function connect(User $user, array $payload): SocialAccount
@@ -82,7 +82,7 @@ class FacebookProvider implements SocialProvider
         );
     }
 
-    public function publish(SocialPost $post, string $videoFilePath): array
+    public function publish(SocialPost $post, string $videoFilePath, ?string $coverImagePath = null): array
     {
         if (! file_exists($videoFilePath)) {
             return ['success' => false, 'error' => 'Rendered clip file not found.'];
@@ -92,19 +92,26 @@ class FacebookProvider implements SocialProvider
 
         $hashtags = collect($post->hashtags ?? [])->filter()->values();
         $description = trim(
-            ($post->title ? $post->title . "\n\n" : '') .
-            ($post->caption ?? '') . "\n\n" .
-            $hashtags->map(fn ($h) => '#' . ltrim($h, '#'))->implode(' ')
+            ($post->title ? $post->title."\n\n" : '').
+            ($post->caption ?? '')."\n\n".
+            $hashtags->map(fn ($h) => '#'.ltrim($h, '#'))->implode(' ')
         );
 
-        $response = Http::attach('source', fopen($videoFilePath, 'r'), basename($videoFilePath))
-            ->post($this->graphUrl("/{$account->external_account_id}/videos"), [
-                'access_token' => $account->access_token,
-                'description' => $description,
-            ]);
+        $request = Http::attach('source', fopen($videoFilePath, 'r'), basename($videoFilePath));
+        // `thumb` is a documented Graph API video field: a photo to use as this
+        // video's thumbnail (it also gets published as a regular Page photo —
+        // a known side effect of this field, not a bug here).
+        if ($coverImagePath && file_exists($coverImagePath)) {
+            $request = $request->attach('thumb', fopen($coverImagePath, 'r'), basename($coverImagePath));
+        }
+
+        $response = $request->post($this->graphUrl("/{$account->external_account_id}/videos"), [
+            'access_token' => $account->access_token,
+            'description' => $description,
+        ]);
 
         if ($response->failed()) {
-            return ['success' => false, 'error' => 'Facebook upload failed: ' . $response->body()];
+            return ['success' => false, 'error' => 'Facebook upload failed: '.$response->body()];
         }
 
         $videoId = $response->json('id');
@@ -134,7 +141,7 @@ class FacebookProvider implements SocialProvider
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Failed to fetch Facebook metrics: ' . $response->body());
+            throw new RuntimeException('Failed to fetch Facebook metrics: '.$response->body());
         }
 
         $data = $response->json();
@@ -199,7 +206,7 @@ class FacebookProvider implements SocialProvider
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Facebook token exchange failed: ' . $response->body());
+            throw new RuntimeException('Facebook token exchange failed: '.$response->body());
         }
 
         return $response->json('access_token') ?? throw new RuntimeException('Facebook did not return an access token.');
@@ -215,7 +222,7 @@ class FacebookProvider implements SocialProvider
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Failed to exchange for a long-lived Facebook token: ' . $response->body());
+            throw new RuntimeException('Failed to exchange for a long-lived Facebook token: '.$response->body());
         }
 
         return $response->json('access_token') ?? throw new RuntimeException('Facebook did not return a long-lived token.');
@@ -231,7 +238,7 @@ class FacebookProvider implements SocialProvider
         ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('Failed to fetch managed Facebook Pages: ' . $response->body());
+            throw new RuntimeException('Failed to fetch managed Facebook Pages: '.$response->body());
         }
 
         $pages = $response->json('data') ?? [];

@@ -23,8 +23,15 @@ class UrlVideoDownloader
         // outright, independent of the video/account requested) can't be fixed by
         // updating yt-dlp; only a different egress IP gets past it.
         private readonly ?string $proxy = null,
-    ) {
-    }
+        // Ceiling for the downloaded source's height. This matters more here than
+        // for a normal downloader: a 9:16 clip is cropped out of a 16:9 source, so
+        // only ~56% of the source's width survives and then gets scaled up to
+        // 1080x1920 — a 360p source ends up as a ~202px-wide strip stretched 5x.
+        // Capped rather than "always best" because 4K sources (usually AV1) are
+        // slow to decode in every ffmpeg pass this pipeline runs, for no visible
+        // gain once the result is a 1080x1920 clip.
+        private readonly int $maxHeight = 1440,
+    ) {}
 
     private function proxyArgs(): array
     {
@@ -32,8 +39,17 @@ class UrlVideoDownloader
     }
 
     /**
-     * @return list<string> e.g. ['android', 'tv', 'web'] — always at least one
-     * element so callers can always loop once even with no override configured.
+     * @return list<string> tried in order; '' means "pass no --extractor-args at
+     *                      all", i.e. let yt-dlp choose its own player clients.
+     *
+     * yt-dlp's own default always goes FIRST, and configured clients are only
+     * fallbacks for when that fails. Pinning a specific client used to be the
+     * default (android), which silently capped every YouTube download at 360p:
+     * YouTube now serves the android client a single progressive itag-18 stream
+     * and no adaptive formats at all, so the download "succeeded" on the first
+     * client and the loop never tried another. yt-dlp tracks which clients
+     * currently get served real formats; this list shouldn't second-guess it
+     * unless the default actually errors.
      */
     private function playerClients(): array
     {
@@ -42,7 +58,7 @@ class UrlVideoDownloader
             explode(',', (string) config('services.ytdlp.player_clients', ''))
         )));
 
-        return $clients ?: [''];
+        return ['', ...array_diff($clients, [''])];
     }
 
     /**
@@ -55,7 +71,7 @@ class UrlVideoDownloader
         }
 
         $destinationDir = rtrim($destinationDir, '/\\');
-        $outputTemplate = $destinationDir . DIRECTORY_SEPARATOR . 'source.%(ext)s';
+        $outputTemplate = $destinationDir.DIRECTORY_SEPARATOR.'source.%(ext)s';
 
         // Ask yt-dlp to print the title and channel/uploader name, tab-separated on
         // one line so they can't get split across separate --print events (yt-dlp's
@@ -79,7 +95,21 @@ class UrlVideoDownloader
             $this->ytDlpBin,
             '--no-playlist',
             '--ffmpeg-location', $this->ffmpegBin,
-            '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+            // Separate video+audio streams merged locally, falling back to a
+            // progressive stream only when no adaptive pair exists. Deliberately
+            // NOT restricted to [ext=mp4]+[ext=m4a] any more: YouTube only offers
+            // its higher resolutions as VP9/AV1 (webm) or with opus audio, so
+            // demanding mp4/m4a threw away every format above 360-720p and fell
+            // through to a progressive stream. The result is re-encoded by
+            // FFmpegService on every render anyway, so the source container and
+            // codec don't need to be web-friendly — only decodable.
+            '-f', 'bv*+ba/b',
+            // Preference order within that: cap the height (see $maxHeight),
+            // then prefer H.264 video and m4a audio so the merge below usually
+            // stays in a real mp4 rather than being remuxed to mkv. These are
+            // preferences, not filters — a video that only publishes VP9 at the
+            // wanted height still downloads at that height.
+            '-S', "res:{$this->maxHeight},vcodec:h264,acodec:m4a",
             '--merge-output-format', 'mp4',
             '--print', "after_move:%(title)s\t%(channel,uploader|)s",
             '-o', $outputTemplate,
@@ -120,7 +150,7 @@ class UrlVideoDownloader
                 $result = Process::timeout(900)->run($command);
 
                 $videoCandidates = array_filter(
-                    glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*') ?: [],
+                    glob($destinationDir.DIRECTORY_SEPARATOR.'source.*') ?: [],
                     fn (string $f) => in_array(strtolower(pathinfo($f, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true)
                 );
 
@@ -162,7 +192,7 @@ class UrlVideoDownloader
                     continue 2;
                 }
 
-                throw new RuntimeException('Failed to import video from URL: ' . $lastErrorText);
+                throw new RuntimeException('Failed to import video from URL: '.$lastErrorText);
             }
         }
 
@@ -243,7 +273,7 @@ class UrlVideoDownloader
 
             $result = Process::timeout(90)->run($command);
 
-            if (! empty(glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*.srt'))) {
+            if (! empty(glob($destinationDir.DIRECTORY_SEPARATOR.'source.*.srt'))) {
                 return;
             }
 
@@ -266,7 +296,7 @@ class UrlVideoDownloader
      */
     private function findCaptions(string $destinationDir): ?array
     {
-        $files = glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*.srt') ?: [];
+        $files = glob($destinationDir.DIRECTORY_SEPARATOR.'source.*.srt') ?: [];
         if (empty($files)) {
             return null;
         }

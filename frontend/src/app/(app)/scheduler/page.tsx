@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { mutate } from "swr";
-import { ArrowLeftRight, ArrowUpToLine, CalendarClock, CalendarDays, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, CalendarClock, CalendarDays, ImageUp, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -13,6 +13,7 @@ import { Select } from "@/components/ui/Input";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Pagination } from "@/components/ui/Pagination";
 import { PLATFORM_LABELS, PLATFORMS } from "@/components/social/platforms";
 import { NewScheduleModal } from "@/components/scheduler/NewScheduleModal";
 import { EditScheduleModal } from "@/components/scheduler/EditScheduleModal";
@@ -22,6 +23,50 @@ import { MoveChannelModal } from "@/components/scheduler/MoveChannelModal";
 import { SchedulerCalendar } from "@/components/scheduler/SchedulerCalendar";
 import { SchedulerWeekView } from "@/components/scheduler/SchedulerWeekView";
 import type { Paginated, Project, SocialAccount, SocialPost } from "@/lib/types";
+
+// Mirrors what SocialPostController::index() accepts as sort_by.
+type SortKey = "scheduled_at" | "published_at" | "status" | "channel";
+
+/**
+ * A column header that sorts the table server-side. Defined at module scope
+ * rather than inside the page component on purpose: the page re-renders every
+ * 20s on its own SWR refresh, and a component redeclared each render remounts
+ * its whole subtree — which would drop keyboard focus off a header mid-use.
+ */
+function SortableHeader({
+  label,
+  column,
+  sortBy,
+  sortDir,
+  onSort,
+}: {
+  label: string;
+  column: SortKey;
+  sortBy: SortKey;
+  sortDir: "asc" | "desc";
+  onSort: (column: SortKey) => void;
+}) {
+  const active = sortBy === column;
+
+  return (
+    <th className="px-4 py-3 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className={
+          "group flex cursor-pointer items-center gap-1 " + (active ? "text-foreground" : "hover:text-foreground")
+        }
+      >
+        {label}
+        {active ? (
+          sortDir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />
+        ) : (
+          <ArrowUpDown className="size-3 opacity-0 transition-opacity group-hover:opacity-60" />
+        )}
+      </button>
+    </th>
+  );
+}
 
 export default function SchedulerPage() {
   const [view, setView] = useState<"table" | "month" | "week">("table");
@@ -45,6 +90,17 @@ export default function SchedulerPage() {
   // the current filters narrow the table down to" instead — see
   // handleOpenMoveChannel().
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Table-only pagination. Week/Month don't need it: their fetch is already
+  // bounded by the visible date range (see visibleRange above), whereas the
+  // table has no inherent range and used to just take the first 500 rows —
+  // silently hiding everything past that once an account had enough history.
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(25);
+  // Table-only, and applied server-side: the table pages through thousands of
+  // rows, so sorting has to happen before pagination or it would only reorder
+  // the 25 rows already on screen.
+  const [sortBy, setSortBy] = useState<SortKey>("scheduled_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const { data: projectsRes } = useApi<Paginated<Project>>("/projects?per_page=100");
   const { data: accountsRes } = useApi<{ data: SocialAccount[] }>("/social-accounts");
@@ -55,13 +111,15 @@ export default function SchedulerPage() {
   }, [accountsRes]);
 
   const key = useMemo(() => {
-    // Table has no inherent date range, so it's still a fixed-size fetch —
-    // sorted by scheduled_at server-side now (see SocialPostController::index()),
-    // so at least the soonest-upcoming posts are the ones that win the cap.
-    // Week/Month ARE a bounded range, so scoping the fetch to it (once the
-    // child has reported it) means those views never truncate regardless of
-    // how large the account's total history grows.
-    const params = new URLSearchParams({ per_page: view === "table" ? "500" : "300" });
+    // Table pages through the full result set (sorted by scheduled_at
+    // server-side — see SocialPostController::index()). Week/Month instead
+    // fetch one bounded date range in full, so they never truncate regardless
+    // of how large the account's total history grows.
+    const params = new URLSearchParams(
+      view === "table"
+        ? { per_page: String(perPage), page: String(page), sort_by: sortBy, sort_dir: sortDir }
+        : { per_page: "300" }
+    );
     if (projectFilter) params.set("project_id", projectFilter);
     if (platformFilter) params.set("platform", platformFilter);
     if (accountFilter) params.set("social_account_id", accountFilter);
@@ -71,13 +129,36 @@ export default function SchedulerPage() {
       params.set("scheduled_to", visibleRange.to);
     }
     return `/social-posts?${params.toString()}`;
-  }, [view, projectFilter, platformFilter, accountFilter, statusFilter, visibleRange]);
+  }, [view, page, perPage, sortBy, sortDir, projectFilter, platformFilter, accountFilter, statusFilter, visibleRange]);
+
+  // Called by every control that changes WHAT the table lists (filters, sort,
+  // page size, view). Two things have to reset together:
+  //   - the page, because staying on page 12 of a result that now has 3 pages
+  //     just renders an empty table;
+  //   - the selection, because every bulk action acts on the rows currently in
+  //     front of you, so stale checkboxes would show a count those actions
+  //     won't actually honour.
+  // Done here in the handlers rather than in an effect watching the filters:
+  // syncing state to state through an effect costs an extra render and trips
+  // react-hooks/set-state-in-effect.
+  function resetListing() {
+    setPage(1);
+    setSelectedIds(new Set());
+  }
 
   const { data, isLoading } = useApi<Paginated<SocialPost>>(key, { refreshInterval: 20000 });
-  const posts = useMemo(
-    () => [...(data?.data ?? [])].sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? "")),
-    [data]
-  );
+  const posts = useMemo(() => {
+    const rows = data?.data ?? [];
+
+    // The table's order comes from the server (see SocialPostController::index's
+    // sort_by/sort_dir) — re-sorting here would silently undo it and only ever
+    // reorder the current page anyway. Week/Month fetch one whole date range
+    // instead of a page, so sorting those client-side is free and keeps their
+    // day columns in time order.
+    return view === "table"
+      ? rows
+      : [...rows].sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
+  }, [data, view]);
 
   function refresh() {
     mutate(key);
@@ -104,6 +185,19 @@ export default function SchedulerPage() {
       toast("Retry queued.", "success");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to retry.", "danger");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRetryThumbnail(postId: number) {
+    setBusyId(postId);
+    try {
+      await api.post(`/social-posts/${postId}/retry-thumbnail`);
+      refresh();
+      toast("Reuploading thumbnail.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reupload thumbnail.", "danger");
     } finally {
       setBusyId(null);
     }
@@ -249,6 +343,47 @@ export default function SchedulerPage() {
     return labels;
   }, [projectFilter, platformFilter, accountFilter, statusFilter, projectsRes, accountsRes]);
 
+  const [deletingBulk, setDeletingBulk] = useState(false);
+
+  async function handleBulkDelete() {
+    const idsToDelete = usingSelectionForMove ? Array.from(selectedIds) : eligibleForBulk.map((p) => p.id);
+    if (idsToDelete.length === 0) {
+      toast("Nothing eligible to delete.", "danger");
+      return;
+    }
+    if (!confirm(`Are you sure you want to delete ${idsToDelete.length} scheduled post(s)?`)) return;
+
+    setDeletingBulk(true);
+    try {
+      const res = await api.post<{ message: string; deleted_count: number }>("/social-posts/bulk-delete", {
+        social_post_ids: idsToDelete,
+      });
+      setSelectedIds(new Set());
+      refresh();
+      toast(res.message, "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to bulk delete schedules.", "danger");
+    } finally {
+      setDeletingBulk(false);
+    }
+  }
+
+  // Clicking the active column flips its direction; a new column starts from
+  // the direction that's actually useful for it — dates read newest-first,
+  // names and statuses read A-Z.
+  function handleSort(column: SortKey) {
+    // Reordering makes the current page number meaningless (page 12 of the old
+    // order has nothing to do with page 12 of the new one), so this resets too.
+    resetListing();
+
+    if (sortBy === column) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortBy(column);
+    setSortDir(column === "published_at" ? "desc" : "asc");
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -257,6 +392,12 @@ export default function SchedulerPage() {
           <p className="mt-1 text-sm text-muted">All scheduled clip publishes, across every project and channel.</p>
         </div>
         <div className="flex items-center gap-2">
+          {(selectedIds.size > 0 || eligibleForBulk.length > 0) && (
+            <Button variant="danger" onClick={handleBulkDelete} loading={deletingBulk}>
+              <Trash2 className="size-4" />
+              {selectedIds.size > 0 ? `Delete ${selectedIds.size}` : "Delete All Visible"}
+            </Button>
+          )}
           <Button variant="outline" onClick={handleOpenMoveChannel}>
             <ArrowLeftRight className="size-4" />
             {selectedIds.size > 0 ? `Move ${selectedIds.size} to Channel` : "Move to Channel"}
@@ -275,7 +416,7 @@ export default function SchedulerPage() {
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2 rounded-lg bg-surface-elevated p-0.5 w-fit">
           <button
-            onClick={() => setView("table")}
+            onClick={() => { setView("table"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
               (view === "table" ? "bg-accent text-white" : "text-muted hover:text-foreground")
@@ -285,7 +426,7 @@ export default function SchedulerPage() {
             Table
           </button>
           <button
-            onClick={() => setView("month")}
+            onClick={() => { setView("month"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
               (view === "month" ? "bg-accent text-white" : "text-muted hover:text-foreground")
@@ -295,7 +436,7 @@ export default function SchedulerPage() {
             Month
           </button>
           <button
-            onClick={() => setView("week")}
+            onClick={() => { setView("week"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
               (view === "week" ? "bg-accent text-white" : "text-muted hover:text-foreground")
@@ -306,7 +447,7 @@ export default function SchedulerPage() {
           </button>
         </div>
 
-        <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-auto">
+        <Select value={projectFilter} onChange={(e) => { setProjectFilter(e.target.value); resetListing(); }} className="w-auto">
           <option value="">All projects</option>
           {(projectsRes?.data ?? []).map((p) => (
             <option key={p.id} value={p.id}>
@@ -315,7 +456,7 @@ export default function SchedulerPage() {
           ))}
         </Select>
 
-        <Select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)} className="w-auto">
+        <Select value={platformFilter} onChange={(e) => { setPlatformFilter(e.target.value); resetListing(); }} className="w-auto">
           <option value="">All platforms</option>
           {PLATFORMS.map((p) => (
             <option key={p} value={p}>
@@ -324,7 +465,7 @@ export default function SchedulerPage() {
           ))}
         </Select>
 
-        <Select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)} className="w-auto">
+        <Select value={accountFilter} onChange={(e) => { setAccountFilter(e.target.value); resetListing(); }} className="w-auto">
           <option value="">All specific channels</option>
           {Object.entries(accountsByPlatform).map(([platform, accounts]) => (
             <optgroup key={platform} label={PLATFORM_LABELS[platform] ?? platform}>
@@ -337,7 +478,7 @@ export default function SchedulerPage() {
           ))}
         </Select>
 
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-auto">
+        <Select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); resetListing(); }} className="w-auto">
           <option value="">All statuses</option>
           {["ready", "scheduled", "publishing", "published", "failed", "retrying", "cancelled"].map((s) => (
             <option key={s} value={s}>
@@ -372,17 +513,34 @@ export default function SchedulerPage() {
           />
         </Card>
       ) : posts.length === 0 ? (
-        <EmptyState
-          icon={<CalendarClock className="size-6" />}
-          title="No schedules yet"
-          description="Schedule a finished clip to publish to one or more channels at a set time."
-          action={
-            <Button size="sm" onClick={() => setNewOpen(true)}>
-              <Plus className="size-4" />
-              New Schedule
-            </Button>
-          }
-        />
+        // Past page 1 an empty result means the rows moved/were deleted out from
+        // under this page, not that there's nothing scheduled — offering "New
+        // Schedule" there would be misleading, and without a way back the table
+        // would look permanently empty.
+        page > 1 ? (
+          <EmptyState
+            icon={<CalendarClock className="size-6" />}
+            title="Nothing on this page"
+            description="These posts were rescheduled or removed. Go back to the first page to see what's left."
+            action={
+              <Button size="sm" onClick={() => setPage(1)}>
+                Back to first page
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<CalendarClock className="size-6" />}
+            title="No schedules yet"
+            description="Schedule a finished clip to publish to one or more channels at a set time."
+            action={
+              <Button size="sm" onClick={() => setNewOpen(true)}>
+                <Plus className="size-4" />
+                New Schedule
+              </Button>
+            }
+          />
+        )
       ) : (
         <Card className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -399,9 +557,23 @@ export default function SchedulerPage() {
                 </th>
                 <th className="px-4 py-3 font-medium">Clip</th>
                 <th className="px-4 py-3 font-medium">Project</th>
-                <th className="px-4 py-3 font-medium">Channel</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Publish at</th>
+                {(
+                  [
+                    ["Channel", "channel"],
+                    ["Status", "status"],
+                    ["Publish at", "scheduled_at"],
+                    ["Published at", "published_at"],
+                  ] as const
+                ).map(([label, column]) => (
+                  <SortableHeader
+                    key={column}
+                    label={label}
+                    column={column}
+                    sortBy={sortBy}
+                    sortDir={sortDir}
+                    onSort={handleSort}
+                  />
+                ))}
                 <th className="px-4 py-3 font-medium text-right">Actions</th>
               </tr>
             </thead>
@@ -474,6 +646,16 @@ export default function SchedulerPage() {
                         })
                       : "--"}
                   </td>
+                  <td className="px-4 py-3 text-muted">
+                    {post.published_at
+                      ? new Date(post.published_at).toLocaleString([], {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })
+                      : "--"}
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1.5">
                       {!["published", "uploading", "publishing"].includes(post.status) && (
@@ -505,6 +687,21 @@ export default function SchedulerPage() {
                           <RotateCcw className="size-3.5" />
                         </button>
                       )}
+                      {post.platform === "youtube" && post.status === "published" && post.thumbnail_status !== "uploaded" && (
+                        <button
+                          onClick={() => handleRetryThumbnail(post.id)}
+                          disabled={busyId === post.id}
+                          title={
+                            post.thumbnail_error ??
+                            (post.thumbnail_status === "failed"
+                              ? "Thumbnail upload failed — reupload"
+                              : "Reupload thumbnail")
+                          }
+                          className="rounded-lg p-1.5 text-muted hover:bg-white/5 hover:text-foreground cursor-pointer disabled:opacity-50"
+                        >
+                          <ImageUp className="size-3.5" />
+                        </button>
+                      )}
                       {!["published", "uploading", "publishing"].includes(post.status) && (
                         <button
                           onClick={() => handleRegenerate(post.id)}
@@ -532,6 +729,18 @@ export default function SchedulerPage() {
               })}
             </tbody>
           </table>
+
+          {data?.meta && data.meta.last_page > 0 && (
+            <Pagination
+              page={data.meta.current_page}
+              lastPage={data.meta.last_page}
+              total={data.meta.total}
+              perPage={perPage}
+              onPageChange={(p) => { setPage(p); setSelectedIds(new Set()); }}
+              onPerPageChange={(n) => { setPerPage(n); resetListing(); }}
+              itemLabel="scheduled posts"
+            />
+          )}
         </Card>
       )}
 

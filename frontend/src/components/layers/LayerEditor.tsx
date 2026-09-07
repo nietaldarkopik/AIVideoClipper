@@ -1,66 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, Plus, Trash2, Type, Image as ImageIcon, Music, BarChart3, PictureInPicture, Square } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Trash2, Type } from "lucide-react";
 import { clsx } from "clsx";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Select } from "@/components/ui/Input";
 import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
+import { LAYER_ICONS, LAYER_LABELS, layerLabel, newLayer } from "@/lib/layers";
 import type { LayerType, TemplateLayer } from "@/lib/types";
-
-const LAYER_ICONS: Record<LayerType, typeof Type> = {
-  text: Type,
-  image: ImageIcon,
-  logo: ImageIcon,
-  pip_video: PictureInPicture,
-  audio: Music,
-  progress_bar: BarChart3,
-  rect: Square,
-};
-
-const LAYER_LABELS: Record<LayerType, string> = {
-  text: "Text",
-  image: "Image",
-  logo: "Logo",
-  pip_video: "Picture-in-picture",
-  audio: "Background audio",
-  progress_bar: "Progress bar",
-  rect: "Color bar",
-};
-
-function newLayer(type: LayerType, nextZIndex: number): TemplateLayer {
-  const id = `${type}-${(globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)).slice(0, 8)}`;
-  const base: TemplateLayer = {
-    id,
-    type,
-    z_index: nextZIndex,
-    x: 0.5,
-    y: type === "progress_bar" ? 0 : 0.1,
-    opacity: 1,
-    timing: { start: 0, end: null },
-    props: {},
-  };
-
-  if (type === "text") base.props = { content: "New text", font_size: 48, color: "#FFFFFF", align: "center" };
-  if (type === "image" || type === "logo") base.props = { image_path: "" };
-  if (type === "audio") base.props = { audio_path: "", volume: 0.3, fade_in: 1, fade_out: 1 };
-  if (type === "progress_bar") base.props = { color: "#7C5CFF", background_color: "#000000", height_px: 6, position: "bottom" };
-  if (type === "rect") {
-    base.x = 0;
-    base.y = 0;
-    base.width = 1;
-    base.height = 0.15;
-    base.props = { color: "#000000" };
-  }
-
-  return base;
-}
-
-function layerLabel(layer: TemplateLayer): string {
-  const props = layer.props as { content?: string; image_path?: string; audio_path?: string } | undefined;
-  return props?.content || props?.image_path || props?.audio_path || LAYER_LABELS[layer.type] || layer.type;
-}
 
 export function LayerEditor({
   layers,
@@ -182,7 +130,11 @@ export function LayerEditor({
         <div className="flex items-center gap-2">
           <Select value={addType} onChange={(e) => setAddType(e.target.value as LayerType)} className="w-auto">
             {(Object.keys(LAYER_LABELS) as LayerType[])
-              .filter((t) => t !== "pip_video")
+              // effect/filter are layers too, but the clip editor gives them
+              // their own rail sections (and the template editor has no UI for
+              // them yet) — offering them here as well would give one object two
+              // places to be created from.
+              .filter((t) => t !== "pip_video" && t !== "effect" && t !== "filter")
               .map((t) => (
                 <option key={t} value={t}>
                   {LAYER_LABELS[t]}

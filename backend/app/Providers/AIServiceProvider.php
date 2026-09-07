@@ -5,32 +5,36 @@ namespace App\Providers;
 use App\Models\Setting;
 use App\Services\AI\Claude\ClaudeContentAnalysisProvider;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
+use App\Services\AI\Contracts\ContentIdeaProvider;
 use App\Services\AI\Contracts\EmbeddingProvider;
 use App\Services\AI\Contracts\ImageGenerationProvider;
+use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\ReframingProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
+use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\Contracts\VideoNarrativeProvider;
 use App\Services\AI\Contracts\WebFetchProvider;
 use App\Services\AI\Contracts\WebSearchProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
+use App\Services\AI\Gemini\GeminiContentIdeaProvider;
 use App\Services\AI\Gemini\GeminiReactionScriptProvider;
 use App\Services\AI\Groq\GroqTranscriptionProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
+use App\Services\AI\Mock\MockContentIdeaProvider;
 use App\Services\AI\Mock\MockEmbeddingProvider;
 use App\Services\AI\Mock\MockImageGenerationProvider;
+use App\Services\AI\Mock\MockReactionScriptProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
+use App\Services\AI\Mock\MockTextToSpeechProvider;
 use App\Services\AI\Mock\MockTranscriptionProvider;
 use App\Services\AI\Mock\MockVideoNarrativeProvider;
 use App\Services\AI\Mock\MockWebFetchProvider;
 use App\Services\AI\Mock\MockWebSearchProvider;
-use App\Services\AI\Contracts\ReactionScriptProvider;
-use App\Services\AI\Contracts\TextToSpeechProvider;
-use App\Services\AI\Mock\MockReactionScriptProvider;
-use App\Services\AI\Mock\MockTextToSpeechProvider;
 use App\Services\AI\NineRouter\NineRouterContentAnalysisProvider;
+use App\Services\AI\NineRouter\NineRouterContentIdeaProvider;
 use App\Services\AI\NineRouter\NineRouterEmbeddingProvider;
 use App\Services\AI\NineRouter\NineRouterImageGenerationProvider;
 use App\Services\AI\NineRouter\NineRouterReactionScriptProvider;
@@ -44,6 +48,7 @@ use App\Services\AI\Ollama\OllamaContentAnalysisProvider;
 use App\Services\AI\Ollama\OllamaReactionScriptProvider;
 use App\Services\AI\Ollama\OllamaSocialMetadataProvider;
 use App\Services\AI\OpenAI\OpenAIContentAnalysisProvider;
+use App\Services\AI\OpenAI\OpenAIContentIdeaProvider;
 use App\Services\AI\OpenAI\OpenAIReactionScriptProvider;
 use App\Services\AI\OpenAI\OpenAISocialMetadataProvider;
 use App\Services\AI\OpenAI\OpenAITextToSpeechProvider;
@@ -83,6 +88,7 @@ class AIServiceProvider extends ServiceProvider
                 ytDlpBin: config('services.media.ytdlp_bin', 'yt-dlp'),
                 ffmpegBin: config('services.media.ffmpeg_bin', 'ffmpeg'),
                 proxy: config('services.ytdlp.proxy'),
+                maxHeight: (int) config('services.ytdlp.max_height', 1440),
             );
         });
 
@@ -279,6 +285,32 @@ class AIServiceProvider extends ServiceProvider
                     (string) config('services.nine_router.web_search_model'),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_WEB_SEARCH_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(ContentIdeaProvider::class, function ($app) {
+            // DB override so an admin can switch the idea generator from the settings
+            // panel without touching .env — same reasoning as the bindings above. The
+            // research scheduler runs unattended, so being able to swap a failing
+            // provider without a queue restart matters more here than elsewhere.
+            $provider = Setting::get('content_idea_model', config('services.ai.content_idea_provider', 'mock'));
+
+            return match ($provider) {
+                'mock' => $app->make(MockContentIdeaProvider::class),
+                'openai' => new OpenAIContentIdeaProvider(
+                    (string) config('services.openai.api_key'),
+                    (string) config('services.openai.chat_model', 'gpt-4o-mini'),
+                ),
+                'gemini' => new GeminiContentIdeaProvider(
+                    (string) config('services.gemini.api_key'),
+                    (string) config('services.gemini.model', 'gemini-2.5-flash'),
+                ),
+                'nine_router' => new NineRouterContentIdeaProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) (config('services.nine_router.content_idea_model') ?: config('services.nine_router.model')),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_CONTENT_IDEA_PROVIDER [{$provider}]. Valid values: mock, openai, gemini, nine_router."),
             };
         });
 

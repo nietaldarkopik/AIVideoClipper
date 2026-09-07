@@ -22,8 +22,7 @@ class ClipGenerationService
 {
     public function __construct(
         private readonly ReactionScriptProvider $reactionScripts,
-    ) {
-    }
+    ) {}
 
     /**
      * @param  array{candidate_ids?: array<int, int>, mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool, webcam_path?: ?string, reaction_layout?: ?string}  $data
@@ -70,10 +69,28 @@ class ClipGenerationService
                 'title' => $candidate->suggested_title,
                 'caption' => ClipCreditFormatter::append($candidate->suggested_caption, $candidate->video?->channelName()),
                 'hashtags' => $candidate->suggested_hashtags,
+                // The first of the AI's thumbnail-length variants (see
+                // ClipCandidateData::coverPromptInstructions()) becomes this
+                // clip's cover text, so a generated cover is already
+                // eye-catching without anyone opening the Cover tab — the other
+                // variants stay on the candidate for one-click swapping there.
+                // Falls back to the caption-length title only if the analysis
+                // predates this feature.
+                'cover_text' => $candidate->cover_titles[0] ?? $candidate->suggested_title,
+                'cover_kicker' => $candidate->cover_subtitles[0] ?? null,
+                'cover_subline' => $candidate->cover_subtitles[1] ?? null,
                 'start_time' => $candidate->start_time,
                 'end_time' => $candidate->end_time,
                 'duration' => $candidate->duration,
-                'aspect_ratio' => $data['aspect_ratio'] ?? $template?->aspect_ratio ?? '9:16',
+                // The template is authoritative once one is selected — its own
+                // aspect_ratio/resolution is what actually drives render
+                // dimensions (see Clip::targetResolution() and RenderClipJob),
+                // so a clip must never end up with an aspect_ratio that
+                // disagrees with its template (that mismatch is what caused
+                // the crop-then-stretch distortion this field ordering fixes).
+                // The request's aspect_ratio is only ever a template FILTER on
+                // the frontend, never an independent render parameter.
+                'aspect_ratio' => $template?->aspect_ratio ?? $data['aspect_ratio'] ?? '9:16',
                 'subtitle_language' => $data['subtitle_language'] ?? 'en',
                 'subtitles_enabled' => $data['subtitles_enabled'] ?? true,
                 'webcam_path' => $data['webcam_path'] ?? null,

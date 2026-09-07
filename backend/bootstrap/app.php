@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\EnsureUserIsAdmin;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
@@ -32,10 +33,20 @@ return Application::configure(basePath: dirname(__DIR__))
         // a network-bound poll across many channels is more likely to run long than the
         // 5-minute reap job is; runInBackground() for the same reason as above.
         $schedule->command('channels:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+
+        // See App\Console\Commands\DailyContentResearch. Hourly rather than at a fixed
+        // daily time on purpose: each content channel stores its own research times in
+        // its own timezone (one channel at 06:00, another at 06:00/12:00/18:00/21:00),
+        // so this tick only asks "who is due now" and the schedule itself stays in the
+        // database, editable from the UI. Same schedule:work caveat as the two above.
+        // The command only dispatches queued jobs, so it returns fast — but
+        // withoutOverlapping() still guards against a slow database making two ticks
+        // race and double-dispatch the same channel.
+        $schedule->command('research:daily')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
-            'admin' => \App\Http\Middleware\EnsureUserIsAdmin::class,
+            'admin' => EnsureUserIsAdmin::class,
         ]);
 
         // This app has no login page (routes/web.php is just the placeholder

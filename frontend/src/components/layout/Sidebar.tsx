@@ -7,6 +7,7 @@ import {
   LayoutGrid,
   FolderKanban,
   LayoutTemplate,
+  Image as ImageIcon,
   TrendingUp,
   Scissors,
   Share2,
@@ -18,6 +19,7 @@ import {
   Bot,
   Rss,
   Lightbulb,
+  Radar,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { LogOut } from "lucide-react";
@@ -30,8 +32,12 @@ const primaryNav = [
   { href: "/batches", label: "Batch Autobot", icon: Bot },
   { href: "/channels", label: "Channels", icon: Rss },
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
+  { href: "/cover-templates", label: "Cover Templates", icon: ImageIcon },
   { href: "/trending", label: "Trending", icon: TrendingUp },
   { href: "/content-briefs", label: "Riset Konten", icon: Lightbulb },
+  // Content Research Engine. Distinct from "Channels" above (watched YouTube
+  // upload feeds) — these are brand/persona channels the engine researches for.
+  { href: "/research", label: "Content Research", icon: Radar },
   { href: "/clips", label: "AI Clips", icon: Scissors },
   { href: "/social-accounts", label: "Social Accounts", icon: Share2 },
   { href: "/scheduler", label: "Scheduler", icon: CalendarClock },

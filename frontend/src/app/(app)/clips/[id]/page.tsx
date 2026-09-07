@@ -25,20 +25,43 @@ import { toast } from "@/store/toast";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input, Label, Select, Textarea } from "@/components/ui/Input";
-import { StatusBadge } from "@/components/ui/Badge";
+import { Badge, StatusBadge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PublishPanel } from "@/components/clips/PublishPanel";
+import { CoverPanel } from "@/components/clips/CoverPanel";
 import { ReactionIntroPanel } from "@/components/clips/ReactionIntroPanel";
 import { ReactionRecorderModal } from "@/components/reactions/ReactionRecorderModal";
-import { TimelineTrack } from "@/components/clips/timeline/TimelineTrack";
+import { MultiTrackTimeline } from "@/components/clips/timeline/MultiTrackTimeline";
+import { EditorIconRail, type EditorTabKey } from "@/components/clips/timeline/EditorIconRail";
 import { ClipVideoPreview } from "@/components/clips/timeline/ClipVideoPreview";
+import { StickerPanel } from "@/components/clips/timeline/StickerPanel";
+import { AdditionalClipsPanel } from "@/components/clips/timeline/AdditionalClipsPanel";
 import { ManualCropEditor } from "@/components/clips/timeline/ManualCropEditor";
 import { useClipEditorHistory, type EditorSnapshot } from "@/components/clips/timeline/useClipEditorHistory";
+import { clipDuration, sourceTimeToClip } from "@/components/clips/timeline/timelineMath";
 import { LayerEditor } from "@/components/layers/LayerEditor";
+import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
 import { diffLayers } from "@/lib/layerOverrides";
+import { newLayer } from "@/lib/layers";
+import { EFFECTS, FILTERS } from "@/lib/videoFx";
 import { formatDuration } from "@/lib/format";
-import type { Clip, CropKeyframe, Template, TemplateLayer, Video } from "@/lib/types";
+import type {
+  Clip,
+  CropKeyframe,
+  EditorSelection,
+  EffectLayerProps,
+  FilterLayerProps,
+  LayerType,
+  Project,
+  Segment,
+  SubtitleCue,
+  Template,
+  TemplateLayer,
+  TransitionIn,
+  TransitionType,
+  Video,
+} from "@/lib/types";
 
 const ACTIVE = ["queued", "rendering"];
 const ASPECT_RATIOS: Record<string, { width: number; height: number }> = {
@@ -47,16 +70,25 @@ const ASPECT_RATIOS: Record<string, { width: number; height: number }> = {
   "16:9": { width: 1920, height: 1080 },
 };
 
-type TabKey = "trim" | "layers" | "audio" | "captions" | "details" | "reaction" | "publish";
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "trim", label: "Trim & Crop" },
-  { key: "layers", label: "Text & Layers" },
-  { key: "audio", label: "Audio" },
-  { key: "captions", label: "Captions" },
-  { key: "details", label: "Details" },
-  { key: "reaction", label: "Reaction" },
-  { key: "publish", label: "Publish" },
-];
+type TabKey = EditorTabKey;
+
+// Which layer types each inspector panel can edit. More than one panel can
+// legitimately handle the same type — a sticker and a logo are both image
+// layers — which is exactly why select() checks membership before switching.
+const TAB_LAYER_TYPES: Partial<Record<TabKey, LayerType[]>> = {
+  layers: ["text", "image", "logo", "rect", "progress_bar"],
+  stickers: ["image", "logo"],
+  audio: ["audio"],
+  effects: ["effect"],
+  filters: ["filter"],
+};
+
+// Where selecting a layer lands when the open panel can't edit it.
+const PREFERRED_TAB: Partial<Record<LayerType, TabKey>> = {
+  effect: "effects",
+  filter: "filters",
+  audio: "audio",
+};
 
 interface PreviewConfig {
   resolution: { width: number; height: number };
@@ -64,6 +96,314 @@ interface PreviewConfig {
   branding: Record<string, unknown>;
   layers: TemplateLayer[];
   template_layers: TemplateLayer[];
+  subtitle_cues: SubtitleCue[];
+  caption_cues_edited: boolean;
+}
+
+// Selecting a block on the timeline (or a layer on the video preview canvas)
+// drops straight into that layer's property fields — an inspector, matching
+// how the timeline itself is now the primary way to browse "what's there";
+// the full reorderable list (LayerEditor) is the fallback when nothing's
+// selected, still useful for z-index reordering and a bulk overview.
+function LayersPanel({
+  layers,
+  onChange,
+  overriddenIds,
+  selectedId,
+  onSelectChange,
+}: {
+  layers: TemplateLayer[];
+  onChange: (layers: TemplateLayer[]) => void;
+  overriddenIds?: Set<string>;
+  selectedId: string | null;
+  onSelectChange: (id: string | null) => void;
+}) {
+  const selected = layers.find((l) => l.id === selectedId) ?? null;
+  if (!selected) {
+    // Effects and filters are layers too, but they belong to their own rail
+    // sections — listing them here as well would give the same object two
+    // different homes.
+    const overlays = layers.filter((l) => l.type !== "effect" && l.type !== "filter");
+    return (
+      <LayerEditor
+        layers={overlays}
+        onChange={(next) => onChange([...next, ...layers.filter((l) => l.type === "effect" || l.type === "filter")])}
+        overriddenIds={overriddenIds}
+        selectedId={selectedId}
+        onSelectChange={onSelectChange}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => onSelectChange(null)}
+          className="flex items-center gap-1 text-xs text-muted hover:text-foreground cursor-pointer"
+        >
+          <ArrowLeft className="size-3" />
+          All elements
+        </button>
+        {overriddenIds?.has(selected.id) && <Badge tone="accent">Overridden</Badge>}
+      </div>
+      <LayerPropsFields
+        layer={selected}
+        onChange={(patch) => onChange(layers.map((l) => (l.id === selected.id ? { ...l, ...patch } : l)))}
+      />
+    </div>
+  );
+}
+
+// Effects and filters get their own rail sections because that's how a user
+// looks for them ("what can I do to this shot?"), but they're ordinary layers
+// underneath — the same add/select/edit flow as everything else, and the same
+// LayerPropsFields inspector.
+function FxPanel({
+  kind,
+  layers,
+  onChange,
+  selectedId,
+  onSelect,
+  addAt,
+  outputDuration,
+}: {
+  kind: "effect" | "filter";
+  layers: TemplateLayer[];
+  onChange: (layers: TemplateLayer[]) => void;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  // Playhead position on the output's timeline — where a new effect starts.
+  addAt: number;
+  outputDuration: number;
+}) {
+  const mine = layers.filter((l) => l.type === kind);
+  const selected = mine.find((l) => l.id === selectedId) ?? null;
+  const presets = kind === "filter" ? FILTERS.map((f) => ({ value: f.value, label: f.label })) : EFFECTS;
+
+  function add(value: string) {
+    const maxZ = layers.reduce((m, l) => Math.max(m, l.z_index), 0);
+    const layer = newLayer(
+      kind,
+      maxZ + 1,
+      kind === "filter" ? 0 : Number(addAt.toFixed(2)),
+      // A grade covers the whole clip by default; a spot effect is a moment.
+      kind === "filter" ? null : Number(Math.min(outputDuration, addAt + 3).toFixed(2))
+    );
+    layer.props = kind === "filter" ? { preset: value, intensity: 1 } : { effect: value, intensity: 0.6 };
+    onChange([...layers, layer]);
+    onSelect(layer.id);
+  }
+
+  if (selected) {
+    return (
+      <div className="space-y-3">
+        <button
+          type="button"
+          onClick={() => onSelect(null)}
+          className="flex cursor-pointer items-center gap-1 text-xs text-muted hover:text-foreground"
+        >
+          <ArrowLeft className="size-3" />
+          All {kind === "filter" ? "filters" : "effects"}
+        </button>
+        <LayerPropsFields
+          layer={selected}
+          onChange={(patch) => onChange(layers.map((l) => (l.id === selected.id ? { ...l, ...patch } : l)))}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h4 className="mb-2 text-xs font-semibold text-muted">
+          Add {kind === "filter" ? "a filter" : "an effect"}
+        </h4>
+        <div className="grid grid-cols-2 gap-2">
+          {presets.map((preset) => (
+            <button
+              key={preset.value}
+              type="button"
+              onClick={() => add(preset.value)}
+              className="cursor-pointer rounded-xl border border-border-subtle bg-surface-elevated px-3 py-2.5 text-left text-xs hover:border-accent"
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {mine.length > 0 && (
+        <div>
+          <h4 className="mb-2 text-xs font-semibold text-muted">On this clip</h4>
+          <div className="space-y-1.5">
+            {mine.map((layer) => (
+              <button
+                key={layer.id}
+                type="button"
+                onClick={() => onSelect(layer.id)}
+                className="flex w-full cursor-pointer items-center justify-between rounded-xl bg-surface-elevated px-3 py-2 text-left text-xs hover:bg-white/5"
+              >
+                <span>
+                  {kind === "filter"
+                    ? FILTERS.find((f) => f.value === ((layer.props as FilterLayerProps)?.preset ?? "normal"))?.label
+                    : EFFECTS.find((f) => f.value === ((layer.props as EffectLayerProps)?.effect ?? "blur"))?.label}
+                </span>
+                <span className="text-muted">
+                  {formatDuration(layer.timing?.start ?? 0)} – {formatDuration(layer.timing?.end ?? outputDuration)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <p className="text-[11px] text-muted">
+        {kind === "filter"
+          ? "A filter grades the whole clip by default — shorten its block on the timeline to grade only part of it."
+          : "Effects are timed: drag the block on the timeline to move it, or grab its edges to change how long it runs."}{" "}
+        Both are burned into the exported video, not just the preview.
+      </p>
+    </div>
+  );
+}
+
+// The caption cue selected on the timeline, edited in place. Cue timings are
+// clip-relative (0 = the start of the rendered output), matching what the
+// backend burns in — the timeline handles the conversion to source-video time.
+function CaptionCueFields({
+  cue,
+  onChange,
+  outputDuration,
+}: {
+  cue: SubtitleCue;
+  onChange: (cue: SubtitleCue) => void;
+  outputDuration: number;
+}) {
+  return (
+    <div className="space-y-3 rounded-xl bg-surface-elevated px-3.5 py-3">
+      <div>
+        <Label htmlFor="cue-text">Caption text</Label>
+        <Textarea
+          id="cue-text"
+          rows={2}
+          value={cue.text}
+          onChange={(e) =>
+            onChange({
+              ...cue,
+              text: e.target.value,
+              // Per-word timings describe the ORIGINAL words; once the line has
+              // been rewritten they'd highlight the wrong things, so they're
+              // dropped and the cue renders as a plain styled line instead
+              // (SubtitleService::toAss() already handles a wordless cue).
+              words: e.target.value === cue.text ? cue.words : [],
+            })
+          }
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Start (s)</Label>
+          <Input
+            type="number"
+            min={0}
+            step={0.05}
+            value={cue.start}
+            onChange={(e) => onChange({ ...cue, start: Math.max(0, Number(e.target.value)) })}
+          />
+        </div>
+        <div>
+          <Label>End (s)</Label>
+          <Input
+            type="number"
+            min={0}
+            step={0.05}
+            value={cue.end}
+            onChange={(e) => onChange({ ...cue, end: Math.min(outputDuration, Number(e.target.value)) })}
+          />
+        </div>
+      </div>
+      {(cue.words?.length ?? 0) > 0 && (
+        <p className="text-[11px] text-muted">
+          Word-level timing preserved ({cue.words.length} words) — per-word highlighting still works on this line.
+        </p>
+      )}
+    </div>
+  );
+}
+
+const TRANSITION_TYPES: { value: TransitionType; label: string; hint: string }[] = [
+  { value: "fade", label: "Fade", hint: "A smooth linear cross-blend between the two cuts." },
+  { value: "dissolve", label: "Dissolve", hint: "A grainy, randomized pixel dissolve — a little more textured than Fade." },
+];
+
+// The crossfade at one boundary between two of the clip's own segments — see
+// FFmpegService::extractWithoutSilence()'s $transitions param for how this is
+// actually rendered, and the video track's Shuffle-icon marker for how it's
+// selected. `segment` is segments[index] (the one being transitioned INTO);
+// `previousSegment` is only used to show what the transition connects.
+function TransitionFields({
+  segment,
+  onChange,
+}: {
+  segment: Segment;
+  onChange: (transition: TransitionIn | null) => void;
+}) {
+  const active = segment.transition_in;
+  const type = active?.type ?? "none";
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label>Type</Label>
+        <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+          {(["none", ...TRANSITION_TYPES.map((t) => t.value)] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => onChange(value === "none" ? null : { type: value, duration: active?.duration ?? 0.4 })}
+              className={
+                "rounded-lg px-2.5 py-1.5 text-xs capitalize cursor-pointer " +
+                (type === value ? "bg-accent text-white" : "bg-surface-elevated text-muted hover:text-foreground")
+              }
+            >
+              {value === "none" ? "None" : TRANSITION_TYPES.find((t) => t.value === value)?.label}
+            </button>
+          ))}
+        </div>
+        {active && (
+          <p className="mt-1.5 text-[11px] text-muted">{TRANSITION_TYPES.find((t) => t.value === active.type)?.hint}</p>
+        )}
+      </div>
+
+      {active && (
+        <div>
+          <Label>Duration ({active.duration.toFixed(2)}s)</Label>
+          <input
+            type="range"
+            min={0.1}
+            max={2}
+            step={0.05}
+            value={active.duration}
+            onChange={(e) => onChange({ type: active.type, duration: Number(e.target.value) })}
+            className="mt-2.5 w-full accent-accent"
+          />
+          <p className="mt-1.5 text-[11px] text-muted">
+            The two cuts overlap for this long — automatically shortened if either segment is too short to fit it.
+          </p>
+        </div>
+      )}
+
+      {!active && (
+        <p className="text-[11px] text-muted">
+          No transition — a hard cut, exactly as before this feature. Pick a type above to blend into this segment
+          instead of cutting straight to it.
+        </p>
+      )}
+    </div>
+  );
 }
 
 function defaultCropKeyframe(sourceWidth: number, sourceHeight: number, targetAspect: { width: number; height: number }): CropKeyframe {
@@ -89,6 +429,11 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   const { data: videoRes } = useApi<{ data: Video }>(clip ? `/videos/${clip.video_id}` : null);
   const { data: previewRes } = useApi<{ data: PreviewConfig }>(clip ? `${clipKey}/preview-config` : null);
   const preview = previewRes?.data;
+  // Every video in the project, for the "additional video clips" picker — see
+  // AdditionalClipsPanel. GET /projects/{id} is the one endpoint that exposes
+  // the full list (ProjectResource's 'videos' key), not just the latest.
+  const { data: projectRes } = useApi<{ data: Project }>(clip ? `/projects/${clip.project_id}` : null);
+  const projectVideos = projectRes?.data.videos ?? [];
   const [reacting, setReacting] = useState(false);
 
   const [form, setForm] = useState<{
@@ -106,18 +451,40 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
     reference_url: string | null;
     speed: number;
     volume: number;
+    cover_template_id: number | null;
+    cover_text: string | null;
+    cover_kicker: string | null;
+    cover_subline: string | null;
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  // One selection for the whole editor — a timeline block, a caption cue or a
+  // video segment. See EditorSelection: keeping these in one state is what lets
+  // the timeline, the preview and the inspector never disagree about what's
+  // being edited.
+  const [selection, setSelection] = useState<EditorSelection>(null);
+  // Local rather than part of EditorSelection — AdditionalClipsPanel is a
+  // self-contained list UI, not drawn on the interactive timeline/preview the
+  // way layers/captions/segments/transitions are, so it has no need to
+  // cross-highlight with anything else in the editor.
+  const [selectedAdditionalClipIndex, setSelectedAdditionalClipIndex] = useState<number | null>(null);
+  const selectedLayerId = selection?.kind === "layer" ? selection.id : null;
   const [uploadingSubtitle, setUploadingSubtitle] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("trim");
   const [isPlaying, setIsPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
 
-  const history = useClipEditorHistory({ segments: [], layers: [], cropMode: "smart", cropKeyframe: null });
+  const history = useClipEditorHistory({
+    segments: [],
+    additionalVideoClips: [],
+    layers: [],
+    captionCues: [],
+    captionCuesDirty: false,
+    cropMode: "smart",
+    cropKeyframe: null,
+  });
   const [historyReady, setHistoryReady] = useState(false);
 
   useEffect(() => {
@@ -137,6 +504,10 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         reference_url: clip.reference_url ?? null,
         speed: clip.speed ?? 1,
         volume: clip.volume ?? 1,
+        cover_template_id: clip.cover_template_id ?? null,
+        cover_text: clip.cover_text ?? null,
+        cover_kicker: clip.cover_kicker ?? null,
+        cover_subline: clip.cover_subline ?? null,
       });
     }
   }, [clip, form]);
@@ -151,7 +522,18 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         clip.segments && clip.segments.length > 0 ? clip.segments : [{ start: clip.start_time, end: clip.end_time }];
       const cropMode = clip.crop_config?.mode === "manual" ? "manual" : "smart";
       const cropKeyframe = cropMode === "manual" ? (clip.crop_config?.keyframes?.[0] ?? null) : null;
-      history.reset({ segments, layers: preview.layers, cropMode, cropKeyframe });
+      history.reset({
+        segments,
+        additionalVideoClips: clip.additional_video_clips ?? [],
+        layers: preview.layers,
+        captionCues: preview.subtitle_cues ?? [],
+        // Already-saved edits stay "dirty" so every subsequent save re-persists
+        // them — otherwise a later save that happened to omit caption_cues would
+        // leave the clip's stored cues and the editor's view of them to drift.
+        captionCuesDirty: preview.caption_cues_edited,
+        cropMode,
+        cropKeyframe,
+      });
       setHistoryReady(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -198,6 +580,47 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
 
   const envelopeStart = history.current.segments[0]?.start ?? 0;
   const envelopeEnd = history.current.segments[history.current.segments.length - 1]?.end ?? 0;
+  // Length of what actually renders (sum of the kept segments), and where the
+  // playhead sits on that output timeline — layer timings and caption cues are
+  // both stored against it, so this is what decides what's on screen.
+  const outputDuration = clipDuration(history.current.segments);
+  const clipTime = sourceTimeToClip(currentTime, history.current.segments);
+  const selectedLayer = selectedLayerId ? history.current.layers.find((l) => l.id === selectedLayerId) ?? null : null;
+
+  function setLayers(layers: TemplateLayer[]) {
+    history.push({ ...history.current, layers });
+  }
+
+  function setCaptionCues(captionCues: SubtitleCue[]) {
+    history.push({ ...history.current, captionCues, captionCuesDirty: true });
+  }
+
+  // Selecting something anywhere — timeline block, preview overlay, panel list —
+  // also opens the panel that edits it, so the inspector always reflects the
+  // selection. Done here rather than in an effect so the tab switch is part of
+  // the same update as the selection itself; the user can still change tabs
+  // freely afterwards without it snapping back.
+  // `addedLayer` covers the just-created case: a layer added this tick isn't in
+  // history.current yet, so there'd be nothing to look up and the panel would
+  // lag one interaction behind.
+  function select(next: EditorSelection, addedLayer?: TemplateLayer) {
+    setSelection(next);
+    if (!next) return;
+    if (next.kind === "segment" || next.kind === "transition") return setActiveTab("trim");
+    if (next.kind === "caption") return setActiveTab("captions");
+    const layer = addedLayer ?? history.current.layers.find((l) => l.id === next.id);
+    if (!layer) return;
+    // Staying put when the open panel can already edit this layer is what keeps
+    // "add a sticker" from bouncing the user out of the Stickers panel and into
+    // Elements — a sticker IS an image layer, so both panels legitimately handle
+    // it, and the one the user is already in wins.
+    if (TAB_LAYER_TYPES[activeTab]?.includes(layer.type)) return;
+    setActiveTab(PREFERRED_TAB[layer.type] ?? "layers");
+  }
+
+  function selectLayer(id: string | null) {
+    select(id ? { kind: "layer", id } : null);
+  }
 
   async function persist(snapshot: EditorSnapshot, extra: Record<string, unknown> = {}) {
     if (!form) return;
@@ -211,11 +634,20 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         .map((h) => h.trim())
         .filter(Boolean),
       segments: snapshot.segments,
+      additional_video_clips: snapshot.additionalVideoClips.length > 0 ? snapshot.additionalVideoClips : null,
       aspect_ratio: form.aspect_ratio,
       template_id: form.template_id ? Number(form.template_id) : null,
+      cover_template_id: form.cover_template_id,
+      cover_text: form.cover_text,
+      cover_kicker: form.cover_kicker,
+      cover_subline: form.cover_subline,
       subtitles_enabled: form.subtitles_enabled,
       subtitle_language: form.subtitle_language,
       layer_overrides: layerOverrides,
+      // Only sent once the user has actually edited a caption — see
+      // EditorSnapshot.captionCuesDirty. Sending it on every save would opt
+      // every clip out of transcript-driven captions permanently.
+      ...(snapshot.captionCuesDirty ? { caption_cues: snapshot.captionCues } : {}),
       crop_config: cropConfig,
       reaction_script: form.reaction_script || null,
       intro_enabled: form.intro_enabled,
@@ -252,6 +684,21 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   // button always applies whatever's currently selected.
   async function handleRegenerate() {
     await handleSave();
+  }
+
+  // Hands captions back to the transcript pipeline: clears the stored cues and
+  // reseeds the editor from whatever the next render generates.
+  async function handleResetCaptions() {
+    if (!confirm("Discard your caption edits and go back to auto-generated captions on the next render?")) return;
+    try {
+      await api.patch(clipKey, { caption_cues: null });
+      history.push({ ...history.current, captionCuesDirty: false });
+      await mutate(clipKey);
+      await mutate(`${clipKey}/preview-config`);
+      toast("Captions reset to auto — re-rendering.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reset captions.", "danger");
+    }
   }
 
   async function handleUploadSubtitle(file: File) {
@@ -454,23 +901,45 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                   videoRef={videoRef}
                   videoUrl={videoRes.data.url}
                   posterUrl={videoRes.data.thumbnail_url}
-                  resolution={preview.resolution}
+                  resolution={
+                    form.template_id && templatesRes?.data
+                      ? (() => {
+                          const tpl = templatesRes.data.find((t) => String(t.id) === form.template_id);
+                          return tpl?.resolution ?? preview.resolution;
+                        })()
+                      : preview.resolution
+                  }
+                  captionConfig={
+                    form.template_id && templatesRes?.data
+                      ? templatesRes.data.find((t) => String(t.id) === form.template_id)?.current_version?.config?.caption ?? preview.caption
+                      : preview.caption
+                  }
                   layers={history.current.layers}
-                  currentTime={currentTime}
-                  duration={videoRes.data.duration_seconds ?? 0}
+                  clipTime={clipTime}
+                  duration={outputDuration}
+                  captionCues={history.current.captionCues}
+                  activeCaptionIndex={selection?.kind === "caption" ? selection.index : null}
                   onTimeUpdate={setCurrentTime}
                   interactive
                   selectedLayerId={selectedLayerId}
-                  onSelectLayer={setSelectedLayerId}
-                  onLayersChange={(layers) => history.push({ ...history.current, layers })}
+                  onSelectLayer={selectLayer}
+                  onLayersChange={setLayers}
+                  segments={history.current.segments}
+                  isPlaying={isPlaying}
                 />
               </div>
 
-              <TimelineTrack
+              <MultiTrackTimeline
                 duration={videoRes.data.duration_seconds ?? 0}
                 segments={history.current.segments}
+                onSegmentsChange={(segments) => history.push({ ...history.current, segments })}
+                layers={history.current.layers}
+                onLayersChange={setLayers}
+                captionCues={history.current.captionCues}
+                onCaptionCuesChange={setCaptionCues}
+                selection={selection}
+                onSelectionChange={select}
                 currentTime={currentTime}
-                onChange={(segments) => history.push({ ...history.current, segments })}
                 onSeek={(t) => {
                   setCurrentTime(t);
                   if (videoRef.current) videoRef.current.currentTime = t;
@@ -479,8 +948,10 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                 waveformUrl={videoRes.data.waveform_url}
               />
               <p className="text-[11px] text-muted">
-                Multiple segments are cut and stitched together into one clip (jump cuts) — drag the handles to
-                trim, or add another segment to pull in a second part of the source video.
+                Multiple segments are cut and stitched together into one clip (jump cuts) — drag the video track&apos;s
+                handles to trim, or add another segment to pull in a second part of the source video. Drag any block
+                to change when it appears, grab its edges to change how long it lasts, and select it to edit its
+                properties on the right.
               </p>
             </div>
           ) : (
@@ -513,25 +984,35 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
             </div>
           </Card>
 
-          <Card className="overflow-hidden p-0">
-            <div className="flex flex-wrap gap-0.5 border-b border-border-subtle p-1.5">
-              {TABS.map((tab) => (
-                <button
-                  key={tab.key}
-                  type="button"
-                  onClick={() => setActiveTab(tab.key)}
-                  className={
-                    "cursor-pointer whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-medium " +
-                    (activeTab === tab.key ? "bg-accent text-white" : "text-muted hover:bg-white/5 hover:text-foreground")
-                  }
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+          <Card className="flex overflow-hidden p-0">
+            <EditorIconRail active={activeTab} onChange={setActiveTab} />
 
-            <div className="space-y-4 p-5">
-              {activeTab === "trim" && (
+            <div className="min-w-0 flex-1 space-y-4 p-5">
+              {activeTab === "trim" && selection?.kind === "transition" && history.current.segments[selection.index] && (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelection(null)}
+                    className="flex cursor-pointer items-center gap-1 text-xs text-muted hover:text-foreground"
+                  >
+                    <ArrowLeft className="size-3" />
+                    Back to crop
+                  </button>
+                  <TransitionFields
+                    segment={history.current.segments[selection.index]}
+                    onChange={(transition_in) =>
+                      history.push({
+                        ...history.current,
+                        segments: history.current.segments.map((s, i) =>
+                          i === selection.index ? { ...s, transition_in } : s
+                        ),
+                      })
+                    }
+                  />
+                </div>
+              )}
+
+              {activeTab === "trim" && selection?.kind !== "transition" && (
                 <div>
                   <div className="mb-3 flex items-center justify-between">
                     <h4 className="text-xs font-semibold text-muted">Reframe / Crop</h4>
@@ -584,12 +1065,45 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
               )}
 
               {activeTab === "layers" && (
-                <LayerEditor
+                <LayersPanel
                   layers={history.current.layers}
-                  onChange={(layers) => history.push({ ...history.current, layers })}
+                  onChange={setLayers}
                   overriddenIds={overriddenIds}
                   selectedId={selectedLayerId}
-                  onSelectChange={setSelectedLayerId}
+                  onSelectChange={selectLayer}
+                />
+              )}
+
+              {activeTab === "stickers" && (
+                <StickerPanel
+                  layers={history.current.layers}
+                  onChange={setLayers}
+                  selectedId={selectedLayerId}
+                  onSelect={(id, added) => select(id ? { kind: "layer", id } : null, added)}
+                  addAt={clipTime}
+                  outputDuration={outputDuration}
+                />
+              )}
+
+              {activeTab === "videoClips" && (
+                <AdditionalClipsPanel
+                  projectVideos={projectVideos}
+                  clips={history.current.additionalVideoClips}
+                  onChange={(additionalVideoClips) => history.push({ ...history.current, additionalVideoClips })}
+                  selectedIndex={selectedAdditionalClipIndex}
+                  onSelect={setSelectedAdditionalClipIndex}
+                />
+              )}
+
+              {(activeTab === "effects" || activeTab === "filters") && (
+                <FxPanel
+                  kind={activeTab === "effects" ? "effect" : "filter"}
+                  layers={history.current.layers}
+                  onChange={setLayers}
+                  selectedId={selectedLayer?.type === (activeTab === "effects" ? "effect" : "filter") ? selectedLayer.id : null}
+                  onSelect={selectLayer}
+                  addAt={clipTime}
+                  outputDuration={outputDuration}
                 />
               )}
 
@@ -635,14 +1149,61 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                   </div>
 
                   <p className="text-[11px] text-muted">
-                    Need background music or a separate audio track? Add an &quot;Background audio&quot; layer under
-                    the <span className="text-foreground">Text &amp; Layers</span> tab — it has its own volume/fade.
+                    Need background music or a separate audio track? Add it from the Audio section of the timeline
+                    below, or under the <span className="text-foreground">Elements</span> tab — it has its own
+                    volume/fade.
                   </p>
                 </div>
               )}
 
               {activeTab === "captions" && (
                 <div className="space-y-4">
+                  {selection?.kind === "caption" && history.current.captionCues[selection.index] ? (
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelection(null)}
+                        className="flex cursor-pointer items-center gap-1 text-xs text-muted hover:text-foreground"
+                      >
+                        <ArrowLeft className="size-3" />
+                        All caption settings
+                      </button>
+                      <CaptionCueFields
+                        cue={history.current.captionCues[selection.index]}
+                        outputDuration={outputDuration}
+                        onChange={(cue) =>
+                          setCaptionCues(history.current.captionCues.map((c, i) => (i === selection.index ? cue : c)))
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-xl bg-surface-elevated px-3.5 py-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium">Caption cues</p>
+                          <p className="text-xs text-muted">
+                            {history.current.captionCues.length === 0
+                              ? "Available once the clip has rendered at least once."
+                              : history.current.captionCuesDirty
+                                ? `${history.current.captionCues.length} cues — edited, burned in as-is on the next render.`
+                                : `${history.current.captionCues.length} cues — click one on the timeline to edit it.`}
+                          </p>
+                        </div>
+                        {history.current.captionCuesDirty && (
+                          <Button variant="outline" size="sm" onClick={handleResetCaptions}>
+                            Reset to auto
+                          </Button>
+                        )}
+                      </div>
+                      {history.current.captionCuesDirty && (
+                        <p className="mt-2 text-[11px] text-muted">
+                          Edited captions are kept exactly as timed, so automatic silence removal is skipped for this
+                          clip — otherwise shortening the video underneath would desync every line.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between rounded-xl bg-surface-elevated px-3.5 py-3">
                     <div>
                       <p className="text-sm font-medium">Auto Captions</p>
@@ -746,26 +1307,77 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                       <Select
                         id="aspect"
                         value={form.aspect_ratio}
-                        onChange={(e) => setForm({ ...form, aspect_ratio: e.target.value })}
+                        onChange={(e) => {
+                          const newAspectRatio = e.target.value;
+                          // Just a FILTER on which templates are selectable below —
+                          // render dimensions come from the chosen template, not
+                          // this field, once one is attached (see the Template
+                          // select's onChange). Changing it clears the current
+                          // template selection since it's no longer in the filtered
+                          // list, rather than silently leaving a mismatched pair.
+                          const currentTpl = templatesRes?.data.find((t) => String(t.id) === form.template_id);
+                          setForm({
+                            ...form,
+                            aspect_ratio: newAspectRatio,
+                            template_id: currentTpl?.aspect_ratio === newAspectRatio ? form.template_id : "",
+                          });
+                        }}
                       >
                         <option value="9:16">9:16 — Shorts/Reels/TikTok</option>
                         <option value="1:1">1:1 — Square</option>
                         <option value="16:9">16:9 — Landscape</option>
                       </Select>
+                      <p className="mt-1 text-xs text-muted">Filters which templates are available.</p>
                     </div>
                     <div>
                       <Label htmlFor="template">Template</Label>
                       <Select
                         id="template"
                         value={form.template_id}
-                        onChange={(e) => setForm({ ...form, template_id: e.target.value })}
+                        onChange={(e) => {
+                          const newTemplateId = e.target.value;
+                          const selectedTpl = newTemplateId
+                            ? templatesRes?.data.find((t) => String(t.id) === newTemplateId)
+                            : undefined;
+                          // The template is authoritative for render dimensions once
+                          // attached — keep aspect_ratio in sync with it rather than
+                          // letting the two fields disagree (that mismatch is what
+                          // caused the crop-then-stretch distortion on render).
+                          setForm({
+                            ...form,
+                            template_id: newTemplateId,
+                            aspect_ratio: selectedTpl?.aspect_ratio ?? form.aspect_ratio,
+                          });
+
+                          if (newTemplateId) {
+                            if (selectedTpl?.current_version?.config) {
+                              const cfg = selectedTpl.current_version.config;
+                              history.push({
+                                ...history.current,
+                                layers: cfg.layers ?? [],
+                              });
+                            } else {
+                              api.get<{ data: Template }>(`/templates/${newTemplateId}`).then((res) => {
+                                const cfg = res.data?.current_version?.config;
+                                if (cfg) {
+                                  history.push({
+                                    ...history.current,
+                                    layers: cfg.layers ?? [],
+                                  });
+                                }
+                              }).catch(() => {});
+                            }
+                          }
+                        }}
                       >
                         <option value="">No template</option>
-                        {templatesRes?.data.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name}
-                          </option>
-                        ))}
+                        {templatesRes?.data
+                          .filter((t) => t.aspect_ratio === form.aspect_ratio)
+                          .map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name}
+                            </option>
+                          ))}
                       </Select>
                     </div>
                   </div>
@@ -781,6 +1393,21 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                   outroEnabled={form.outro_enabled}
                   introVoice={form.intro_voice}
                   referenceUrl={form.reference_url}
+                  onChange={(patch) => setForm((f) => (f ? { ...f, ...patch } : f))}
+                />
+              )}
+
+              {activeTab === "cover" && (
+                <CoverPanel
+                  clipId={clipId}
+                  clipReady={clip.status === "completed"}
+                  coverTemplateId={form.cover_template_id}
+                  coverText={form.cover_text}
+                  coverKicker={form.cover_kicker}
+                  coverSubline={form.cover_subline}
+                  coverUrl={clip.cover_url}
+                  titleOptions={clip.cover_title_options ?? []}
+                  subtitleOptions={clip.cover_subtitle_options ?? []}
                   onChange={(patch) => setForm((f) => (f ? { ...f, ...patch } : f))}
                 />
               )}

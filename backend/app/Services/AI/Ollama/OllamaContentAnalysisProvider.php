@@ -41,8 +41,7 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
         private readonly string $baseUrl,
         private readonly string $model,
         private readonly int $timeoutSeconds = 180,
-    ) {
-    }
+    ) {}
 
     public function detectScenes(string $videoPath, float $durationSeconds): array
     {
@@ -110,11 +109,11 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt(self::MAX_CANDIDATES_PER_CHUNK);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $chunkStart, $chunkEnd, $language);
-        $span = $this->aiLogger()->start('content_analysis', 'ollama', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'ollama', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         try {
             $response = Http::timeout($this->timeoutSeconds)
-                ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
+                ->post(rtrim($this->baseUrl, '/').'/api/chat', [
                     'model' => $this->model,
                     'stream' => false,
                     'format' => 'json',
@@ -184,6 +183,8 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -192,6 +193,8 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript excerpt
 from a longer video, find up to {$maxCandidates} best self-contained moments in THIS
@@ -209,6 +212,8 @@ clip works), explanation (one sentence summary), suggested_title (short, punchy,
 transcript's own language), suggested_caption (1-2 sentences, in the transcript's own
 language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
 
+{$coverInstructions}
+
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
@@ -219,8 +224,8 @@ PROMPT;
 
     private function userPrompt(string $transcriptText, float $durationSeconds, float $chunkStart, float $chunkEnd, string $language): string
     {
-        return "This is one excerpt ({$this->fmt($chunkStart)}-{$this->fmt($chunkEnd)}) from a " .
-            "{$durationSeconds}-second video. Transcript language: {$language}.\n\n" .
+        return "This is one excerpt ({$this->fmt($chunkStart)}-{$this->fmt($chunkEnd)}) from a ".
+            "{$durationSeconds}-second video. Transcript language: {$language}.\n\n".
             "Excerpt transcript:\n{$transcriptText}";
     }
 

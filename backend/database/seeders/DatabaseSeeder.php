@@ -25,6 +25,11 @@ class DatabaseSeeder extends Seeder
         $this->call([
             TemplateCategorySeeder::class,
             TemplateSeeder::class,
+            // Order matters: channels reference platforms and research sources by key.
+            PlatformSeeder::class,
+            ResearchSourceSeeder::class,
+            ChannelTemplateSeeder::class,
+            ContentChannelSeeder::class,
         ]);
     }
 }

@@ -1,11 +1,16 @@
 "use client";
 
-import { RefObject, useRef, useState } from "react";
+import { RefObject, useEffect, useRef, useState } from "react";
+import { activeFxCss, activeVignetteOpacity, isColorLayer } from "@/lib/videoFx";
+import { mediaUrl } from "@/lib/api";
+import { useSegmentAwarePlayback } from "./useSegmentAwarePlayback";
 import type {
   AudioLayerProps,
   ImageLayerProps,
   ProgressBarLayerProps,
   RectLayerProps,
+  Segment,
+  SubtitleCue,
   TemplateLayer,
   TextLayerProps,
 } from "@/lib/types";
@@ -28,36 +33,88 @@ export function ClipVideoPreview({
   posterUrl,
   resolution,
   layers,
-  currentTime,
+  clipTime,
   duration,
+  captionCues = [],
+  activeCaptionIndex = null,
   onTimeUpdate,
   interactive = false,
   selectedLayerId = null,
   onSelectLayer,
   onLayersChange,
+  segments = [],
+  isPlaying = false,
+  captionConfig,
 }: {
   videoRef: RefObject<HTMLVideoElement | null>;
   videoUrl: string | null;
   posterUrl?: string | null;
   resolution: { width: number; height: number };
   layers: TemplateLayer[];
-  currentTime: number;
+  clipTime: number;
   duration: number;
+  captionCues?: SubtitleCue[];
+  activeCaptionIndex?: number | null;
   onTimeUpdate: (t: number) => void;
-  // When true (clip editor only — the template preview stays read-only),
-  // layers can be dragged/resized directly on the video instead of only via
-  // the numeric LayerEditor panel.
   interactive?: boolean;
   selectedLayerId?: string | null;
   onSelectLayer?: (id: string | null) => void;
   onLayersChange?: (layers: TemplateLayer[]) => void;
+  segments?: Segment[];
+  isPlaying?: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  captionConfig?: Record<string, any>;
 }) {
   const aspect = `${resolution.width} / ${resolution.height}`;
   const canInteract = interactive && !!onLayersChange;
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useSegmentAwarePlayback(videoRef, segments, isPlaying);
+  const [previewWidth, setPreviewWidth] = useState(380);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => setPreviewWidth(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const isActiveNow = (l: TemplateLayer) => isActiveAt(l, clipTime);
+  const previewScale = previewWidth / resolution.width;
+  const fxCss = activeFxCss(layers, isActiveNow, previewScale);
+  const vignette = activeVignetteOpacity(layers, isActiveNow);
+
+  const overlayLayers = layers.filter((l) => !isColorLayer(l));
+  const caption = captionCues.find((cue) => clipTime >= cue.start && clipTime <= cue.end) ?? null;
+
+  // Caption styling computation matching template defaults
+  const font = captionConfig?.font || "Arial";
+  const color = captionConfig?.color || "#ffffff";
+  const highlightColor = captionConfig?.highlight_color || "#ffd100";
+  const strokeColor = captionConfig?.stroke_color || "#000000";
+  const strokeWidth = captionConfig?.stroke_width ?? 3;
+  const bgHex = captionConfig?.background;
+  const bgOpacity = captionConfig?.background_opacity ?? 0;
+  const bgEnabled = !!bgHex && bgOpacity > 0;
+  const position = captionConfig?.position || "bottom";
+  const autoFontSize = Math.max(36, Math.round(resolution.height / 20));
+  const effectiveFontSize = (captionConfig?.font_size ?? autoFontSize) * previewScale;
+
+  function hexToRgba(hex: string, op: number) {
+    const clean = hex.replace("#", "");
+    const r = parseInt(clean.slice(0, 2), 16) || 0;
+    const g = parseInt(clean.slice(2, 4), 16) || 0;
+    const b = parseInt(clean.slice(4, 6), 16) || 0;
+    return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, op))})`;
+  }
+
+  const bgStyle = bgEnabled ? hexToRgba(bgHex, bgOpacity) : "transparent";
+  const paddingPx = bgEnabled ? Math.max(2, (captionConfig?.background_padding ?? 8) * previewScale) : 0;
 
   return (
     <div>
       <div
+        ref={containerRef}
         className="relative w-full overflow-hidden rounded-2xl bg-black"
         style={{ aspectRatio: aspect }}
         onPointerDown={canInteract ? () => onSelectLayer?.(null) : undefined}
@@ -69,10 +126,31 @@ export function ClipVideoPreview({
             poster={posterUrl ?? undefined}
             controls
             className="h-full w-full object-cover"
+            style={fxCss ? { filter: fxCss } : undefined}
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-xs text-muted">No source video</div>
+        )}
+
+        {videoUrl && segments.length > 1 && (
+          <TransitionPreviewOverlay
+            videoRef={videoRef}
+            videoUrl={videoUrl}
+            posterUrl={posterUrl}
+            segments={segments}
+            isPlaying={isPlaying}
+            fxCss={fxCss}
+          />
+        )}
+
+        {vignette > 0 && (
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,${(0.85 * vignette).toFixed(2)}) 100%)`,
+            }}
+          />
         )}
 
         {/* CSS-approximated overlay of template layers — final position/crop is
@@ -81,21 +159,53 @@ export function ClipVideoPreview({
             editor's caption preview already uses. */}
         {canInteract ? (
           <InteractiveLayerOverlay
-            layers={layers}
-            currentTime={currentTime}
+            layers={overlayLayers}
+            currentTime={clipTime}
             duration={duration}
             selectedId={selectedLayerId}
             onSelect={(id) => onSelectLayer?.(id)}
-            onChange={(next) => onLayersChange?.(next)}
+            onChange={(next) => onLayersChange?.([...next, ...layers.filter(isColorLayer)])}
           />
         ) : (
           <div className="pointer-events-none absolute inset-0">
-            {[...layers]
-              .filter((l) => isActiveAt(l, currentTime))
+            {[...overlayLayers]
+              .filter(isActiveNow)
               .sort((a, b) => a.z_index - b.z_index)
               .map((layer) => (
-                <LayerOverlay key={layer.id} layer={layer} currentTime={currentTime} duration={duration} />
+                <LayerOverlay key={layer.id} layer={layer} currentTime={clipTime} duration={duration} />
               ))}
+          </div>
+        )}
+
+        {caption && (
+          <div
+            className="pointer-events-none absolute inset-x-0 flex justify-center px-4"
+            style={{
+              top: position === "top" ? "6%" : position === "center" ? "45%" : "auto",
+              bottom: position === "bottom" ? "12%" : "auto",
+            }}
+          >
+            <span
+              style={{
+                fontFamily: font,
+                color: color,
+                WebkitTextStroke: bgEnabled ? "0px" : `${Math.max(0.5, strokeWidth * previewScale)}px ${strokeColor}`,
+                fontWeight: captionConfig?.bold ? 800 : 600,
+                fontStyle: captionConfig?.italic ? "italic" : "normal",
+                textTransform: captionConfig?.uppercase ? "uppercase" : "none",
+                background: bgStyle,
+                padding: bgEnabled ? `${paddingPx}px ${paddingPx * 1.5}px` : "2px 8px",
+                borderRadius: bgEnabled ? 4 : 4,
+                fontSize: effectiveFontSize,
+                lineHeight: 1.3,
+                textAlign: "center",
+              }}
+              className={
+                activeCaptionIndex != null && captionCues[activeCaptionIndex] === caption ? "ring-2 ring-accent" : ""
+              }
+            >
+              {caption.text}
+            </span>
           </div>
         )}
       </div>
@@ -105,6 +215,109 @@ export function ClipVideoPreview({
           : `Approximate preview (${resolution.width}×${resolution.height}) — actual crop/pan is computed at render time.`}
       </p>
     </div>
+  );
+}
+
+/**
+ * Approximates a transition's crossfade in the small preview: a second
+ * <video>, same source, seeked to track the UPCOMING segment and faded in as
+ * the main video nears the end of its current one — driven directly off the
+ * main video's own timeupdate event rather than a prop-drilled time, so it
+ * stays correct regardless of how the main video's currentTime got there
+ * (native controls, the toolbar button, or useSegmentAwarePlayback's own
+ * jumps).
+ *
+ * Deliberately an approximation, in the same spirit as the rest of this
+ * preview:
+ *   - "fade" and "dissolve" both render as the same linear opacity blend here
+ *     — a real per-pixel randomized dissolve isn't practical to reproduce with
+ *     a plain <video> element. Only the RENDER (ffmpeg's xfade) actually tells
+ *     the two apart; see FFmpegService::extractWithoutSilence().
+ *   - Timed against the SOURCE video's own position (the last `duration`
+ *     seconds of the current segment), not the shortened OUTPUT timeline the
+ *     final render actually produces once a transition is in play — so the
+ *     blend visually takes a hair longer here than in the rendered result.
+ *     Reproducing that exact shortened-timeline arithmetic in the preview
+ *     would mean duplicating FFmpegService::extractWithoutSilence()'s own
+ *     cumulative-offset fold on the frontend — another place for the two to
+ *     drift apart, for a difference that's sub-second and only visible during
+ *     the blend itself. Not worth it for a preview that only needs to look
+ *     roughly right; the render's own timing is covered by its own tests.
+ */
+function TransitionPreviewOverlay({
+  videoRef,
+  videoUrl,
+  posterUrl,
+  segments,
+  isPlaying,
+  fxCss,
+}: {
+  videoRef: RefObject<HTMLVideoElement | null>;
+  videoUrl: string;
+  posterUrl?: string | null;
+  segments: Segment[];
+  isPlaying: boolean;
+  // Effects/filters are graded on the MAIN video's <video> element (see
+  // above) — applying the identical CSS filter here keeps the blended-in
+  // upcoming segment looking consistent with it rather than suddenly
+  // "ungrading" mid-transition.
+  fxCss: string;
+}) {
+  const overlayRef = useRef<HTMLVideoElement>(null);
+  const [opacity, setOpacity] = useState(0);
+
+  useEffect(() => {
+    const main = videoRef.current;
+    const overlay = overlayRef.current;
+    if (!main || !overlay) return;
+
+    function onTimeUpdate() {
+      const t = main!.currentTime;
+      const activeIndex = segments.findIndex((s) => t >= s.start && t < s.end);
+      const nextSegment = activeIndex === -1 ? undefined : segments[activeIndex + 1];
+      const transition = nextSegment?.transition_in;
+
+      if (activeIndex === -1 || !nextSegment || !transition) {
+        setOpacity(0);
+        return;
+      }
+
+      const currentSegment = segments[activeIndex];
+      const windowStart = currentSegment.end - transition.duration;
+      if (t < windowStart) {
+        setOpacity(0);
+        return;
+      }
+
+      setOpacity(Math.min(1, Math.max(0, (t - windowStart) / transition.duration)));
+
+      // Tracks the corresponding elapsed offset into the NEXT segment. Only
+      // re-seeked when it's actually drifted — a redundant same-value write
+      // still costs a decode on some browsers.
+      const target = nextSegment.start + (t - windowStart);
+      if (Math.abs(overlay!.currentTime - target) > 0.08) {
+        overlay!.currentTime = target;
+      }
+    }
+
+    main.addEventListener("timeupdate", onTimeUpdate);
+    return () => main.removeEventListener("timeupdate", onTimeUpdate);
+  }, [videoRef, segments]);
+
+  return (
+    <video
+      ref={overlayRef}
+      src={videoUrl}
+      poster={posterUrl ?? undefined}
+      muted
+      playsInline
+      preload="auto"
+      className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+      // Forced to 0 the instant playback stops, rather than via a separate
+      // effect reacting to `isPlaying` — so a paused frame never gets stuck
+      // mid-blend, and there's no extra render-triggering effect for it.
+      style={{ opacity: isPlaying ? opacity : 0, ...(fxCss ? { filter: fxCss } : undefined) }}
+    />
   );
 }
 
@@ -124,7 +337,15 @@ function layerHitboxStyle(layer: TemplateLayer): React.CSSProperties {
     };
   }
   if (layer.type === "image" || layer.type === "logo") {
-    return { left: `${x}%`, top: `${y}%`, width: `${(layer.width ?? 0.2) * 100}%`, aspectRatio: "1 / 1" };
+    return {
+      left: `${x}%`,
+      top: `${y}%`,
+      width: `${(layer.width ?? 0.2) * 100}%`,
+      aspectRatio: "1 / 1",
+      // The grab box turns with the sticker, so the handle stays on the corner
+      // the user can actually see.
+      transform: layer.rotation ? `rotate(${layer.rotation}deg)` : undefined,
+    };
   }
   // text: centered anchor (matches the -translate-x/y-1/2 LayerOverlay uses).
   // A box (width/height set) only exists in auto-size mode; free-floating
@@ -327,14 +548,28 @@ export function LayerOverlay({ layer, currentTime, duration }: { layer: Template
     // (ffmpeg's overlay=x:y anchors the overlay's top-left corner, not a center).
     const props = (layer.props as ImageLayerProps) ?? {};
     if (!props.image_path) return null;
+    const src = mediaUrl(props.image_path);
     return (
       <div
         className="absolute"
-        style={{ left: `${x}%`, top: `${y}%`, width: layer.width ? `${layer.width * 100}%` : "20%", opacity }}
+        style={{
+          left: `${x}%`,
+          top: `${y}%`,
+          width: layer.width ? `${layer.width * 100}%` : "20%",
+          opacity,
+          // Turned about its own centre, matching buildImageLayer()'s
+          // centre-preserving rotate + overlay offset.
+          transform: layer.rotation ? `rotate(${layer.rotation}deg)` : undefined,
+        }}
       >
-        <div className="flex aspect-square w-full items-center justify-center rounded bg-white/10 text-[9px] text-muted">
-          image
-        </div>
+        {/* The real asset, at the layer's own width — FFmpeg's overlay scales to
+            width and keeps the source's aspect ratio (buildImageLayer's
+            scale=W:-1), so height is left to follow the image here too rather
+            than being forced square as this used to. Plain <img>: these are
+            user-uploaded files served from the media disk, not build-time assets
+            next/image could optimize. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src ?? undefined} alt="" className="w-full" />
       </div>
     );
   }

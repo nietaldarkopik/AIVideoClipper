@@ -1,8 +1,14 @@
 "use client";
 
 import { Input, Label, Select } from "@/components/ui/Input";
+import { MediaPicker } from "@/components/layers/MediaPicker";
+import { EFFECTS, FILTERS } from "@/lib/videoFx";
 import type {
   AudioLayerProps,
+  EffectLayerProps,
+  EffectName,
+  FilterLayerProps,
+  FilterPreset,
   ImageLayerProps,
   ProgressBarLayerProps,
   RectLayerProps,
@@ -120,6 +126,20 @@ export function LayerPropsFields({ layer, onChange }: Props) {
     onChange({ props: { ...(layer.props as Record<string, unknown>), ...patch } });
   }
 
+  // Effects and filters have no position, no size and no stacking choice —
+  // they transform the footage itself and always render underneath the captions
+  // and overlays (FFmpegService::partitionLayersAroundCaption()). Showing X/Y or
+  // a "behind captions" checkbox for one would be offering a control that does
+  // nothing.
+  if (layer.type === "effect" || layer.type === "filter") {
+    return (
+      <>
+        <ColorLayerFields layer={layer} onChange={updateProps} />
+        <TimingFields layer={layer} onChange={onChange} />
+      </>
+    );
+  }
+
   return (
     <>
       <PositionFields layer={layer} onChange={onChange} />
@@ -147,6 +167,66 @@ export function LayerPropsFields({ layer, onChange }: Props) {
           &quot;React&quot; button) already provides PiP for clips that have one.
         </p>
       )}
+    </>
+  );
+}
+
+function ColorLayerFields({
+  layer,
+  onChange,
+}: {
+  layer: TemplateLayer;
+  onChange: (patch: Record<string, unknown>) => void;
+}) {
+  const props = (layer.props as EffectLayerProps & FilterLayerProps) ?? {};
+  const isFilter = layer.type === "filter";
+  const intensity = props.intensity ?? 1;
+
+  return (
+    <>
+      <div>
+        <Label>{isFilter ? "Preset" : "Effect"}</Label>
+        {isFilter ? (
+          <Select
+            value={props.preset ?? "normal"}
+            onChange={(e) => onChange({ preset: e.target.value as FilterPreset })}
+          >
+            {FILTERS.map((f) => (
+              <option key={f.value} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <Select value={props.effect ?? "blur"} onChange={(e) => onChange({ effect: e.target.value as EffectName })}>
+            {EFFECTS.map((f) => (
+              <option key={f.value} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </Select>
+        )}
+        {!isFilter && (
+          <p className="mt-1 text-[11px] text-muted">{EFFECTS.find((e) => e.value === (props.effect ?? "blur"))?.hint}</p>
+        )}
+      </div>
+
+      <div>
+        <Label>Strength ({Math.round(intensity * 100)}%)</Label>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={intensity}
+          onChange={(e) => onChange({ intensity: Number(e.target.value) })}
+          className="mt-2.5 w-full accent-accent"
+        />
+      </div>
+
+      <p className="text-[11px] text-muted">
+        Applied to the footage only — captions, text and overlays stay ungraded, both here and in the rendered video.
+      </p>
     </>
   );
 }
@@ -297,13 +377,34 @@ function ImageFields({
 }) {
   return (
     <>
+      <MediaPicker
+        kind="image"
+        label="Image"
+        value={props.image_path ?? ""}
+        onChange={(image_path) => onPropsChange({ image_path })}
+      />
       <div>
-        <Label>Image path (on the media disk)</Label>
-        <Input
-          value={props.image_path ?? ""}
-          placeholder="branding/logo.png"
-          onChange={(e) => onPropsChange({ image_path: e.target.value })}
-        />
+        <Label>Rotation ({Math.round(layer.rotation ?? 0)}°)</Label>
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={-180}
+            max={180}
+            step={1}
+            value={layer.rotation ?? 0}
+            onChange={(e) => onChange({ rotation: Number(e.target.value) })}
+            className="mt-2.5 w-full accent-accent"
+          />
+          {!!layer.rotation && (
+            <button
+              type="button"
+              onClick={() => onChange({ rotation: 0 })}
+              className="mt-2.5 shrink-0 cursor-pointer text-[11px] text-muted hover:text-foreground"
+            >
+              Reset
+            </button>
+          )}
+        </div>
       </div>
       <div>
         <Label>Width ({layer.width == null ? "auto" : `${Math.round((layer.width ?? 0) * 100)}%`})</Label>
@@ -326,14 +427,15 @@ function ImageFields({
 function AudioFields({ props, onChange }: { props: AudioLayerProps; onChange: (patch: Partial<AudioLayerProps>) => void }) {
   return (
     <>
-      <div>
-        <Label>Audio path (on the media disk)</Label>
-        <Input
-          value={props.audio_path ?? ""}
-          placeholder="assets/music/track.mp3"
-          onChange={(e) => onChange({ audio_path: e.target.value })}
-        />
-      </div>
+      <MediaPicker
+        kind="audio"
+        label="Audio"
+        value={props.audio_path ?? ""}
+        // The waveform travels with the selection so the timeline block can draw
+        // it; picking a different track (or typing a path, which has no library
+        // entry) must replace it rather than leave the previous one behind.
+        onChange={(audio_path, asset) => onChange({ audio_path, waveform_path: asset?.waveform_path ?? null })}
+      />
       <div className="grid grid-cols-3 gap-3">
         <div>
           <Label>Volume ({Math.round((props.volume ?? 0.3) * 100)}%)</Label>

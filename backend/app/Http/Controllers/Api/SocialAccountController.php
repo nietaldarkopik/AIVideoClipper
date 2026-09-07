@@ -16,9 +16,7 @@ use Throwable;
 
 class SocialAccountController extends Controller
 {
-    public function __construct(private readonly SocialProviderManager $providers)
-    {
-    }
+    public function __construct(private readonly SocialProviderManager $providers) {}
 
     public function platforms()
     {
@@ -32,7 +30,7 @@ class SocialAccountController extends Controller
 
     public function index(Request $request)
     {
-        $accounts = $request->user()->socialAccounts()->orderBy('platform')->get();
+        $accounts = $request->user()->socialAccounts()->with('defaultCoverTemplate')->orderBy('platform')->get();
 
         return SocialAccountResource::collection($accounts);
     }
@@ -64,7 +62,7 @@ class SocialAccountController extends Controller
     public function authorize(Request $request, string $platform)
     {
         if (! in_array($platform, $this->providers->supportedPlatforms(), true)) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
 
         $provider = $this->providers->resolve($platform);
@@ -86,26 +84,26 @@ class SocialAccountController extends Controller
      */
     public function callback(Request $request, string $platform)
     {
-        $frontendBase = rtrim(config('app.frontend_url'), '/') . '/social-accounts';
+        $frontendBase = rtrim(config('app.frontend_url'), '/').'/social-accounts';
 
         if (! in_array($platform, $this->providers->supportedPlatforms(), true)) {
-            return redirect($frontendBase . '?error=' . urlencode('Unknown platform.'));
+            return redirect($frontendBase.'?error='.urlencode('Unknown platform.'));
         }
 
         if ($request->query('error')) {
-            return redirect($frontendBase . '?error=' . urlencode((string) $request->query('error')));
+            return redirect($frontendBase.'?error='.urlencode((string) $request->query('error')));
         }
 
         $code = $request->query('code');
         $state = $request->query('state');
 
         if (! $code || ! $state) {
-            return redirect($frontendBase . '?error=' . urlencode('Missing code or state from provider.'));
+            return redirect($frontendBase.'?error='.urlencode('Missing code or state from provider.'));
         }
 
         $user = $this->decodeState((string) $state);
         if (! $user) {
-            return redirect($frontendBase . '?error=' . urlencode('Connection request expired or invalid. Please try again.'));
+            return redirect($frontendBase.'?error='.urlencode('Connection request expired or invalid. Please try again.'));
         }
 
         try {
@@ -114,10 +112,10 @@ class SocialAccountController extends Controller
                 'redirect_uri' => $this->redirectUriFor($platform),
             ]);
         } catch (Throwable $e) {
-            return redirect($frontendBase . '?error=' . urlencode($e->getMessage()));
+            return redirect($frontendBase.'?error='.urlencode($e->getMessage()));
         }
 
-        return redirect($frontendBase . '?connected=' . urlencode($platform));
+        return redirect($frontendBase.'?connected='.urlencode($platform));
     }
 
     private function redirectUriFor(string $platform): string
@@ -125,6 +123,7 @@ class SocialAccountController extends Controller
         return match ($platform) {
             'youtube' => (string) config('services.google.redirect_uri'),
             'facebook' => (string) config('services.facebook.redirect_uri'),
+            'tiktok' => (string) (config('services.tiktok.redirect_uri') ?: url('/api/social-accounts/tiktok/callback')),
             default => url("/api/social-accounts/{$platform}/callback"),
         };
     }
@@ -164,11 +163,12 @@ class SocialAccountController extends Controller
 
         $data = $request->validate([
             'auto_publish_enabled' => ['sometimes', 'boolean'],
+            'default_cover_template_id' => ['sometimes', 'nullable', 'exists:cover_templates,id'],
         ]);
 
         $socialAccount->update($data);
 
-        return SocialAccountResource::make($socialAccount);
+        return SocialAccountResource::make($socialAccount->fresh('defaultCoverTemplate'));
     }
 
     public function refresh(Request $request, SocialAccount $socialAccount)
@@ -194,7 +194,7 @@ class SocialAccountController extends Controller
     private function authorizeAccount(Request $request, SocialAccount $account): void
     {
         if ($account->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
     }
 }

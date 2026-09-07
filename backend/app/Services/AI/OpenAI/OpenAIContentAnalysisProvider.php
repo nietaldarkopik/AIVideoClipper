@@ -27,8 +27,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
     public function __construct(
         private readonly string $apiKey,
         private readonly string $model = 'gpt-4o-mini',
-    ) {
-    }
+    ) {}
 
     /**
      * Real shot-boundary detection would need a full frame-diff decode pass; that's
@@ -65,7 +64,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt($maxCandidates);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
-        $span = $this->aiLogger()->start('content_analysis', 'openai', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'openai', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         $response = Http::withToken($this->apiKey)
             ->timeout(180)
@@ -86,7 +85,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
         if ($response->failed()) {
             $span->failure($response->body());
 
-            throw new RuntimeException('OpenAI analysis failed: ' . $response->body());
+            throw new RuntimeException('OpenAI analysis failed: '.$response->body());
         }
 
         $raw = $response->json('choices.0.message.content');
@@ -125,6 +124,8 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -135,6 +136,8 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
 long video, find the {$maxCandidates} best self-contained moments to cut into
@@ -150,6 +153,8 @@ educational, story_peak, conclusion), reasons (array of 2-4 short strings explai
 clip works), explanation (one sentence summary), suggested_title (short, punchy, in the
 transcript's own language), suggested_caption (1-2 sentences, in the transcript's own
 language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
+
+{$coverInstructions}
 
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the

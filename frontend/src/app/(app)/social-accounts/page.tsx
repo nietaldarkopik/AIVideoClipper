@@ -15,7 +15,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ConnectAccountModal } from "@/components/social/ConnectAccountModal";
 import { PLATFORM_LABELS, REAL_OAUTH_PLATFORMS } from "@/components/social/platforms";
 import { formatRelativeTime } from "@/lib/format";
-import type { SocialAccount, SocialPlatform } from "@/lib/types";
+import { Select } from "@/components/ui/Input";
+import type { CoverTemplate, SocialAccount, SocialPlatform } from "@/lib/types";
 
 function SocialAccountsPageInner() {
   const router = useRouter();
@@ -24,6 +25,7 @@ function SocialAccountsPageInner() {
   const [reconnectPlatform, setReconnectPlatform] = useState<SocialPlatform | undefined>(undefined);
   const [reconnectingId, setReconnectingId] = useState<number | null>(null);
   const { data, isLoading } = useApi<{ data: SocialAccount[] }>("/social-accounts");
+  const { data: coverTemplatesRes } = useApi<{ data: CoverTemplate[] }>("/cover-templates");
 
   // Lands here after a real OAuth round trip (SocialAccountController::callback
   // always redirects back with ?connected=<platform> or ?error=<message>).
@@ -51,6 +53,17 @@ function SocialAccountsPageInner() {
   async function toggleAutoPublish(account: SocialAccount) {
     try {
       await api.patch(`/social-accounts/${account.id}`, { auto_publish_enabled: !account.auto_publish_enabled });
+      await mutate("/social-accounts");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to update.", "danger");
+    }
+  }
+
+  async function setDefaultCoverTemplate(account: SocialAccount, coverTemplateId: string) {
+    try {
+      await api.patch(`/social-accounts/${account.id}`, {
+        default_cover_template_id: coverTemplateId ? Number(coverTemplateId) : null,
+      });
       await mutate("/social-accounts");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to update.", "danger");
@@ -174,6 +187,19 @@ function SocialAccountsPageInner() {
                       </p>
                     </div>
                     <StatusBadge status={account.status} />
+                    <Select
+                      value={account.default_cover_template_id ?? ""}
+                      onChange={(e) => setDefaultCoverTemplate(account, e.target.value)}
+                      className="w-auto text-xs"
+                      title="Default cover/thumbnail template auto-applied when publishing this clip here"
+                    >
+                      <option value="">No cover template</option>
+                      {coverTemplatesRes?.data.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </Select>
                     <label className="flex items-center gap-1.5 text-xs text-muted">
                       <input
                         type="checkbox"

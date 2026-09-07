@@ -50,15 +50,14 @@ class FFmpegService
         // encode time/load without touching visual quality, just a somewhat larger
         // output file. See config('services.media.ffmpeg_preset').
         private readonly string $x264Preset = 'superfast',
-        private readonly LayerCompositionService $layerService = new LayerCompositionService(),
+        private readonly LayerCompositionService $layerService = new LayerCompositionService,
         // Same font-file fallback as LayerCompositionService (see its constructor
         // docblock and config('services.media.default_font_file')) — used by
         // renderCoverSegment()'s own drawtext call, which sits outside the layer
         // pipeline so it needs its own copy of this rather than reaching into
         // $layerService for it.
         private readonly ?string $defaultFontFile = null,
-    ) {
-    }
+    ) {}
 
     /**
      * Probe a media file for duration/width/height/size via ffprobe.
@@ -137,7 +136,7 @@ class FFmpegService
         $result = Process::timeout(300)->run([
             $this->ffmpegBin, '-y',
             '-ss', (string) $start, '-i', $sourcePath, '-t', (string) $duration,
-            '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', $bitrateKbps . 'k',
+            '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', $bitrateKbps.'k',
             $outPath,
         ]);
 
@@ -177,6 +176,40 @@ class FFmpegService
     }
 
     /**
+     * Composites a vertical (Shorts) cover into a 16:9 landscape still — a
+     * blurred, brightness-darkened copy of the SAME image stretched to fill the
+     * full canvas as a background, with the original centered on top at full
+     * height. Exists because YouTube's `thumbnails.set` endpoint only ever
+     * generates the classic 16:9 derivative sizes (see YouTubeProvider) — a raw
+     * portrait upload gets pillarboxed by YouTube itself with a plain
+     * blurred-frame background; this produces the same look deliberately from
+     * OUR source cover instead, so the padding actually matches the cover's own
+     * branding/colors rather than an arbitrary video frame.
+     */
+    public function renderPillarboxedLandscapeThumbnail(
+        string $imagePath,
+        string $outPath,
+        int $targetWidth = 1280,
+        int $targetHeight = 720,
+    ): void {
+        $this->ensureDir($outPath);
+
+        $filter = "[0:v]split=2[bg][fg];".
+            "[bg]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,".
+            "crop={$targetWidth}:{$targetHeight},gblur=sigma=30,eq=brightness=-0.12[bgout];".
+            "[fg]scale=-2:{$targetHeight}[fgout];".
+            '[bgout][fgout]overlay=(W-w)/2:(H-h)/2';
+
+        $result = Process::timeout(60)->run([
+            $this->ffmpegBin, '-y', '-i', $imagePath,
+            '-filter_complex', $filter,
+            '-frames:v', '1', '-q:v', '3', $outPath,
+        ]);
+
+        $this->assertSuccess($result, 'render pillarboxed landscape thumbnail');
+    }
+
+    /**
      * One sprite image: THUMBNAIL_STRIP_TILE_COUNT frames sampled evenly across
      * the WHOLE video and tiled left-to-right into a single row. Tile count is
      * fixed regardless of duration (a 2-minute clip and a 7-hour livestream VOD
@@ -205,7 +238,7 @@ class FFmpegService
         $step = $duration / $n;
         $tileHeight = self::THUMBNAIL_STRIP_TILE_HEIGHT;
 
-        $tmpDir = sys_get_temp_dir() . '/thumbstrip_' . uniqid();
+        $tmpDir = sys_get_temp_dir().'/thumbstrip_'.uniqid();
         mkdir($tmpDir, 0777, true);
 
         try {
@@ -265,7 +298,7 @@ class FFmpegService
      * Never throws — silencedetect's "success" is just reaching EOF, and a source
      * with no silence at all is a completely normal result, not a failure.
      *
-     * @return list<array{start: float, end: float}>  clip-relative
+     * @return list<array{start: float, end: float}> clip-relative
      */
     public function detectSilence(
         string $sourcePath,
@@ -321,24 +354,106 @@ class FFmpegService
      *
      * @param  list<array{start: float, end: float}>  $keepIntervals  clip-relative
      */
-    public function extractWithoutSilence(string $sourcePath, string $outPath, float $clipStart, array $keepIntervals): void
+    /**
+     * @param  array<int, array{start: float, end: float}>  $keepIntervals  ranges to keep, in order
+     * @param  array<int, array{type?: string, duration?: float}>  $transitions  keyed by the KEEPINTERVAL index a crossfade should apply BEFORE (i.e. between $keepIntervals[$i-1] and $keepIntervals[$i]) — not every boundary needs an entry. Absent/'none'/'cut' at a given index means a hard cut there, byte-for-byte the same as before this parameter existed. See RenderClipJob::handle() for how this is built: only boundaries between the user's OWN segments carry a transition — the (possibly many) internal cuts AI silence-removal makes within a single one of those segments never do, or a clip with any silence at all would flicker through constant crossfades.
+     */
+    public function extractWithoutSilence(string $sourcePath, string $outPath, float $clipStart, array $keepIntervals, array $transitions = []): void
     {
         $this->ensureDir($outPath);
 
         $inputArgs = ['-ss', (string) $clipStart, '-i', $sourcePath];
         $graph = [];
-        $labels = '';
+        $keepIntervals = array_values($keepIntervals);
+        $n = count($keepIntervals);
 
-        foreach (array_values($keepIntervals) as $i => $seg) {
+        // xfade requires its two video inputs to share an identical time base.
+        // Every trim here comes off the SAME single input, which is enough to
+        // keep them mutually consistent RIGHT AFTER trimming — but a `concat`
+        // filter's output pad does NOT inherit that time base; ffmpeg assigns it
+        // its own (observed: 1/1000000, against a raw trim pad's 1/12800), so a
+        // boundary chain that mixes a hard-cut concat before a later crossfade
+        // fails with "First input link main timebase ... do not match" unless
+        // that concat output is also normalized. fps= resets a pad's time base
+        // to a fixed 1/{fps} regardless of how it got there (documented ffmpeg
+        // behavior — the same trick concatSegments() already relies on for the
+        // same reason, joining separately-produced files there instead of one
+        // concat filter's output here) — applied to every trim's video pad AND
+        // re-applied after every hard-concat step, so no matter how many hard
+        // cuts precede it, the input reaching an xfade is always freshly
+        // normalized. Audio needs no equivalent: every atrim pad already shares
+        // one sample rate/channel layout (they're all cut from the same [0:a]),
+        // unlike concatSegments()'s aformat= case which joins genuinely
+        // different-format files.
+        $needsFpsNormalization = ! empty($transitions);
+
+        foreach ($keepIntervals as $i => $seg) {
             $start = number_format($seg['start'], 3, '.', '');
             $end = number_format($seg['end'], 3, '.', '');
-            $graph[] = "[0:v]trim=start={$start}:end={$end},setpts=PTS-STARTPTS[v{$i}]";
+            $videoFilter = "[0:v]trim=start={$start}:end={$end},setpts=PTS-STARTPTS";
+            if ($needsFpsNormalization) {
+                $videoFilter .= ',fps='.self::FADE_CONCAT_FPS;
+            }
+            $graph[] = "{$videoFilter}[v{$i}]";
             $graph[] = "[0:a]atrim=start={$start}:end={$end},asetpts=PTS-STARTPTS[a{$i}]";
-            $labels .= "[v{$i}][a{$i}]";
         }
 
-        $n = count($keepIntervals);
-        $graph[] = "{$labels}concat=n={$n}:v=1:a=1[vout][aout]";
+        if (empty($transitions)) {
+            // Byte-identical fast path to before this parameter existed — every
+            // clip with a single user segment (regardless of how many pieces AI
+            // silence-removal split it into) still takes this branch untouched.
+            $labels = '';
+            foreach ($keepIntervals as $i => $seg) {
+                $labels .= "[v{$i}][a{$i}]";
+            }
+            $graph[] = "{$labels}concat=n={$n}:v=1:a=1[vout][aout]";
+            $videoLabel = 'vout';
+            $audioLabel = 'aout';
+        } else {
+            // Folds left to right: a boundary WITH a transition entry crossfades
+            // via xfade/acrossfade (same idiom as concatSegments()'s fade path,
+            // generalized to a per-boundary transition instead of one clip-wide
+            // setting); every other boundary is still a plain pairwise concat.
+            $videoLabel = 'v0';
+            $audioLabel = 'a0';
+            $cumulative = $keepIntervals[0]['end'] - $keepIntervals[0]['start'];
+
+            for ($i = 1; $i < $n; $i++) {
+                $intervalDuration = $keepIntervals[$i]['end'] - $keepIntervals[$i]['start'];
+                $type = $transitions[$i]['type'] ?? 'none';
+
+                if (in_array($type, ['fade', 'dissolve'], true)) {
+                    // Clamped against both neighboring intervals (and whatever's
+                    // accumulated into the output so far) so a short segment
+                    // never sends the offset negative or crossfades past its own
+                    // length — same safety clamp as concatSegments()'s fade path.
+                    $requested = max(0.05, (float) ($transitions[$i]['duration'] ?? 0.4));
+                    $pairDuration = max(0.05, min($requested, $cumulative, $intervalDuration));
+                    $offset = max(0.0, $cumulative - $pairDuration);
+                    $durationStr = number_format($pairDuration, 3, '.', '');
+                    $offsetStr = number_format($offset, 3, '.', '');
+
+                    $vOut = "vx{$i}";
+                    $aOut = "ax{$i}";
+                    $graph[] = "[{$videoLabel}][v{$i}]xfade=transition={$type}:duration={$durationStr}:offset={$offsetStr}[{$vOut}]";
+                    $graph[] = "[{$audioLabel}][a{$i}]acrossfade=d={$durationStr}[{$aOut}]";
+                    $videoLabel = $vOut;
+                    $audioLabel = $aOut;
+                    $cumulative = $cumulative + $intervalDuration - $pairDuration;
+                } else {
+                    $vOutRaw = "vc{$i}raw";
+                    $vOut = "vc{$i}";
+                    $aOut = "ac{$i}";
+                    $graph[] = "[{$videoLabel}][{$audioLabel}][v{$i}][a{$i}]concat=n=2:v=1:a=1[{$vOutRaw}][{$aOut}]";
+                    // Re-normalized so this pad is safe to feed into a LATER
+                    // xfade too, however many hard cuts preceded it.
+                    $graph[] = "[{$vOutRaw}]fps=".self::FADE_CONCAT_FPS."[{$vOut}]";
+                    $videoLabel = $vOut;
+                    $audioLabel = $aOut;
+                    $cumulative += $intervalDuration;
+                }
+            }
+        }
 
         $outputArgs = [
             // Re-encoded again by renderClip() right after, so favor quality over
@@ -348,7 +463,7 @@ class FFmpegService
             $outPath,
         ];
 
-        $this->runWithFilterScript($inputArgs, $graph, ['-map', '[vout]', '-map', '[aout]'], $outputArgs, 'remove silence', 1800);
+        $this->runWithFilterScript($inputArgs, $graph, ['-map', "[{$videoLabel}]", '-map', "[{$audioLabel}]"], $outputArgs, 'remove silence', 1800);
     }
 
     /**
@@ -433,8 +548,7 @@ class FFmpegService
         // z_index >= 0 (LayerEditor's "Add layer" starts at 1), so this is a
         // no-op for them: $behindCaptionLayers is empty and behavior is
         // byte-for-byte the same as before.
-        $behindCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) < 0);
-        $aboveCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) >= 0);
+        [$behindCaptionLayers, $aboveCaptionLayers] = $this->partitionLayersAroundCaption($layers);
 
         if (! empty($behindCaptionLayers)) {
             $built = $this->layerService->buildGraph(
@@ -445,6 +559,7 @@ class FFmpegService
                 $duration,
                 $resolveLayerPath ?? fn (string $p) => $p,
                 $nextInputIndex,
+                'behind',
             );
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
@@ -503,6 +618,7 @@ class FFmpegService
                 $duration,
                 $resolveLayerPath ?? fn (string $p) => $p,
                 $nextInputIndex,
+                'above',
             );
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
@@ -530,7 +646,7 @@ class FFmpegService
         $audioMapLabel = $sourceAudioLabel === '0:a' ? '0:a?' : "[{$sourceAudioLabel}]";
         if (! empty($audioLabels)) {
             $mixInputs = array_merge(["[{$sourceAudioLabel}]"], $audioLabels);
-            $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ':duration=first:dropout_transition=0[aout]';
+            $graph[] = implode('', $mixInputs).'amix=inputs='.count($mixInputs).':duration=first:dropout_transition=0[aout]';
             $audioMapLabel = '[aout]';
         }
 
@@ -644,8 +760,7 @@ class FFmpegService
         // see its docblock/comment for why. Existing templates never use a
         // negative z_index, so $behindCaptionLayers is empty for them and this
         // is a no-op.
-        $behindCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) < 0);
-        $aboveCaptionLayers = array_filter($layers, fn (array $l) => (float) ($l['z_index'] ?? 0) >= 0);
+        [$behindCaptionLayers, $aboveCaptionLayers] = $this->partitionLayersAroundCaption($layers);
 
         if (! empty($behindCaptionLayers)) {
             $built = $this->layerService->buildGraph(
@@ -656,6 +771,7 @@ class FFmpegService
                 $duration,
                 $resolveLayerPath ?? fn (string $p) => $p,
                 $nextInputIndex,
+                'behind',
             );
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
@@ -680,6 +796,7 @@ class FFmpegService
                 $duration,
                 $resolveLayerPath ?? fn (string $p) => $p,
                 $nextInputIndex,
+                'above',
             );
             $graph = array_merge($graph, $built['graph']);
             $inputArgs = array_merge($inputArgs, $built['inputArgs']);
@@ -706,7 +823,7 @@ class FFmpegService
         // truncate the source+webcam audio (see renderClip()'s equivalent case).
         $mixInputs = array_merge(["[{$sourceAudioLabel}]", '[1:a]'], $audioLabels);
         $mixDuration = empty($audioLabels) ? 'shortest' : 'first';
-        $graph[] = implode('', $mixInputs) . 'amix=inputs=' . count($mixInputs) . ":duration={$mixDuration}:dropout_transition=0[aout]";
+        $graph[] = implode('', $mixInputs).'amix=inputs='.count($mixInputs).":duration={$mixDuration}:dropout_transition=0[aout]";
         $audioMapLabel = '[aout]';
 
         // Speed is the FINAL transform — see renderClip()'s equivalent block.
@@ -714,7 +831,7 @@ class FFmpegService
             $spd = number_format(max(0.5, min(2.0, $speed)), 3, '.', '');
             $graph[] = "[{$outputLabel}]setpts=PTS/{$spd}[spedvideo]";
             $outputLabel = 'spedvideo';
-            $graph[] = '[aout]atempo=' . $spd . '[spedaudio]';
+            $graph[] = '[aout]atempo='.$spd.'[spedaudio]';
             $audioMapLabel = '[spedaudio]';
         }
 
@@ -782,12 +899,12 @@ class FFmpegService
             // percent) in the same value, which AI-generated reaction lines hit
             // constantly (contractions/quotes alongside times or punctuation).
             $wrapped = wordwrap(trim($overlayText), 28, "\n", true);
-            $textTempFile = tempnam(sys_get_temp_dir(), 'covertext_') . '.txt';
+            $textTempFile = tempnam(sys_get_temp_dir(), 'covertext_').'.txt';
             file_put_contents($textTempFile, $wrapped);
 
             $fontSize = max(1, (int) round($targetWidth * 0.06));
             $params = [
-                "textfile='" . $this->escapeFilterPath($textTempFile) . "'",
+                "textfile='".$this->escapeFilterPath($textTempFile)."'",
                 'expansion=none',
                 "fontsize={$fontSize}",
                 'fontcolor=white',
@@ -803,9 +920,9 @@ class FFmpegService
             // config('services.media.default_font_file')'s docblock. Only reached
             // when no default_font_file is configured at all.
             if ($this->defaultFontFile) {
-                $params[] = "fontfile='" . $this->escapeFilterPath($this->defaultFontFile) . "'";
+                $params[] = "fontfile='".$this->escapeFilterPath($this->defaultFontFile)."'";
             }
-            $graph[] = "[{$videoLabel}]drawtext=" . implode(':', $params) . '[covertext]';
+            $graph[] = "[{$videoLabel}]drawtext=".implode(':', $params).'[covertext]';
             $videoLabel = 'covertext';
         }
 
@@ -834,6 +951,298 @@ class FFmpegService
     }
 
     /**
+     * Renders a single still-image social/thumbnail cover from a source frame
+     * (see generateThumbnail()) scaled/cropped to the target canvas, then
+     * composited with: a flat color wash, a stepped darkening gradient, an
+     * optional kicker label, the headline (wrapped, with per-line hugging
+     * boxes and per-line accent coloring), an optional subline, and an optional
+     * corner badge. See DefaultCoverTemplateConfig for the $config shape — the
+     * layout math here is mirrored in the cover-template editor's live preview,
+     * so any change to spacing/sizing needs to happen in both.
+     *
+     * Every text run goes through textfile= rather than inline text= for the
+     * same crash-avoidance reason renderCoverSegment() documents.
+     */
+    public function renderCoverImage(
+        string $imagePath,
+        string $outPath,
+        int $targetWidth,
+        int $targetHeight,
+        string $headline,
+        array $config = [],
+    ): void {
+        $this->ensureDir($outPath);
+
+        $background = $config['background'] ?? [];
+        $kicker = $config['kicker'] ?? [];
+        $textConfig = $config['text'] ?? [];
+        $subline = $config['subline'] ?? [];
+        $badge = $config['badge'] ?? [];
+
+        $graph = [];
+        $label = 'base';
+        $graph[] = "[0:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight}[{$label}]";
+
+        $tmpFiles = [];
+        $step = 0;
+        // Each filter needs a unique output pad name — a collision silently
+        // produces a broken graph rather than an error (see this file's other
+        // pad-naming sites).
+        $nextLabel = function () use (&$step) {
+            return 'cv'.(++$step);
+        };
+
+        // --- background wash -------------------------------------------------
+        $washOpacity = (float) ($background['overlay_opacity'] ?? 0);
+        if ($washOpacity > 0.001) {
+            $washColor = $this->toFfmpegColor($background['overlay_color'] ?? '#000000', $washOpacity);
+            $out = $nextLabel();
+            $graph[] = "[{$label}]drawbox=x=0:y=0:w=iw:h=ih:color={$washColor}:t=fill[{$out}]";
+            $label = $out;
+        }
+
+        // --- background gradient (stepped bands) -----------------------------
+        $gradient = $background['gradient'] ?? [];
+        if (! empty($gradient['enabled']) && (float) ($gradient['opacity'] ?? 0) > 0.001) {
+            $bands = 26;
+            $gradientHeight = max(1, (int) round($targetHeight * (float) ($gradient['size'] ?? 0.45)));
+            $bandHeight = (int) ceil($gradientHeight / $bands);
+            $fromTop = ($gradient['position'] ?? 'bottom') === 'top';
+            $maxOpacity = (float) $gradient['opacity'];
+
+            for ($i = 0; $i < $bands; $i++) {
+                // Eased ramp (squared) rather than linear — a linear stack of
+                // flat bands reads as visible banding, this keeps the light end
+                // subtle and concentrates the falloff near the edge.
+                $t = ($i + 1) / $bands;
+                $bandOpacity = round($maxOpacity * $t * $t, 4);
+                $y = $fromTop
+                    ? $gradientHeight - ($i + 1) * $bandHeight
+                    : $targetHeight - $gradientHeight + $i * $bandHeight;
+                $color = $this->toFfmpegColor($gradient['color'] ?? '#000000', $bandOpacity);
+                $out = $nextLabel();
+                $graph[] = "[{$label}]drawbox=x=0:y={$y}:w=iw:h={$bandHeight}:color={$color}:t=fill[{$out}]";
+                $label = $out;
+            }
+        }
+
+        // --- layout math (mirrored by the editor's live preview) -------------
+        $headline = trim($headline);
+        if (! empty($textConfig['uppercase'])) {
+            $headline = mb_strtoupper($headline);
+        }
+        $lines = $headline === ''
+            ? []
+            : explode("\n", wordwrap($headline, max(6, (int) ($textConfig['wrap_chars'] ?? 16)), "\n", true));
+
+        $fontSize = (int) ($textConfig['font_size'] ?? 0) ?: max(1, (int) round($targetWidth * (float) ($textConfig['font_scale'] ?? 0.085)));
+        $lineHeight = (int) round($fontSize * 1.28);
+        $linePad = (int) round($fontSize * 0.18);
+        $gap = (int) round($fontSize * 0.3);
+        $marginY = (int) round($targetHeight * 0.05);
+        $marginX = (int) round($targetWidth * 0.055);
+
+        $kickerOn = ! empty($kicker['enabled']) && trim((string) ($kicker['text'] ?? '')) !== '';
+        $kickerFont = max(1, (int) round($targetWidth * (float) ($kicker['font_scale'] ?? 0.045)));
+        $kickerPad = (int) round($kickerFont * 0.32);
+        $kickerHeight = $kickerFont + 2 * $kickerPad;
+
+        $sublineOn = ! empty($subline['enabled']) && trim((string) ($subline['text'] ?? '')) !== '';
+        $sublineFont = max(1, (int) round($targetWidth * (float) ($subline['font_scale'] ?? 0.038)));
+        $sublinePad = (int) round($sublineFont * 0.32);
+        $sublineHeight = $sublineFont + 2 * $sublinePad;
+
+        $blockHeight = ($kickerOn ? $kickerHeight + $gap : 0)
+            + count($lines) * $lineHeight
+            + ($sublineOn ? $gap + $sublineHeight : 0);
+
+        $blockTop = match ($textConfig['position'] ?? 'bottom') {
+            'top' => $marginY,
+            'center' => (int) round(($targetHeight - $blockHeight) / 2),
+            default => $targetHeight - $marginY - $blockHeight,
+        };
+
+        $alignLeft = ($textConfig['align'] ?? 'center') === 'left';
+        $centerX = fn (int $pad) => '(main_w-text_w)/2';
+        $leftX = fn (int $pad) => (string) ($marginX + $pad);
+        $xFor = $alignLeft ? $leftX : $centerX;
+
+        // --- headline band (single bar behind the whole block) ---------------
+        $blockStyle = $textConfig['block_style'] ?? 'lines';
+        $textBgOpacity = (float) ($textConfig['background_opacity'] ?? 0);
+        if ($blockStyle === 'band' && $textBgOpacity > 0.001 && ! empty($lines)) {
+            $bandColor = $this->toFfmpegColor($textConfig['background'] ?? '#000000', $textBgOpacity);
+            $bandY = max(0, $blockTop - $marginY);
+            $bandH = $blockHeight + 2 * $marginY;
+            $out = $nextLabel();
+            $graph[] = "[{$label}]drawbox=x=0:y={$bandY}:w=iw:h={$bandH}:color={$bandColor}:t=fill[{$out}]";
+            $label = $out;
+        }
+
+        $cursorY = $blockTop;
+
+        // --- kicker ----------------------------------------------------------
+        if ($kickerOn) {
+            $file = tempnam(sys_get_temp_dir(), 'coverkick_').'.txt';
+            file_put_contents($file, mb_strtoupper(trim((string) $kicker['text'])));
+            $tmpFiles[] = $file;
+
+            $params = [
+                "textfile='".$this->escapeFilterPath($file)."'",
+                'expansion=none',
+                "fontsize={$kickerFont}",
+                'fontcolor='.$this->toFfmpegColor($kicker['color'] ?? '#111111'),
+                'x='.$xFor($kickerPad),
+                'y='.($cursorY + $kickerPad),
+                'box=1',
+                'boxcolor='.$this->toFfmpegColor($kicker['background'] ?? '#FFD100', (float) ($kicker['background_opacity'] ?? 1.0)),
+                "boxborderw={$kickerPad}",
+            ];
+            $label = $this->appendDrawText($graph, $label, $params, $nextLabel());
+            $cursorY += $kickerHeight + $gap;
+        }
+
+        // --- headline lines ---------------------------------------------------
+        $highlightMode = $textConfig['highlight_mode'] ?? 'none';
+        $baseColor = $this->toFfmpegColor($textConfig['color'] ?? '#FFFFFF');
+        $accentColor = $this->toFfmpegColor($textConfig['highlight_color'] ?? '#FFD100');
+        $strokeWidth = (int) ($textConfig['stroke_width'] ?? 0);
+        $shadowX = (int) ($textConfig['shadow_x'] ?? 0);
+        $shadowY = (int) ($textConfig['shadow_y'] ?? 0);
+        $lineBoxColor = $this->toFfmpegColor($textConfig['background'] ?? '#000000', $textBgOpacity);
+
+        foreach ($lines as $i => $line) {
+            $file = tempnam(sys_get_temp_dir(), 'coverline_').'.txt';
+            file_put_contents($file, $line);
+            $tmpFiles[] = $file;
+
+            $isAccent = match ($highlightMode) {
+                'first_line' => $i === 0,
+                'last_line' => $i === count($lines) - 1,
+                'alternate' => $i % 2 === 1,
+                default => false,
+            };
+
+            $params = [
+                "textfile='".$this->escapeFilterPath($file)."'",
+                'expansion=none',
+                "fontsize={$fontSize}",
+                'fontcolor='.($isAccent ? $accentColor : $baseColor),
+                'x='.$xFor($linePad),
+                'y='.($cursorY + $i * $lineHeight),
+            ];
+            if ($strokeWidth > 0) {
+                $params[] = "borderw={$strokeWidth}";
+                $params[] = 'bordercolor='.$this->toFfmpegColor($textConfig['stroke_color'] ?? '#000000');
+            }
+            if ($shadowX !== 0 || $shadowY !== 0) {
+                $params[] = 'shadowcolor='.$this->toFfmpegColor($textConfig['shadow_color'] ?? '#000000');
+                $params[] = "shadowx={$shadowX}";
+                $params[] = "shadowy={$shadowY}";
+            }
+            if ($blockStyle === 'lines' && $textBgOpacity > 0.001) {
+                $params[] = 'box=1';
+                $params[] = "boxcolor={$lineBoxColor}";
+                $params[] = "boxborderw={$linePad}";
+            }
+
+            $label = $this->appendDrawText($graph, $label, $params, $nextLabel());
+        }
+        $cursorY += count($lines) * $lineHeight;
+
+        // --- subline ----------------------------------------------------------
+        if ($sublineOn) {
+            $file = tempnam(sys_get_temp_dir(), 'coversub_').'.txt';
+            file_put_contents($file, trim((string) $subline['text']));
+            $tmpFiles[] = $file;
+
+            $params = [
+                "textfile='".$this->escapeFilterPath($file)."'",
+                'expansion=none',
+                "fontsize={$sublineFont}",
+                'fontcolor='.$this->toFfmpegColor($subline['color'] ?? '#FFFFFF'),
+                'x='.$xFor($sublinePad),
+                'y='.($cursorY + $gap + $sublinePad),
+                'box=1',
+                'boxcolor='.$this->toFfmpegColor($subline['background'] ?? '#E11D48', (float) ($subline['background_opacity'] ?? 1.0)),
+                "boxborderw={$sublinePad}",
+            ];
+            $label = $this->appendDrawText($graph, $label, $params, $nextLabel());
+        }
+
+        // --- corner badge ------------------------------------------------------
+        if (! empty($badge['enabled']) && trim((string) ($badge['text'] ?? '')) !== '') {
+            $file = tempnam(sys_get_temp_dir(), 'coverbadge_').'.txt';
+            file_put_contents($file, mb_strtoupper(trim($badge['text'])));
+            $tmpFiles[] = $file;
+
+            $badgeFont = max(1, (int) round($targetWidth * 0.045));
+            $badgePad = (int) round($badgeFont * 0.35);
+            $params = [
+                "textfile='".$this->escapeFilterPath($file)."'",
+                'expansion=none',
+                "fontsize={$badgeFont}",
+                'fontcolor='.$this->toFfmpegColor($badge['text_color'] ?? '#FFFFFF'),
+                'x='.($marginX + $badgePad),
+                'y='.($marginY + $badgePad),
+                'box=1',
+                'boxcolor='.$this->toFfmpegColor($badge['color'] ?? '#FF3B30'),
+                "boxborderw={$badgePad}",
+            ];
+            $label = $this->appendDrawText($graph, $label, $params, $nextLabel());
+        }
+
+        $videoLabel = $label;
+
+        try {
+            $this->runWithFilterScript(
+                ['-i', $imagePath],
+                $graph,
+                ['-map', "[{$videoLabel}]"],
+                ['-frames:v', '1', '-q:v', '2', $outPath],
+                'render cover image',
+                60
+            );
+        } finally {
+            foreach ($tmpFiles as $f) {
+                if (file_exists($f)) {
+                    unlink($f);
+                }
+            }
+        }
+    }
+
+    /**
+     * Appends one drawtext filter (plus this build's font file, when one is
+     * configured — see renderCoverSegment()'s note on bare font= lookups) to a
+     * cover's filtergraph, returning the new current pad label.
+     *
+     * @param  list<string>  $graph
+     * @param  list<string>  $params
+     */
+    private function appendDrawText(array &$graph, string $inLabel, array $params, string $outLabel): string
+    {
+        if ($this->defaultFontFile) {
+            $params[] = "fontfile='".$this->escapeFilterPath($this->defaultFontFile)."'";
+        }
+
+        $graph[] = "[{$inLabel}]drawtext=".implode(':', $params)."[{$outLabel}]";
+
+        return $outLabel;
+    }
+
+    /**
+     * #RRGGBB (validated via normalizeHexColor()) -> ffmpeg's 0xRRGGBB[@opacity]
+     * color syntax, used by drawtext/drawbox params above.
+     */
+    private function toFfmpegColor(string $hex, float $opacity = 1.0): string
+    {
+        $color = '0x'.ltrim($this->normalizeHexColor($hex), '#');
+
+        return $opacity < 1.0 ? $color.'@'.max(0.0, min(1.0, $opacity)) : $color;
+    }
+
+    /**
      * Concatenate several already-rendered segments (cover intro/outro + the main
      * clip output, in order) into one file. Uses the concat FILTER (re-decode +
      * re-encode), not the concat demuxer's "-c copy" — a cover segment and the main
@@ -843,9 +1252,10 @@ class FFmpegService
      * resolution for the same reason. See RenderClipJob for how this is used.
      *
      * @param  list<string>  $segmentPaths  in playback order
-     * @param  ?array{type?: string, duration?: float}  $transition  null/'cut' (default, every call before this feature) joins segments with a hard cut via the concat filter, byte-for-byte the same as before. 'fade' instead chains xfade/acrossfade pairs across each boundary — see the per-pair duration clamp below for why a segment shorter than the configured duration doesn't break the offset math.
+     * @param  ?array{type?: string, duration?: float}  $transition  null/'cut' (default, every call before this feature) joins EVERY boundary with a hard cut via the concat filter, byte-for-byte the same as before. 'fade' instead chains xfade/acrossfade pairs across EVERY boundary — see the per-pair duration clamp below for why a segment shorter than the configured duration doesn't break the offset math. Superseded by $transitions when that's non-empty; kept for composeIntroOutro()'s existing "one shared setting for however many joins it has" call, and normalized into the same per-boundary shape internally.
+     * @param  array<int, array{type?: string, duration?: float}>  $transitions  keyed by the SEGMENT index a crossfade should sit before (i.e. between $segmentPaths[$i-1] and $segmentPaths[$i]) — the per-boundary sibling of FFmpegService::extractWithoutSilence()'s own $transitions param, same convention. Absent/'none'/'cut' at a given index is a hard cut there. Takes precedence over $transition when non-empty.
      */
-    public function concatSegments(array $segmentPaths, string $outPath, int $targetWidth, int $targetHeight, ?array $transition = null): void
+    public function concatSegments(array $segmentPaths, string $outPath, int $targetWidth, int $targetHeight, ?array $transition = null, array $transitions = []): void
     {
         $this->ensureDir($outPath);
         $segmentPaths = array_values($segmentPaths);
@@ -861,37 +1271,45 @@ class FFmpegService
             return;
         }
 
-        $transitionType = $transition['type'] ?? 'cut';
-        $transitionDuration = (float) ($transition['duration'] ?? 0.4);
+        // The legacy single-$transition shape (one setting applied to EVERY
+        // boundary) is just the per-boundary shape with the same entry repeated
+        // at every index — normalizing it here means the fold below only ever
+        // has to reason about one shape.
+        if (empty($transitions) && ($transition['type'] ?? 'cut') === 'fade') {
+            $duration = (float) ($transition['duration'] ?? 0.4);
+            for ($i = 1; $i < $n; $i++) {
+                $transitions[$i] = ['type' => 'fade', 'duration' => $duration];
+            }
+        }
 
         $inputArgs = [];
         $graph = [];
+        $needsFpsNormalization = ! empty($transitions);
 
         foreach ($segmentPaths as $i => $path) {
             $inputArgs[] = '-i';
             $inputArgs[] = $path;
             $filter = "[{$i}:v]scale={$targetWidth}:{$targetHeight}:force_original_aspect_ratio=increase,crop={$targetWidth}:{$targetHeight},setsar=1";
-            if ($transitionType === 'fade' && $transitionDuration > 0) {
+            if ($needsFpsNormalization) {
                 // xfade requires its two input pads to share an identical time
                 // base — segments generated by different paths in this app (an
                 // intro/outro card looped from a still image vs. a real decoded-
-                // and-re-encoded clip) end up with different container time
-                // bases even at the same frame rate (observed: 1/12800 vs
-                // 1/1000000 despite both being 25fps), which ffmpeg reports as
-                // "First input link main timebase ... do not match" and refuses
-                // to configure the filter at all. fps= resets a pad's time base
-                // to a fixed 1/{fps} as a side effect (documented ffmpeg
-                // behavior), so applying it identically to every segment here
-                // guarantees a match regardless of where each one came from.
-                // Scoped to the fade path only — the plain concat filter below
-                // has no such requirement and re-encoding every segment's frame
-                // rate for it would be an unrelated, unnecessary quality cost.
-                $filter .= ',fps=' . self::FADE_CONCAT_FPS;
+                // and-re-encoded clip, or two independently-rendered additional
+                // video clips) end up with different container time bases even
+                // at the same frame rate (observed: 1/12800 vs 1/1000000 despite
+                // both being 25fps), which ffmpeg reports as "First input link
+                // main timebase ... do not match" and refuses to configure the
+                // filter at all. fps= resets a pad's time base to a fixed
+                // 1/{fps} as a side effect (documented ffmpeg behavior),
+                // applied to every segment here so any pairing matches
+                // regardless of where each one came from.
+                $filter .= ',fps='.self::FADE_CONCAT_FPS;
             }
             $graph[] = "{$filter}[v{$i}]";
 
-            // Unlike fps= above, this normalization applies to BOTH paths, not
-            // just fade: the plain concat FILTER below (used for 'cut') also
+            // Unlike fps= above, this normalization applies whenever there's
+            // more than one segment at all, not just when transitions are in
+            // play: the plain concat FILTER (used for a hard-cut boundary) also
             // negotiates a single common audio format across its inputs, same
             // as acrossfade does — it just doesn't hard-reject a mismatch the
             // way xfade rejects a mismatched video time base, so this failure
@@ -902,38 +1320,56 @@ class FFmpegService
             // (worse) format for the WHOLE output — quietly downsampling the
             // actual dialogue audio even on a hard-cut concat with no fade at
             // all. Normalizing every segment to the same sample rate/channel
-            // layout up front means both filters always negotiate a chain
+            // layout up front means every filter always negotiates a chain
             // that's already uniform, instead of picking a lowest-common-
             // denominator format on their own.
-            $graph[] = "[{$i}:a]aformat=sample_rates=" . self::CONCAT_AUDIO_SAMPLE_RATE . ':channel_layouts=stereo[a' . $i . ']';
+            $graph[] = "[{$i}:a]aformat=sample_rates=".self::CONCAT_AUDIO_SAMPLE_RATE.':channel_layouts=stereo[a'.$i.']';
         }
 
-        if ($transitionType === 'fade' && $transitionDuration > 0) {
+        if (! empty($transitions)) {
             // xfade needs each segment's real duration up front to compute where
             // (in the growing output timeline) each crossfade should begin.
             $durations = array_map(fn (string $p) => max(0.1, $this->probeDuration($p) ?? 0.1), $segmentPaths);
 
+            // Folds left to right, exactly mirroring
+            // extractWithoutSilence()'s own per-boundary fold: a boundary WITH
+            // a transition entry crossfades via xfade/acrossfade; every other
+            // boundary is a plain pairwise concat, re-normalized with fps=
+            // afterward so it stays safe to feed into a LATER crossfade however
+            // many hard cuts precede it — see that method's docblock for the
+            // concat-output-timebase bug this guards against.
             $videoLabel = 'v0';
             $audioLabel = 'a0';
             $cumulative = $durations[0];
 
             for ($i = 1; $i < $n; $i++) {
-                // Clamp against both neighboring segments (and whatever's
-                // accumulated so far) so a short intro/outro card never sends
-                // offset negative or crossfades past a segment's own length.
-                $pairDuration = min($transitionDuration, $durations[$i - 1], $durations[$i], $cumulative);
-                $pairDuration = max(0.05, $pairDuration);
-                $offset = max(0.0, $cumulative - $pairDuration);
-                $durationStr = number_format($pairDuration, 3, '.', '');
-                $offsetStr = number_format($offset, 3, '.', '');
+                $intervalDuration = $durations[$i];
+                $type = $transitions[$i]['type'] ?? 'none';
 
-                $vOut = "vx{$i}";
-                $aOut = "ax{$i}";
-                $graph[] = "[{$videoLabel}][v{$i}]xfade=transition=fade:duration={$durationStr}:offset={$offsetStr}[{$vOut}]";
-                $graph[] = "[{$audioLabel}][a{$i}]acrossfade=d={$durationStr}[{$aOut}]";
-                $videoLabel = $vOut;
-                $audioLabel = $aOut;
-                $cumulative = $cumulative + $durations[$i] - $pairDuration;
+                if (in_array($type, ['fade', 'dissolve'], true)) {
+                    $requested = max(0.05, (float) ($transitions[$i]['duration'] ?? 0.4));
+                    $pairDuration = max(0.05, min($requested, $cumulative, $intervalDuration));
+                    $offset = max(0.0, $cumulative - $pairDuration);
+                    $durationStr = number_format($pairDuration, 3, '.', '');
+                    $offsetStr = number_format($offset, 3, '.', '');
+
+                    $vOut = "vx{$i}";
+                    $aOut = "ax{$i}";
+                    $graph[] = "[{$videoLabel}][v{$i}]xfade=transition={$type}:duration={$durationStr}:offset={$offsetStr}[{$vOut}]";
+                    $graph[] = "[{$audioLabel}][a{$i}]acrossfade=d={$durationStr}[{$aOut}]";
+                    $videoLabel = $vOut;
+                    $audioLabel = $aOut;
+                    $cumulative = $cumulative + $intervalDuration - $pairDuration;
+                } else {
+                    $vOutRaw = "vc{$i}raw";
+                    $vOut = "vc{$i}";
+                    $aOut = "ac{$i}";
+                    $graph[] = "[{$videoLabel}][{$audioLabel}][v{$i}][a{$i}]concat=n=2:v=1:a=1[{$vOutRaw}][{$aOut}]";
+                    $graph[] = "[{$vOutRaw}]fps=".self::FADE_CONCAT_FPS."[{$vOut}]";
+                    $videoLabel = $vOut;
+                    $audioLabel = $aOut;
+                    $cumulative += $intervalDuration;
+                }
             }
 
             $outputArgs = [
@@ -970,14 +1406,42 @@ class FFmpegService
      *
      * @return array{0: string[], 1: string}
      */
+    /**
+     * Splits override-merged layers into the two tiers renderClip()/
+     * renderReactionClip() composite around the caption burn-in.
+     *
+     * A negative z_index means "render before/underneath the caption" (see the
+     * call sites) — z_index otherwise only orders layers against each other, never
+     * against the caption, so this is the one knob that expresses that.
+     *
+     * 'effect'/'filter' layers are forced into the behind tier regardless of their
+     * z_index: they're pixel transforms of the footage (blur, color grade,
+     * vignette), and grading or blurring the burned-in caption along with the video
+     * would defeat the caption's whole purpose. This matches how a CapCut-style
+     * editor treats effects and filters as properties of the video track, not as
+     * overlays stacked on top of everything.
+     *
+     * @param  array<int, array<string, mixed>>  $layers
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>} [behind-caption, above-caption]
+     */
+    private function partitionLayersAroundCaption(array $layers): array
+    {
+        $isColorLayer = fn (array $l) => in_array($l['type'] ?? null, ['effect', 'filter'], true);
+
+        return [
+            array_filter($layers, fn (array $l) => $isColorLayer($l) || (float) ($l['z_index'] ?? 0) < 0),
+            array_filter($layers, fn (array $l) => ! $isColorLayer($l) && (float) ($l['z_index'] ?? 0) >= 0),
+        ];
+    }
+
     private function buildPipGraph(array $cropKeyframes, float $duration, int $targetWidth, int $targetHeight, bool $right, bool $bottom): array
     {
         [$graph, $videoLabel] = $this->buildCropSegments('0:v', $cropKeyframes, $duration, 'crop');
         $graph[] = "[{$videoLabel}]scale={$targetWidth}:{$targetHeight}[base]";
 
         $pipSize = (int) round($targetWidth * self::PIP_SIZE_RATIO);
-        $x = $right ? 'W-w-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
-        $y = $bottom ? 'H-h-' . self::PIP_MARGIN : (string) self::PIP_MARGIN;
+        $x = $right ? 'W-w-'.self::PIP_MARGIN : (string) self::PIP_MARGIN;
+        $y = $bottom ? 'H-h-'.self::PIP_MARGIN : (string) self::PIP_MARGIN;
 
         $graph[] = "[1:v]scale={$pipSize}:{$pipSize}:force_original_aspect_ratio=increase,crop={$pipSize}:{$pipSize}[pip]";
         $graph[] = "[base][pip]overlay={$x}:{$y}[composited]";
@@ -1064,7 +1528,7 @@ class FFmpegService
      * @param  string  $inputLabel  pad to crop, without brackets (e.g. '0:v')
      * @param  array<int, array{time: float, x: float, y: float, width: float, height: float}>  $cropKeyframes  clip-relative
      * @param  string  $labelPrefix  unique per call site sharing a filtergraph, so pad names never collide (e.g. 'crop' vs 'pipcrop')
-     * @return array{0: string[], 1: string}  [graph lines, output pad label (no brackets)]
+     * @return array{0: string[], 1: string} [graph lines, output pad label (no brackets)]
      */
     private function buildCropSegments(string $inputLabel, array $cropKeyframes, float $duration, string $labelPrefix): array
     {
@@ -1115,7 +1579,7 @@ class FFmpegService
             $segLabels[] = "[{$label}]";
         }
 
-        $graph[] = implode('', $segLabels) . 'concat=n=' . count($segLabels) . ":v=1:a=0[{$outLabel}]";
+        $graph[] = implode('', $segLabels).'concat=n='.count($segLabels).":v=1:a=0[{$outLabel}]";
 
         return [$graph, $outLabel];
     }
@@ -1186,7 +1650,7 @@ class FFmpegService
         // instead of $w x $h, failing with "Invalid too big or non positive size"
         // even though the generated graph text was correct. An explicit split
         // sidesteps whatever internal reconfiguration path that auto-fanout hits.
-        $graph[] = "[{$videoLabel}]split={$steps}" . implode('', array_map(fn ($l) => "[{$l}]", $splitLabels));
+        $graph[] = "[{$videoLabel}]split={$steps}".implode('', array_map(fn ($l) => "[{$l}]", $splitLabels));
 
         foreach ($splitLabels as $i => $inLabel) {
             $t0 = $duration * $i / $steps;
@@ -1216,7 +1680,7 @@ class FFmpegService
             $segLabels[] = "[{$label}]";
         }
 
-        $graph[] = implode('', $segLabels) . 'concat=n=' . count($segLabels) . ':v=1:a=0[effected]';
+        $graph[] = implode('', $segLabels).'concat=n='.count($segLabels).':v=1:a=0[effected]';
 
         return [$graph, 'effected'];
     }
@@ -1359,7 +1823,7 @@ class FFmpegService
     private function assertSuccess($result, string $action): void
     {
         if (! $result->successful()) {
-            throw new RuntimeException("ffmpeg failed to {$action}: " . $result->errorOutput());
+            throw new RuntimeException("ffmpeg failed to {$action}: ".$result->errorOutput());
         }
     }
 }

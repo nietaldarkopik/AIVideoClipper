@@ -5,13 +5,16 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\SocialPostResource;
 use App\Jobs\PublishClipJob;
+use App\Jobs\ReapplyYoutubeThumbnailJob;
 use App\Models\Clip;
+use App\Models\ProcessingJob;
 use App\Models\PublishingProfile;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
 use App\Services\Social\AutoPublishScheduler;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class SocialPostController extends Controller
@@ -42,15 +45,35 @@ class SocialPostController extends Controller
             $query->where('scheduled_at', '<=', Carbon::parse($request->string('scheduled_to')));
         }
 
-        // Sorted by scheduled_at (soonest first, nulls last) rather than
-        // created_at — the whole point of this endpoint is "what's coming up",
-        // and with per_page capped, ordering by creation time meant an old post
-        // freshly rescheduled into the near future could sit behind hundreds of
-        // more-recently-created rows and never actually reach the response.
+        // Sorting happens in the database, not in the page the client already
+        // received — the scheduler table pages through thousands of rows, so a
+        // client-side sort would only ever reorder the current 25.
+        $direction = $request->string('sort_dir')->lower()->toString() === 'desc' ? 'desc' : 'asc';
+
+        match ($request->string('sort_by')->toString()) {
+            // Ordered by the channel's display name rather than its id, since
+            // that's the column the table actually shows.
+            'channel' => $query->orderBy(
+                SocialAccount::select('account_name')->whereColumn('social_accounts.id', 'social_posts.social_account_id'),
+                $direction
+            ),
+            'status' => $query->orderBy('status', $direction),
+            // "Not published yet" is an absence, not a date — those rows sort to
+            // the end either way instead of masquerading as the oldest.
+            'published_at' => $query->orderByRaw('published_at IS NULL')->orderBy('published_at', $direction),
+            // Default: scheduled_at (soonest first, nulls last) rather than
+            // created_at — the whole point of this endpoint is "what's coming
+            // up", and with per_page capped, ordering by creation time meant an
+            // old post freshly rescheduled into the near future could sit behind
+            // hundreds of more-recently-created rows and never reach the response.
+            default => $query->orderByRaw('scheduled_at IS NULL')->orderBy('scheduled_at', $direction),
+        };
+
         $posts = $query->with(['socialAccount', 'clip.project'])
-            ->orderByRaw('scheduled_at IS NULL')
-            ->orderBy('scheduled_at')
-            ->orderByDesc('created_at')
+            // Stable tiebreaker: without one, rows sharing a sort value (every
+            // post of the same status, say) can swap places between pages and
+            // show up twice or not at all while paging.
+            ->orderByDesc('id')
             ->paginate($request->integer('per_page', 24));
 
         return SocialPostResource::collection($posts);
@@ -73,7 +96,7 @@ class SocialPostController extends Controller
 
         $clip = Clip::findOrFail($data['clip_id']);
         if ($clip->project->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
         if ($clip->status !== Clip::STATUS_COMPLETED) {
             return response()->json(['message' => 'Clip must finish rendering before it can be published.'], 422);
@@ -252,12 +275,12 @@ class SocialPostController extends Controller
             'window_end_hour' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:24'],
         ]);
 
-        if (
-            isset($data['window_start_hour'], $data['window_end_hour'])
-            && $data['window_start_hour'] >= $data['window_end_hour']
-        ) {
-            return response()->json(['message' => 'window_end_hour must be after window_start_hour.'], 422);
-        }
+        // if (
+        //     isset($data['window_start_hour'], $data['window_end_hour'])
+        //     && $data['window_start_hour'] >= $data['window_end_hour']
+        // ) {
+        //     return response()->json(['message' => 'window_end_hour must be after window_start_hour.'], 422);
+        // }
 
         $posts = SocialPost::with('socialAccount')
             ->whereIn('id', $data['social_post_ids'])
@@ -321,6 +344,7 @@ class SocialPostController extends Controller
                 ->exists();
             if ($duplicate) {
                 $post->update(['status' => SocialPost::STATUS_CANCELLED]);
+
                 continue;
             }
 
@@ -366,6 +390,87 @@ class SocialPostController extends Controller
         return SocialPostResource::make($socialPost->fresh());
     }
 
+    /**
+     * Re-uploads the YouTube thumbnail for an already-published post whose
+     * thumbnail upload failed (or was never confirmed) — without re-uploading
+     * the video itself. See ReapplyYoutubeThumbnailJob / YouTubeProvider::
+     * reapplyThumbnail() for the actual upload; this just re-dispatches it
+     * on demand instead of waiting for the automatic post-publish schedule.
+     */
+    public function retryThumbnail(Request $request, SocialPost $socialPost)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if ($socialPost->platform !== 'youtube') {
+            return response()->json(['message' => 'Thumbnail reupload is only available for YouTube posts.'], 422);
+        }
+
+        if ($socialPost->status !== SocialPost::STATUS_PUBLISHED || ! $socialPost->external_post_id) {
+            return response()->json(['message' => 'This post has not been published yet.'], 422);
+        }
+
+        $clip = $socialPost->clip;
+        $disk = Storage::disk('media');
+
+        $coverRelativePath = null;
+        if ($clip?->cover_path && $disk->exists($clip->cover_path)) {
+            $coverRelativePath = $clip->cover_path;
+        } elseif ($clip?->thumbnail_path && $disk->exists($clip->thumbnail_path)) {
+            $coverRelativePath = $clip->thumbnail_path;
+        } elseif ($clip?->intro_cover_path && $disk->exists($clip->intro_cover_path)) {
+            $coverRelativePath = $clip->intro_cover_path;
+        }
+
+        if (! $coverRelativePath) {
+            return response()->json(['message' => 'No cover image is available for this clip to upload.'], 422);
+        }
+
+        $socialPost->update(['thumbnail_status' => SocialPost::THUMBNAIL_STATUS_PENDING, 'thumbnail_error' => null]);
+
+        // Tracked in the admin Processing tab (type "youtube_thumbnail") so the raw
+        // YouTube request/response for this attempt is inspectable there — this is
+        // the manual "reupload thumbnail" button's whole reason for existing:
+        // making a failed/uncertain thumbnail upload debuggable.
+        $processingJob = ProcessingJob::create([
+            'project_id' => $clip->project_id,
+            'video_id' => $clip->video_id,
+            'clip_id' => $clip->id,
+            'type' => 'youtube_thumbnail',
+            'status' => ProcessingJob::STATUS_QUEUED,
+            'message' => 'Reuploading YouTube thumbnail (manual retry)...',
+            'started_at' => now(),
+        ]);
+
+        ReapplyYoutubeThumbnailJob::dispatch(
+            $socialPost->id, $coverRelativePath, $socialPost->external_post_id, 1, $processingJob->id
+        );
+
+        return SocialPostResource::make($socialPost->fresh());
+    }
+
+    public function bulkDelete(Request $request)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+        ]);
+
+        $posts = SocialPost::whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        $count = 0;
+        foreach ($posts as $post) {
+            $post->delete();
+            $count++;
+        }
+
+        return response()->json([
+            'message' => "Deleted {$count} scheduled post(s).",
+            'deleted_count' => $count,
+        ]);
+    }
+
     public function destroy(Request $request, SocialPost $socialPost)
     {
         $this->authorizePost($request, $socialPost);
@@ -377,7 +482,7 @@ class SocialPostController extends Controller
     private function authorizePost(Request $request, SocialPost $post): void
     {
         if ($post->clip->project->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
     }
 }
