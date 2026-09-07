@@ -69,6 +69,31 @@ class ProcessBatchItemJob implements ShouldQueue
     ): void {
         $item = VideoBatchItem::findOrFail($this->videoBatchItemId);
 
+        // The channel watch this item came from may have been paused AFTER this
+        // job was queued (poll cadence is every 15 min — see PollChannelWatches —
+        // and this pipeline's own download/transcribe/render stages routinely
+        // take longer than that). PollChannelWatches already stops scanning a
+        // paused watch for new uploads, but that alone doesn't stop an item that
+        // was queued just before the pause from running to completion — check
+        // again here, right before doing any real work, rather than only at
+        // dispatch time. Manually-submitted batches have no channel_watch_id and
+        // are unaffected.
+        $channelWatch = $item->videoBatch?->channelWatch;
+        if ($channelWatch && ! $channelWatch->is_active) {
+            $item->update([
+                'status' => VideoBatchItem::STATUS_CANCELLED,
+                'message' => 'Skipped — the source channel watch was paused after this video was queued.',
+            ]);
+
+            Log::info('Batch item skipped — channel watch paused after queueing', [
+                'item_id' => $item->id,
+                'batch_id' => $item->video_batch_id,
+                'channel_watch_id' => $channelWatch->id,
+            ]);
+
+            return;
+        }
+
         $item->update(['status' => VideoBatchItem::STATUS_IMPORTING, 'progress' => 0, 'message' => 'Starting...', 'started_at' => now()]);
 
         Log::info('Batch item processing started', [

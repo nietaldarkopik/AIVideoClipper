@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ChannelWatchResource;
 use App\Models\ChannelWatch;
+use App\Models\VideoBatchItem;
 use App\Services\Channel\ChannelWatchPoller;
 use App\Services\Channel\YouTubeChannelMonitor;
 use App\Services\Social\AutoPublishScheduler;
@@ -124,11 +125,33 @@ class ChannelWatchController extends Controller
             $channelWatch->settings = [...($channelWatch->settings ?? []), ...$settingsUpdate->all()];
         }
 
+        $pausing = array_key_exists('is_active', $data) && $data['is_active'] === false && $channelWatch->is_active;
+
         if (array_key_exists('is_active', $data)) {
             $channelWatch->is_active = $data['is_active'];
         }
 
         $channelWatch->save();
+
+        // Stop scanning happens immediately (PollChannelWatches filters on
+        // is_active), but a video from this channel can already be sitting in
+        // the queue from an earlier poll — cancel those now rather than leaving
+        // them to run to completion. ProcessBatchItemJob has its own is_active
+        // check for the case where an item is already mid-run when this fires
+        // (can't be interrupted synchronously from here); this only covers ones
+        // that haven't started yet.
+        $cancelledCount = 0;
+        if ($pausing) {
+            $cancelledCount = VideoBatchItem::whereHas(
+                'videoBatch',
+                fn ($q) => $q->where('channel_watch_id', $channelWatch->id)
+            )
+                ->where('status', VideoBatchItem::STATUS_PENDING)
+                ->update([
+                    'status' => VideoBatchItem::STATUS_CANCELLED,
+                    'message' => 'Skipped — the source channel watch was paused.',
+                ]);
+        }
 
         // The publishing target just got corrected — redirect whatever this
         // channel's already-rendered-but-not-yet-published clips are still
@@ -143,7 +166,7 @@ class ChannelWatchController extends Controller
         }
 
         return ChannelWatchResource::make($channelWatch->fresh())
-            ->additional(['resynced_posts' => $resyncedCount]);
+            ->additional(['resynced_posts' => $resyncedCount, 'cancelled_items' => $cancelledCount]);
     }
 
     public function destroy(Request $request, ChannelWatch $channelWatch)
