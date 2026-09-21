@@ -32,12 +32,13 @@ use App\Http\Controllers\Api\VideoController;
 use App\Http\Controllers\MediaStreamController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/auth/register', [AuthController::class, 'register']);
-Route::post('/auth/login', [AuthController::class, 'login']);
-Route::get('/auth/tiktok/redirect', [AuthController::class, 'tiktokRedirect']);
+Route::post('/auth/register', [AuthController::class, 'register'])->middleware('throttle:auth');
+Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:auth');
+Route::get('/auth/tiktok/redirect', [AuthController::class, 'tiktokRedirect'])->middleware('throttle:auth');
+Route::post('/auth/tiktok/exchange', [AuthController::class, 'tiktokExchange'])->middleware('throttle:auth');
 // Public: TikTok redirects the bare browser here after consent, same reasoning
 // as the /social-accounts/{platform}/callback route below.
-Route::get('/auth/tiktok/callback', [AuthController::class, 'tiktokCallback']);
+Route::get('/auth/tiktok/callback', [AuthController::class, 'tiktokCallback'])->middleware('throttle:auth');
 
 Route::get('/media/{path}', [MediaStreamController::class, 'stream'])
     ->where('path', '.*')
@@ -49,7 +50,7 @@ Route::get('/media/{path}', [MediaStreamController::class, 'stream'])
 Route::get('/social-accounts/{platform}/callback', [SocialAccountController::class, 'callback']);
 
 // Templates & categories are readable by anyone signed in; mutations are admin-only below.
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
 
@@ -64,20 +65,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/projects/{project}', [ProjectController::class, 'show']);
     Route::patch('/projects/{project}', [ProjectController::class, 'update']);
     Route::delete('/projects/{project}', [ProjectController::class, 'destroy']);
-    Route::post('/projects/{project}/analyze', [ProjectController::class, 'analyze']);
-    Route::post('/projects/{project}/reprocess', [ProjectController::class, 'reprocess']);
-    Route::post('/projects/{project}/generate-clips', [ProjectController::class, 'generateClips']);
+    Route::post('/projects/{project}/analyze', [ProjectController::class, 'analyze'])->middleware('throttle:expensive');
+    Route::post('/projects/{project}/reprocess', [ProjectController::class, 'reprocess'])->middleware('throttle:expensive');
+    Route::post('/projects/{project}/generate-clips', [ProjectController::class, 'generateClips'])->middleware('throttle:expensive');
     Route::get('/projects/{project}/clip-candidates', [ClipCandidateController::class, 'index']);
     Route::get('/projects/{project}/processing-jobs', [ProcessingJobController::class, 'forProject']);
     Route::post('/projects/{project}/processing-jobs/{processingJob}/cancel', [ProcessingJobController::class, 'cancel']);
-    Route::post('/projects/{project}/videos', [VideoController::class, 'store']);
+    Route::post('/projects/{project}/videos', [VideoController::class, 'store'])->middleware('throttle:expensive');
 
     Route::get('/videos/{video}', [VideoController::class, 'show']);
     Route::get('/videos/{video}/transcript', [VideoController::class, 'transcript']);
     Route::get('/videos/{video}/transcript/download', [VideoController::class, 'downloadTranscript']);
 
     Route::get('/video-batches', [VideoBatchController::class, 'index']);
-    Route::post('/video-batches', [VideoBatchController::class, 'store']);
+    Route::post('/video-batches', [VideoBatchController::class, 'store'])->middleware('throttle:expensive');
     Route::get('/video-batches/{videoBatch}', [VideoBatchController::class, 'show']);
     Route::post('/video-batches/{videoBatch}/cancel', [VideoBatchController::class, 'cancel']);
     Route::post('/video-batches/{videoBatch}/items/{item}/retry', [VideoBatchController::class, 'retryItem']);
@@ -87,14 +88,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/channel-watches/{channelWatch}/check', [ChannelWatchController::class, 'checkNow']);
 
     Route::get('/clip-candidates/{clipCandidate}', [ClipCandidateController::class, 'show']);
-    Route::post('/clip-candidates/{clipCandidate}/reaction', [ReactionController::class, 'store']);
+    Route::post('/clip-candidates/{clipCandidate}/reaction', [ReactionController::class, 'store'])->middleware('throttle:expensive');
 
     // Per-user media library backing image/logo/audio layers' relative paths —
     // see MediaUploadController and LayerCompositionService.
     Route::get('/stickers', [StickerController::class, 'index']);
 
     Route::get('/media-uploads', [MediaUploadController::class, 'index']);
-    Route::post('/media-uploads', [MediaUploadController::class, 'store']);
+    Route::post('/media-uploads', [MediaUploadController::class, 'store'])->middleware('throttle:expensive');
     Route::delete('/media-uploads', [MediaUploadController::class, 'destroy']);
 
     Route::get('/clips', [ClipController::class, 'index']);
@@ -109,14 +110,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/clips/{clip}/duplicate', [ClipController::class, 'duplicate']);
     Route::post('/clips/{clip}/subtitle', [ClipController::class, 'uploadSubtitle']);
     Route::delete('/clips/{clip}/subtitle', [ClipController::class, 'removeSubtitle']);
-    Route::post('/clips/{clip}/regenerate', [ClipController::class, 'regenerate']);
+    Route::post('/clips/{clip}/regenerate', [ClipController::class, 'regenerate'])->middleware('throttle:expensive');
     Route::post('/clips/{clip}/reaction', [ReactionController::class, 'updateClip']);
-    Route::post('/clips/{clip}/generate-social-metadata', [ClipController::class, 'generateSocialMetadata']);
-    Route::post('/clips/{clip}/generate-reaction-script', [ClipController::class, 'generateReactionScript']);
-    Route::post('/clips/{clip}/generate-cover', [ClipController::class, 'generateCover']);
-    Route::post('/clips/export-zip', [ClipController::class, 'exportZip']);
-    Route::post('/clips/bulk-regenerate', [ClipController::class, 'bulkRegenerate']);
-    Route::post('/clips/bulk-generate-cover', [ClipController::class, 'bulkGenerateCover']);
+    Route::post('/clips/{clip}/generate-social-metadata', [ClipController::class, 'generateSocialMetadata'])->middleware('throttle:expensive');
+    Route::post('/clips/{clip}/generate-reaction-script', [ClipController::class, 'generateReactionScript'])->middleware('throttle:expensive');
+    Route::post('/clips/{clip}/generate-cover', [ClipController::class, 'generateCover'])->middleware('throttle:expensive');
+    Route::post('/clips/export-zip', [ClipController::class, 'exportZip'])->middleware('throttle:expensive');
+    Route::post('/clips/bulk-regenerate', [ClipController::class, 'bulkRegenerate'])->middleware('throttle:expensive');
+    Route::post('/clips/bulk-generate-cover', [ClipController::class, 'bulkGenerateCover'])->middleware('throttle:expensive');
     Route::post('/clips/bulk-delete', [ClipController::class, 'bulkDestroy']);
     Route::post('/clips/bulk-move-channel', [ClipController::class, 'bulkMoveChannel']);
 
@@ -135,10 +136,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/trending/platforms', [TrendingController::class, 'platforms']);
 
     Route::get('/content-briefs', [ContentBriefController::class, 'index']);
-    Route::post('/content-briefs', [ContentBriefController::class, 'store']);
+    Route::post('/content-briefs', [ContentBriefController::class, 'store'])->middleware('throttle:expensive');
     Route::get('/content-briefs/{contentBrief}', [ContentBriefController::class, 'show']);
-    Route::post('/content-briefs/{contentBrief}/regenerate-script', [ContentBriefController::class, 'regenerateScript']);
-    Route::post('/content-briefs/{contentBrief}/search-videos', [ContentBriefController::class, 'searchVideos']);
+    Route::post('/content-briefs/{contentBrief}/regenerate-script', [ContentBriefController::class, 'regenerateScript'])->middleware('throttle:expensive');
+    Route::post('/content-briefs/{contentBrief}/search-videos', [ContentBriefController::class, 'searchVideos'])->middleware('throttle:expensive');
     Route::delete('/content-briefs/{contentBrief}', [ContentBriefController::class, 'destroy']);
 
     // --- Content Research Engine ---
@@ -156,7 +157,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('content-channels', ContentChannelController::class);
     Route::get('/content-channels/{contentChannel}/research-runs', [ResearchRunController::class, 'forChannel']);
-    Route::post('/content-channels/{contentChannel}/research-runs', [ResearchRunController::class, 'store']);
+    Route::post('/content-channels/{contentChannel}/research-runs', [ResearchRunController::class, 'store'])->middleware('throttle:expensive');
     Route::get('/content-channels/{contentChannel}/content-ideas', [ContentIdeaController::class, 'forChannel']);
 
     Route::get('/content-ideas', [ContentIdeaController::class, 'index']);

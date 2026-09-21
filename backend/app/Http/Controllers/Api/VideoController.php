@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Rules\PublicHttpUrl;
 use App\Http\Resources\VideoResource;
 use App\Jobs\ImportVideoJob;
 use App\Models\Project;
@@ -22,7 +23,7 @@ class VideoController extends Controller
 
         $data = $request->validate([
             'file' => ['required_without:url', 'file', 'mimetypes:video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo', 'max:5242880'],
-            'url' => ['required_without:file', 'nullable', 'url', 'max:8192'],
+            'url' => ['required_without:file', 'nullable', 'url', 'max:8192', new PublicHttpUrl],
         ]);
 
         if ($request->hasFile('file')) {

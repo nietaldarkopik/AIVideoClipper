@@ -8,7 +8,7 @@ import { toast } from "@/store/toast";
 /**
  * Redirects to TikTok's consent screen (AuthController::tiktokRedirect). The
  * callback (AuthController::tiktokCallback) always lands back on /login with
- * either ?tiktok_token=... or ?error=... — see useTikTokLoginCallback, used
+ * either ?tiktok_code=... or ?error=... — see useTikTokLoginCallback, used
  * by the login page to pick that up regardless of which page started the flow.
  */
 export function TikTokLoginButton({ label = "Continue with TikTok" }: { label?: string }) {
@@ -17,7 +17,14 @@ export function TikTokLoginButton({ label = "Continue with TikTok" }: { label?: 
   async function handleClick() {
     setLoading(true);
     try {
-      const { authorization_url } = await api.get<{ authorization_url: string }>("/auth/tiktok/redirect");
+      // Binds the flow to this browser: the login page must present the same nonce
+      // when trading the callback's one-time code for a token (login-CSRF defence).
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      sessionStorage.setItem("tiktok_login_nonce", nonce);
+      const { authorization_url } = await api.get<{ authorization_url: string }>(
+        `/auth/tiktok/redirect?nonce=${nonce}`
+      );
       window.location.href = authorization_url;
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Could not start TikTok login.", "danger");
