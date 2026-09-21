@@ -1,4 +1,10 @@
 fastapi
 uvicorn
-opencv-python-headless
 pydantic
+numpy
+# mediapipe (for active-speaker mouth-movement detection) depends on
+# opencv-contrib-python, which conflicts with opencv-python-headless if both are
+# installed (both provide the `cv2` module at the same path) — so mediapipe's own
+# transitive opencv-contrib-python is the only opencv install here; don't add
+# opencv-python-headless separately.
+mediapipe

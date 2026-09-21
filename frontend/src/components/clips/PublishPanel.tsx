@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { mutate } from "swr";
-import { Share2, Sparkles, ExternalLink, RotateCcw, Plus, Zap } from "lucide-react";
+import { Share2, Sparkles, ExternalLink, RotateCcw, Plus, Zap, ImageUp } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -93,6 +93,16 @@ export function PublishPanel({
       toast("Publishing now.", "success");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to publish now.", "danger");
+    }
+  }
+
+  async function handleRetryThumbnail(postId: number) {
+    try {
+      await api.post(`/social-posts/${postId}/retry-thumbnail`);
+      await mutate(postsKey);
+      toast("Reuploading thumbnail.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reupload thumbnail.", "danger");
     }
   }
 
@@ -201,6 +211,22 @@ export function PublishPanel({
                       <RotateCcw className="size-3.5" />
                     </button>
                   )}
+                  {post.platform === "youtube" &&
+                    post.status === "published" &&
+                    post.thumbnail_status !== "uploaded" && (
+                      <button
+                        onClick={() => handleRetryThumbnail(post.id)}
+                        title={
+                          post.thumbnail_error ??
+                          (post.thumbnail_status === "failed"
+                            ? "Thumbnail upload failed — click to reupload"
+                            : "Reupload thumbnail")
+                        }
+                        className="text-accent-2 cursor-pointer"
+                      >
+                        <ImageUp className="size-3.5" />
+                      </button>
+                    )}
                 </div>
               </div>
             ))}

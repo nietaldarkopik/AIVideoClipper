@@ -5,12 +5,17 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\SocialPostResource;
 use App\Jobs\PublishClipJob;
+use App\Jobs\ReapplyYoutubeThumbnailJob;
 use App\Models\Clip;
+use App\Models\ProcessingJob;
 use App\Models\PublishingProfile;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
+use App\Services\Social\AutoPublishScheduler;
+use App\Services\Social\SocialMetricsSyncer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class SocialPostController extends Controller
@@ -28,8 +33,49 @@ class SocialPostController extends Controller
         if ($request->filled('status')) {
             $query->where('status', $request->string('status'));
         }
+        if ($request->filled('platform')) {
+            $query->where('platform', $request->string('platform'));
+        }
+        if ($request->filled('social_account_id')) {
+            $query->where('social_account_id', $request->integer('social_account_id'));
+        }
+        if ($request->filled('scheduled_from')) {
+            $query->where('scheduled_at', '>=', Carbon::parse($request->string('scheduled_from')));
+        }
+        if ($request->filled('scheduled_to')) {
+            $query->where('scheduled_at', '<=', Carbon::parse($request->string('scheduled_to')));
+        }
 
-        $posts = $query->with('socialAccount')->latest()->paginate($request->integer('per_page', 24));
+        // Sorting happens in the database, not in the page the client already
+        // received — the scheduler table pages through thousands of rows, so a
+        // client-side sort would only ever reorder the current 25.
+        $direction = $request->string('sort_dir')->lower()->toString() === 'desc' ? 'desc' : 'asc';
+
+        match ($request->string('sort_by')->toString()) {
+            // Ordered by the channel's display name rather than its id, since
+            // that's the column the table actually shows.
+            'channel' => $query->orderBy(
+                SocialAccount::select('account_name')->whereColumn('social_accounts.id', 'social_posts.social_account_id'),
+                $direction
+            ),
+            'status' => $query->orderBy('status', $direction),
+            // "Not published yet" is an absence, not a date — those rows sort to
+            // the end either way instead of masquerading as the oldest.
+            'published_at' => $query->orderByRaw('published_at IS NULL')->orderBy('published_at', $direction),
+            // Default: scheduled_at (soonest first, nulls last) rather than
+            // created_at — the whole point of this endpoint is "what's coming
+            // up", and with per_page capped, ordering by creation time meant an
+            // old post freshly rescheduled into the near future could sit behind
+            // hundreds of more-recently-created rows and never reach the response.
+            default => $query->orderByRaw('scheduled_at IS NULL')->orderBy('scheduled_at', $direction),
+        };
+
+        $posts = $query->with(['socialAccount', 'clip.project'])
+            // Stable tiebreaker: without one, rows sharing a sort value (every
+            // post of the same status, say) can swap places between pages and
+            // show up twice or not at all while paging.
+            ->orderByDesc('id')
+            ->paginate($request->integer('per_page', 24));
 
         return SocialPostResource::collection($posts);
     }
@@ -51,7 +97,7 @@ class SocialPostController extends Controller
 
         $clip = Clip::findOrFail($data['clip_id']);
         if ($clip->project->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
         if ($clip->status !== Clip::STATUS_COMPLETED) {
             return response()->json(['message' => 'Clip must finish rendering before it can be published.'], 422);
@@ -109,7 +155,211 @@ class SocialPostController extends Controller
     {
         $this->authorizePost($request, $socialPost);
 
-        return SocialPostResource::make($socialPost->load('socialAccount'));
+        return SocialPostResource::make($socialPost->load(['socialAccount', 'clip.project']));
+    }
+
+    /**
+     * Edit an existing schedule: retarget the account/platform, tweak
+     * title/caption/hashtags, and/or reschedule scheduled_at. Rejects edits once
+     * the post is already published or actively in flight — see authorizePost()
+     * for ownership. A changed scheduled_at dispatches a fresh delayed
+     * PublishClipJob; the stale original delayed job (still sitting in the queue
+     * at the old time) is a guarded no-op — see PublishClipJob::handle().
+     */
+    public function update(Request $request, SocialPost $socialPost)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if (in_array($socialPost->status, [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING], true)) {
+            return response()->json(['message' => 'Cannot edit a post that is already published or in progress.'], 422);
+        }
+
+        $data = $request->validate([
+            'social_account_id' => ['sometimes', 'exists:social_accounts,id'],
+            'title' => ['sometimes', 'nullable', 'string'],
+            'caption' => ['sometimes', 'nullable', 'string'],
+            'hashtags' => ['sometimes', 'array'],
+            'scheduled_at' => ['sometimes', 'nullable', 'date', 'after:now'],
+        ]);
+
+        if (array_key_exists('social_account_id', $data)) {
+            $account = SocialAccount::where('user_id', $request->user()->id)
+                ->where('status', SocialAccount::STATUS_CONNECTED)
+                ->findOrFail($data['social_account_id']);
+            $socialPost->social_account_id = $account->id;
+            $socialPost->platform = $account->platform;
+        }
+
+        $socialPost->fill(collect($data)->only(['title', 'caption', 'hashtags'])->all());
+
+        if (array_key_exists('scheduled_at', $data)) {
+            $scheduledAt = $data['scheduled_at'] ? Carbon::parse($data['scheduled_at']) : null;
+            $socialPost->scheduled_at = $scheduledAt;
+            $socialPost->status = $scheduledAt ? SocialPost::STATUS_SCHEDULED : SocialPost::STATUS_READY;
+            $socialPost->save();
+
+            if ($scheduledAt) {
+                PublishClipJob::dispatch($socialPost->id)->delay($scheduledAt);
+            }
+        } else {
+            $socialPost->save();
+        }
+
+        return SocialPostResource::make($socialPost->fresh(['socialAccount', 'clip.project']));
+    }
+
+    /**
+     * Recompute scheduled_at via AutoPublishScheduler::nextAvailableSlot() — the
+     * same stagger/day-cap logic the auto-scheduler used when this post was first
+     * created — instead of publishing outright (that's publish-now). Two use
+     * cases, same mechanism: after retargeting to a different account (the old
+     * slot was picked for the OLD account's queue, so it's stale for the new
+     * one), or to bump a good clip to the soonest non-spammy slot ("prioritize")
+     * without skipping the anti-spam pacing entirely.
+     */
+    public function regenerateSchedule(Request $request, SocialPost $socialPost, AutoPublishScheduler $scheduler)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if (in_array($socialPost->status, [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING], true)) {
+            return response()->json(['message' => 'Cannot reschedule a post that is already published or in progress.'], 422);
+        }
+
+        $data = $request->validate([
+            'social_account_id' => ['sometimes', 'exists:social_accounts,id'],
+        ]);
+
+        $account = $socialPost->socialAccount;
+        if (array_key_exists('social_account_id', $data)) {
+            $account = SocialAccount::where('user_id', $request->user()->id)
+                ->where('status', SocialAccount::STATUS_CONNECTED)
+                ->findOrFail($data['social_account_id']);
+            $socialPost->social_account_id = $account->id;
+            $socialPost->platform = $account->platform;
+        }
+
+        $slot = $scheduler->nextAvailableSlot($account, now(), AutoPublishScheduler::MAX_POSTS_PER_DAY_PER_ACCOUNT);
+        $socialPost->scheduled_at = $slot;
+        $socialPost->status = SocialPost::STATUS_SCHEDULED;
+        $socialPost->save();
+
+        // Stale original delayed job (if this post already had one) is a guarded
+        // no-op — see PublishClipJob::handle()'s scheduled_at->isFuture() check.
+        PublishClipJob::dispatch($socialPost->id)->delay($slot);
+
+        return SocialPostResource::make($socialPost->fresh(['socialAccount', 'clip.project']));
+    }
+
+    /**
+     * "Reschedule All" — bulk-redistribute a caller-chosen set of existing
+     * posts, staggered per social account with a random gap (default 30min-2h)
+     * via AutoPublishScheduler::rescheduleBulk(). Posts already published or
+     * in-flight, or that don't belong to the caller, are silently skipped
+     * rather than failing the whole batch (there's no per-post feedback in a
+     * bulk op, and skipping is the safe default — unlike a single edit, this
+     * touches many rows the user only skimmed, not each individually).
+     */
+    public function bulkReschedule(Request $request, AutoPublishScheduler $scheduler)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+            'min_minutes' => ['sometimes', 'integer', 'min:1'],
+            'max_minutes' => ['sometimes', 'integer', 'min:1'],
+            'max_per_day' => ['sometimes', 'integer', 'min:1'],
+            // Daily posting window (both optional — a window only activates
+            // when BOTH are present, see AutoPublishScheduler::nextAvailableSlot();
+            // if only one is sent, the other stays null and the window is simply
+            // ignored rather than erroring). window_end_hour goes up to 24
+            // (midnight) so a caller can express "post until end of day".
+            'window_start_hour' => ['sometimes', 'nullable', 'integer', 'min:0', 'max:23'],
+            'window_end_hour' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:24'],
+        ]);
+
+        // if (
+        //     isset($data['window_start_hour'], $data['window_end_hour'])
+        //     && $data['window_start_hour'] >= $data['window_end_hour']
+        // ) {
+        //     return response()->json(['message' => 'window_end_hour must be after window_start_hour.'], 422);
+        // }
+
+        $posts = SocialPost::with('socialAccount')
+            ->whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->whereNotIn('status', [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING])
+            ->get();
+
+        $minSeconds = (int) ($data['min_minutes'] ?? 30) * 60;
+        $maxSeconds = (int) ($data['max_minutes'] ?? 120) * 60;
+        $maxPerDay = (int) ($data['max_per_day'] ?? AutoPublishScheduler::MAX_POSTS_PER_DAY_PER_ACCOUNT);
+        $windowStartHour = $data['window_start_hour'] ?? null;
+        $windowEndHour = $data['window_end_hour'] ?? null;
+
+        $count = $scheduler->rescheduleBulk($posts, $minSeconds, $maxSeconds, $maxPerDay, $windowStartHour, $windowEndHour);
+
+        return response()->json(['message' => "Rescheduled {$count} post(s).", 'rescheduled_count' => $count]);
+    }
+
+    /**
+     * Bulk-retarget a caller-chosen set of existing posts (wrong-channel
+     * fix-up — see the "Move to Channel" action on the Scheduler page) onto a
+     * single destination account, then immediately restagger just the moved
+     * ones onto THAT account's own day-cap/schedule via rescheduleBulk() — their
+     * old scheduled_at was picked against the OLD account's queue, so it's
+     * meaningless for the new one. Posts already published or in-flight, or
+     * that don't belong to the caller, are silently skipped (same reasoning as
+     * bulkReschedule() above). A post whose clip already has ANOTHER post
+     * targeting the destination account (e.g. two wrongly-targeted duplicates
+     * both getting moved to the one correct account) is cancelled instead of
+     * creating a second post for the same (clip, account) pair.
+     */
+    public function bulkMoveChannel(Request $request, AutoPublishScheduler $scheduler)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+            'target_social_account_id' => ['required', 'exists:social_accounts,id'],
+        ]);
+
+        $targetAccount = SocialAccount::where('user_id', $request->user()->id)
+            ->where('status', SocialAccount::STATUS_CONNECTED)
+            ->find($data['target_social_account_id']);
+        if (! $targetAccount) {
+            return response()->json(['message' => 'Target channel not found.'], 422);
+        }
+
+        $posts = SocialPost::whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->whereNotIn('status', [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING])
+            ->get();
+
+        $movedIds = [];
+        foreach ($posts as $post) {
+            if ($post->social_account_id === $targetAccount->id) {
+                continue;
+            }
+
+            $duplicate = SocialPost::where('clip_id', $post->clip_id)
+                ->where('social_account_id', $targetAccount->id)
+                ->whereKeyNot($post->id)
+                ->exists();
+            if ($duplicate) {
+                $post->update(['status' => SocialPost::STATUS_CANCELLED]);
+
+                continue;
+            }
+
+            $post->update(['social_account_id' => $targetAccount->id, 'platform' => $targetAccount->platform]);
+            $movedIds[] = $post->id;
+        }
+
+        if (! empty($movedIds)) {
+            $scheduler->rescheduleBulk(SocialPost::whereIn('id', $movedIds)->get());
+        }
+
+        $count = count($movedIds);
+
+        return response()->json(['message' => "Moved {$count} post(s) to {$targetAccount->account_name}.", 'moved_count' => $count]);
     }
 
     public function retry(Request $request, SocialPost $socialPost)
@@ -120,6 +370,30 @@ class SocialPostController extends Controller
         PublishClipJob::dispatch($socialPost->id);
 
         return SocialPostResource::make($socialPost->fresh());
+    }
+
+    /**
+     * Pull this post's numbers from the platform right now, ignoring the
+     * staleness tiers the hourly `social:sync-metrics` run follows. Runs inline
+     * rather than queued so the caller can render the fresh numbers straight from
+     * the response — it's a single API call, and the alternative (queue it, then
+     * poll) is a lot of machinery for one button.
+     */
+    public function syncMetrics(Request $request, SocialPost $socialPost, SocialMetricsSyncer $syncer)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if ($socialPost->status !== SocialPost::STATUS_PUBLISHED || ! $socialPost->external_post_id) {
+            return response()->json(['message' => 'Only published posts have metrics to sync.'], 422);
+        }
+
+        if (! $syncer->syncOne($socialPost)) {
+            return response()->json([
+                'message' => 'Could not reach the platform for this post. Its account may need reconnecting.',
+            ], 502);
+        }
+
+        return SocialPostResource::make($socialPost->fresh()->load(['socialAccount', 'clip.project']));
     }
 
     /**
@@ -141,6 +415,141 @@ class SocialPostController extends Controller
         return SocialPostResource::make($socialPost->fresh());
     }
 
+    /**
+     * Re-uploads the YouTube thumbnail for an already-published post whose
+     * thumbnail upload failed (or was never confirmed) — without re-uploading
+     * the video itself. See ReapplyYoutubeThumbnailJob / YouTubeProvider::
+     * reapplyThumbnail() for the actual upload; this just re-dispatches it
+     * on demand instead of waiting for the automatic post-publish schedule.
+     */
+    public function retryThumbnail(Request $request, SocialPost $socialPost)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        $error = $this->queueThumbnailReupload($socialPost);
+        if ($error) {
+            return response()->json(['message' => $error], 422);
+        }
+
+        return SocialPostResource::make($socialPost->fresh());
+    }
+
+    /**
+     * Same as retryThumbnail() above, for several posts at once — e.g. after a
+     * batch of clips all failed to get their YouTube thumbnail confirmed.
+     * Ineligible posts (wrong platform, not published, no cover image
+     * available) are silently skipped rather than failing the whole batch,
+     * same convention as bulkDelete/bulkReschedule below.
+     */
+    public function bulkRetryThumbnail(Request $request)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+        ]);
+
+        $posts = SocialPost::with('clip')
+            ->whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        $queued = 0;
+        $skipped = 0;
+        foreach ($posts as $post) {
+            if ($this->queueThumbnailReupload($post)) {
+                $skipped++;
+            } else {
+                $queued++;
+            }
+        }
+
+        return response()->json([
+            'message' => "Queued {$queued} thumbnail reupload(s)."
+                .($skipped > 0 ? " Skipped {$skipped} (not a published YouTube post, or no cover image available)." : ''),
+            'queued_count' => $queued,
+            'skipped_count' => $skipped,
+        ]);
+    }
+
+    /**
+     * Shared by retryThumbnail()/bulkRetryThumbnail() — resolves this post's
+     * cover image (same cover_path -> thumbnail_path -> intro_cover_path
+     * fallback chain PublishClipJob uses at publish time), creates the
+     * Processing-tab-tracked job, and dispatches the reapply. Returns an error
+     * message on failure (nothing dispatched), or null on success.
+     */
+    private function queueThumbnailReupload(SocialPost $socialPost): ?string
+    {
+        if ($socialPost->platform !== 'youtube') {
+            return 'Thumbnail reupload is only available for YouTube posts.';
+        }
+
+        if ($socialPost->status !== SocialPost::STATUS_PUBLISHED || ! $socialPost->external_post_id) {
+            return 'This post has not been published yet.';
+        }
+
+        $clip = $socialPost->clip;
+        $disk = Storage::disk('media');
+
+        $coverRelativePath = null;
+        if ($clip?->cover_path && $disk->exists($clip->cover_path)) {
+            $coverRelativePath = $clip->cover_path;
+        } elseif ($clip?->thumbnail_path && $disk->exists($clip->thumbnail_path)) {
+            $coverRelativePath = $clip->thumbnail_path;
+        } elseif ($clip?->intro_cover_path && $disk->exists($clip->intro_cover_path)) {
+            $coverRelativePath = $clip->intro_cover_path;
+        }
+
+        if (! $coverRelativePath) {
+            return 'No cover image is available for this clip to upload.';
+        }
+
+        $socialPost->update(['thumbnail_status' => SocialPost::THUMBNAIL_STATUS_PENDING, 'thumbnail_error' => null]);
+
+        // Tracked in the admin Processing tab (type "youtube_thumbnail") so the raw
+        // YouTube request/response for this attempt is inspectable there — this is
+        // the manual "reupload thumbnail" button's whole reason for existing:
+        // making a failed/uncertain thumbnail upload debuggable.
+        $processingJob = ProcessingJob::create([
+            'project_id' => $clip->project_id,
+            'video_id' => $clip->video_id,
+            'clip_id' => $clip->id,
+            'type' => 'youtube_thumbnail',
+            'status' => ProcessingJob::STATUS_QUEUED,
+            'message' => 'Reuploading YouTube thumbnail...',
+            'started_at' => now(),
+        ]);
+
+        ReapplyYoutubeThumbnailJob::dispatch(
+            $socialPost->id, $coverRelativePath, $socialPost->external_post_id, 1, $processingJob->id
+        );
+
+        return null;
+    }
+
+    public function bulkDelete(Request $request)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+        ]);
+
+        $posts = SocialPost::whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        $count = 0;
+        foreach ($posts as $post) {
+            $post->delete();
+            $count++;
+        }
+
+        return response()->json([
+            'message' => "Deleted {$count} scheduled post(s).",
+            'deleted_count' => $count,
+        ]);
+    }
+
     public function destroy(Request $request, SocialPost $socialPost)
     {
         $this->authorizePost($request, $socialPost);
@@ -152,7 +561,7 @@ class SocialPostController extends Controller
     private function authorizePost(Request $request, SocialPost $post): void
     {
         if ($post->clip->project->user_id !== $request->user()->id && ! $request->user()->isAdmin()) {
-            throw new NotFoundHttpException();
+            throw new NotFoundHttpException;
         }
     }
 }

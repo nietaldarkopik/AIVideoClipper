@@ -8,13 +8,27 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
-import { createProjectFromUrl } from "@/lib/createProjectFromUrl";
+import { createProjectFromUrl, type ProjectOriginRef } from "@/lib/createProjectFromUrl";
 import { toast } from "@/store/toast";
 import type { Project } from "@/lib/types";
 
 type Tab = "upload" | "url";
 
-export function NewProjectModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+/**
+ * `origin` tags whatever this modal creates with where the idea came from, so a
+ * clip's published performance can later be traced back to it. Passed by callers
+ * that opened the modal from a suggestion (a research idea); a plain "New Project"
+ * from the projects page passes nothing and the project stays unattributed.
+ */
+export function NewProjectModal({
+  open,
+  onClose,
+  origin,
+}: {
+  open: boolean;
+  onClose: () => void;
+  origin?: ProjectOriginRef;
+}) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("upload");
   const [files, setFiles] = useState<File[]>([]);
@@ -45,7 +59,11 @@ export function NewProjectModal({ open, onClose }: { open: boolean; onClose: () 
 
   async function createProjectFromFile(file: File) {
     const title = file.name.replace(/\.[^/.]+$/, "");
-    const project = await api.post<{ data: Project }>("/projects", { title });
+    const project = await api.post<{ data: Project }>("/projects", {
+      title,
+      origin_type: origin?.type,
+      origin_id: origin?.id,
+    });
     const form = new FormData();
     form.append("file", file);
     await api.post(`/projects/${project.data.id}/videos`, form);
@@ -79,7 +97,7 @@ export function NewProjectModal({ open, onClose }: { open: boolean; onClose: () 
           return;
         }
         setProgressLabel("Starting import...");
-        const project = await createProjectFromUrl(url.trim(), "Imported Video");
+        const project = await createProjectFromUrl(url.trim(), "Imported Video", origin);
         await mutate("/projects");
         await mutate("/dashboard");
         toast("Import started.", "success");

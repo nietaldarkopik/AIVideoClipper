@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
     Starts every clipper-tools process in its own PowerShell window: Redis,
-    Laravel API, queue worker, batch downloads worker, scheduler, Next.js
-    frontend, and (if enabled) the self-hosted whisper-engine transcription,
-    face-tracker reframing, and instagram-automation services.
+    Laravel API, queue worker, batch downloads worker, publish worker, scheduler,
+    Next.js frontend, and (if enabled) the self-hosted whisper-engine
+    transcription, face-tracker reframing, and instagram-automation services.
 
 .PARAMETER WhisperEngine
     Force-start the whisper-engine window even if AI_TRANSCRIPTION_PROVIDER
@@ -110,6 +110,19 @@ Start-Service -Title 'clipper: batch downloads' `
     -WorkDir (Join-Path $root 'backend') `
     -Command 'php artisan queue:work redis --queue=batch-downloads'
 
+# 3c. Publish worker — PublishClipJob always queues onto 'publish' (see its
+# constructor), never 'default', so a render backlog on 'default' (e.g. the
+# large one ReapStuckClipRenders/RepublishOverdueSocialPosts can dump there
+# after a queue outage — see bootstrap/app.php withSchedule) can never again
+# starve a scheduled publish behind it, the way it did the day this was added.
+# Required, not optional: without it, nothing on 'publish' ever runs, so no
+# clip — scheduled, "Publish Now", or auto-published from a batch — ever
+# actually reaches YouTube/TikTok/etc, no matter how long you wait.
+# Also drains 'default' once 'publish' is empty, for extra render throughput.
+Start-Service -Title 'clipper: publish worker' `
+    -WorkDir (Join-Path $root 'backend') `
+    -Command 'php artisan queue:work redis --queue=publish,default'
+
 # 3b. Scheduler — runs App\Console\Commands\ReapStalledProcessingJobs every 5min
 # (see bootstrap/app.php withSchedule) to auto-fail ProcessingJob rows stuck at
 # "running" because their worker died (crash, PC restart) without ever getting to
@@ -118,10 +131,19 @@ Start-Service -Title 'clipper: scheduler' `
     -WorkDir (Join-Path $root 'backend') `
     -Command 'php artisan schedule:work'
 
-# 4. Next.js frontend
-Start-Service -Title 'clipper: frontend' `
+# 4. Next.js frontend — dev server for localhost, plus a separate production
+# build/serve on port 3001 for the public domain (existcode.excoder.site), which
+# Apache proxies to. Production is used there specifically so the Next.js dev
+# indicator badge never shows up publicly — it only exists under `next dev`.
+# Code changes need `npm run build` (or a re-run of this script) to reach the
+# public domain; localhost:3000 always reflects the latest source instantly.
+Start-Service -Title 'clipper: frontend (dev)' `
     -WorkDir (Join-Path $root 'frontend') `
     -Command 'npm run dev'
+
+Start-Service -Title 'clipper: frontend (prod)' `
+    -WorkDir (Join-Path $root 'frontend') `
+    -Command 'npm run build; npm run start:prod'
 
 # 5. Whisper engine (optional)
 if ($startWhisper) {

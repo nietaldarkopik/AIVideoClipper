@@ -13,6 +13,7 @@ class TemplateCategorySeeder extends Seeder
         $categories = [
             'Podcast', 'Gaming', 'Education', 'Motivation', 'Business',
             'News', 'Interview', 'Comedy', 'Vlog', 'Storytelling', 'Product', 'Personal Branding',
+            'Sports', 'Finance', 'Beauty', 'Travel', 'Food', 'Fitness', 'Tech Review', 'Music', 'True Crime',
         ];
 
         foreach ($categories as $i => $name) {

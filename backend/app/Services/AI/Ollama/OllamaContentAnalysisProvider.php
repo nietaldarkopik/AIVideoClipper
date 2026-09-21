@@ -3,6 +3,7 @@
 namespace App\Services\AI\Ollama;
 
 use App\Exceptions\JobCancelledException;
+use App\Models\Setting;
 use App\Models\Transcript;
 use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Concerns\ParsesJsonResponses;
@@ -41,8 +42,7 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
         private readonly string $baseUrl,
         private readonly string $model,
         private readonly int $timeoutSeconds = 180,
-    ) {
-    }
+    ) {}
 
     public function detectScenes(string $videoPath, float $durationSeconds): array
     {
@@ -110,11 +110,11 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt(self::MAX_CANDIDATES_PER_CHUNK);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $chunkStart, $chunkEnd, $language);
-        $span = $this->aiLogger()->start('content_analysis', 'ollama', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'ollama', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         try {
             $response = Http::timeout($this->timeoutSeconds)
-                ->post(rtrim($this->baseUrl, '/') . '/api/chat', [
+                ->post(rtrim($this->baseUrl, '/').'/api/chat', [
                     'model' => $this->model,
                     'stream' => false,
                     'format' => 'json',
@@ -184,6 +184,8 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -192,6 +194,9 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+        $maxDuration = (int) Setting::get('default_clip_duration', config('services.ai.default_clip_duration', 45));
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript excerpt
 from a longer video, find up to {$maxCandidates} best self-contained moments in THIS
@@ -199,8 +204,9 @@ excerpt to cut into short vertical clips (like TikTok/Reels/Shorts). It's fine t
 return fewer than {$maxCandidates}, or none, if this excerpt has no strong moments.
 
 Respond with ONLY a JSON object: {"candidates": [...]}. Each candidate object must have:
-start_time (number, seconds), end_time (number, seconds, 15-90 seconds after start_time
-unless the moment genuinely needs longer), overall_score (1-100), engagement_score (1-100),
+start_time (number, seconds), end_time (number, seconds, 15-{$maxDuration} seconds after
+start_time — {$maxDuration}s is a HARD CEILING, never exceed it even if the moment feels
+like it deserves more room), overall_score (1-100), engagement_score (1-100),
 hook_score (1-100), story_score (1-100), emotional_score (1-100), information_score (1-100),
 viral_potential (1-100), hook_text (the exact or near-exact opening line, in the transcript's
 own language), moment_type (one of: hook, question, emotional, funny, controversial,
@@ -209,18 +215,23 @@ clip works), explanation (one sentence summary), suggested_title (short, punchy,
 transcript's own language), suggested_caption (1-2 sentences, in the transcript's own
 language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
 
+{$coverInstructions}
+
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
-self-contained idea, and an emotional or informational payoff. Only use start_time/end_time
+self-contained idea, and an emotional or informational payoff. end_time MUST land at the
+end of a complete sentence/thought — never cut off mid-sentence, mid-word, or mid-idea; if
+the payoff needs more than {$maxDuration}s to land cleanly, pick a tighter, more
+self-contained moment instead of overrunning the limit. Only use start_time/end_time
 values that fall within THIS EXCERPT's timestamp range, not the full video.
 PROMPT;
     }
 
     private function userPrompt(string $transcriptText, float $durationSeconds, float $chunkStart, float $chunkEnd, string $language): string
     {
-        return "This is one excerpt ({$this->fmt($chunkStart)}-{$this->fmt($chunkEnd)}) from a " .
-            "{$durationSeconds}-second video. Transcript language: {$language}.\n\n" .
+        return "This is one excerpt ({$this->fmt($chunkStart)}-{$this->fmt($chunkEnd)}) from a ".
+            "{$durationSeconds}-second video. Transcript language: {$language}.\n\n".
             "Excerpt transcript:\n{$transcriptText}";
     }
 

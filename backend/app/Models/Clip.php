@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Video\AspectRatio;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -13,16 +14,24 @@ class Clip extends Model
     use HasFactory;
 
     public const STATUS_QUEUED = 'queued';
+
     public const STATUS_RENDERING = 'rendering';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_FAILED = 'failed';
 
     protected $fillable = [
         'project_id', 'video_id', 'clip_candidate_id', 'template_id', 'template_version_id',
-        'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'aspect_ratio',
+        'cover_template_id', 'cover_text', 'cover_kicker', 'cover_subline', 'cover_path',
+        'title', 'caption', 'hashtags', 'start_time', 'end_time', 'duration', 'speed', 'volume', 'aspect_ratio',
         'crop_config', 'scenes', 'subtitle_language', 'subtitles_enabled', 'subtitle_config',
+        'custom_subtitle_path', 'caption_cues', 'layer_overrides', 'segments', 'additional_video_clips',
         'status', 'progress', 'failure_reason', 'output_path', 'thumbnail_path',
         'output_size_bytes', 'rendered_at', 'webcam_path', 'reaction_layout',
+        'reaction_script', 'reaction_tone', 'intro_enabled', 'outro_enabled',
+        'intro_voice', 'intro_audio_path', 'embedding', 'embedding_model',
+        'reference_url', 'intro_cover_path',
     ];
 
     protected $casts = [
@@ -30,10 +39,19 @@ class Clip extends Model
         'crop_config' => 'array',
         'scenes' => 'array',
         'subtitle_config' => 'array',
+        'caption_cues' => 'array',
+        'additional_video_clips' => 'array',
+        'layer_overrides' => 'array',
+        'segments' => 'array',
+        'embedding' => 'array',
         'subtitles_enabled' => 'boolean',
+        'intro_enabled' => 'boolean',
+        'outro_enabled' => 'boolean',
         'start_time' => 'float',
         'end_time' => 'float',
         'duration' => 'float',
+        'speed' => 'float',
+        'volume' => 'float',
         'rendered_at' => 'datetime',
     ];
 
@@ -45,6 +63,11 @@ class Clip extends Model
     public function video(): BelongsTo
     {
         return $this->belongsTo(Video::class);
+    }
+
+    public function processingJobs(): HasMany
+    {
+        return $this->hasMany(ProcessingJob::class);
     }
 
     public function clipCandidate(): BelongsTo
@@ -60,6 +83,50 @@ class Clip extends Model
     public function templateVersion(): BelongsTo
     {
         return $this->belongsTo(TemplateVersion::class);
+    }
+
+    public function coverTemplate(): BelongsTo
+    {
+        return $this->belongsTo(CoverTemplate::class);
+    }
+
+    /**
+     * The actual canvas size this clip renders at: the attached template's own
+     * resolution_width/height when it has one (see TemplateController — a
+     * template's canvas size is a deliberate override, independent of this
+     * clip's own aspect_ratio bucket, since template layers already use 0..1
+     * fractional coordinates and don't care what the target resolution
+     * actually is), falling back to the fixed 9:16/1:1/16:9 lookup for a clip
+     * with no template. RenderClipJob and every other place that needs the
+     * clip's real output dimensions should call this instead of calling
+     * AspectRatio::resolution($this->aspect_ratio) directly, so a custom
+     * template canvas size actually takes effect end to end.
+     *
+     * @return array{0: int, 1: int} [width, height]
+     */
+    public function targetResolution(): array
+    {
+        if ($this->template?->resolution_width && $this->template?->resolution_height) {
+            return [$this->template->resolution_width, $this->template->resolution_height];
+        }
+
+        return AspectRatio::resolution($this->aspect_ratio);
+    }
+
+    /**
+     * The best available image to represent this clip visually (clip grid
+     * cards, video player poster, the clip preview embedded in a scheduled
+     * post, ...): the styled cover (CoverGeneratorService — has the headline
+     * text burned in) when one exists, otherwise the plain frame grab every
+     * rendered clip gets automatically. Distinct from `cover_path` itself,
+     * which stays null when there's no cover so the Cover tab can tell "never
+     * generated one" apart from "generated one" — use THIS accessor anywhere
+     * that just wants a thumbnail, and `cover_path` directly only where that
+     * cover/no-cover distinction actually matters.
+     */
+    public function displayThumbnailPath(): ?string
+    {
+        return $this->cover_path ?: $this->thumbnail_path;
     }
 
     public function subtitle(): HasOne

@@ -33,7 +33,8 @@ function Stop-ProcessSafely {
         Write-Host ("  Stopping {0} (PID {1}, {2})" -f $Label, $TargetId, $proc.ProcessName) -ForegroundColor Yellow
         Stop-Process -Id $TargetId -Force -ErrorAction Stop
         return $true
-    } catch {
+    }
+    catch {
         return $false
     }
 }
@@ -70,11 +71,13 @@ Write-Host "Stopping clipper-tools processes..." -ForegroundColor Cyan
 Write-Host ""
 
 # --- required services ---
+if (Stop-ByPort -Port 20128 -Label '9router') { $stopped++ }
 if (Stop-ByPort -Port 6379 -Label 'Redis') { $stopped++ }
 if (Stop-ByPort -Port 8000 -Label 'Laravel API') { $stopped++ }
 if (Stop-ByPort -Port 3000 -Label 'Frontend (Next.js)') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=default') -Label 'Queue worker') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=batch-downloads') -Label 'Batch downloads worker') { $stopped++ }
+if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=publish,default') -Label 'Publish worker') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'schedule:work') -Label 'Scheduler') { $stopped++ }
 
 # --- optional AI services (port kill + a command-line sweep, since these run with
@@ -100,6 +103,7 @@ Get-Process | Where-Object { $_.MainWindowTitle -like 'clipper:*' } | ForEach-Ob
 Write-Host ""
 if ($stopped -gt 0) {
     Write-Host "Done - stopped $stopped process(es)/window(s). You can run start-all again." -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "No clipper-tools processes were found running." -ForegroundColor Green
 }

@@ -2,6 +2,7 @@
 
 namespace App\Services\AI\OpenAI;
 
+use App\Models\Setting;
 use App\Models\Transcript;
 use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Concerns\ParsesJsonResponses;
@@ -27,8 +28,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
     public function __construct(
         private readonly string $apiKey,
         private readonly string $model = 'gpt-4o-mini',
-    ) {
-    }
+    ) {}
 
     /**
      * Real shot-boundary detection would need a full frame-diff decode pass; that's
@@ -65,7 +65,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt($maxCandidates);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
-        $span = $this->aiLogger()->start('content_analysis', 'openai', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'openai', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         $response = Http::withToken($this->apiKey)
             ->timeout(180)
@@ -86,7 +86,7 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
         if ($response->failed()) {
             $span->failure($response->body());
 
-            throw new RuntimeException('OpenAI analysis failed: ' . $response->body());
+            throw new RuntimeException('OpenAI analysis failed: '.$response->body());
         }
 
         $raw = $response->json('choices.0.message.content');
@@ -125,6 +125,8 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -135,14 +137,18 @@ class OpenAIContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+        $maxDuration = (int) Setting::get('default_clip_duration', config('services.ai.default_clip_duration', 45));
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
 long video, find the {$maxCandidates} best self-contained moments to cut into
 short vertical clips (like TikTok/Reels/Shorts).
 
 Respond with ONLY a JSON object: {"candidates": [...]}. Each candidate object must have:
-start_time (number, seconds), end_time (number, seconds, 15-90 seconds after start_time
-unless the moment genuinely needs longer), overall_score (1-100), engagement_score (1-100),
+start_time (number, seconds), end_time (number, seconds, 15-{$maxDuration} seconds after
+start_time — {$maxDuration}s is a HARD CEILING, never exceed it even if the moment feels
+like it deserves more room), overall_score (1-100), engagement_score (1-100),
 hook_score (1-100), story_score (1-100), emotional_score (1-100), information_score (1-100),
 viral_potential (1-100), hook_text (the exact or near-exact opening line, in the transcript's
 own language), moment_type (one of: hook, question, emotional, funny, controversial,
@@ -151,10 +157,15 @@ clip works), explanation (one sentence summary), suggested_title (short, punchy,
 transcript's own language), suggested_caption (1-2 sentences, in the transcript's own
 language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
 
+{$coverInstructions}
+
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
-self-contained idea, and an emotional or informational payoff. Only use start_time/end_time
+self-contained idea, and an emotional or informational payoff. end_time MUST land at the
+end of a complete sentence/thought — never cut off mid-sentence, mid-word, or mid-idea; if
+the payoff needs more than {$maxDuration}s to land cleanly, pick a tighter, more
+self-contained moment instead of overrunning the limit. Only use start_time/end_time
 values that fall within the transcript's timestamp range.
 PROMPT;
     }

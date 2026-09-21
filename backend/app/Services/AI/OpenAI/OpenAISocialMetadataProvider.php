@@ -20,7 +20,7 @@ class OpenAISocialMetadataProvider implements SocialMetadataProvider
     ) {
     }
 
-    public function generateMetadata(Clip $clip, array $platforms): array
+    public function generateMetadata(Clip $clip, array $platforms, ?string $referenceContent = null): array
     {
         if (empty($this->apiKey)) {
             throw new RuntimeException('OPENAI_API_KEY is not set — required for AI_SOCIAL_METADATA_PROVIDER=openai.');
@@ -32,6 +32,9 @@ class OpenAISocialMetadataProvider implements SocialMetadataProvider
             $clip->clipCandidate?->hook_text ?? $clip->caption ?? '(none)',
             implode(' ', $clip->hashtags ?? [])
         );
+        if (filled($referenceContent)) {
+            $context .= "\n\nReference source (from a URL the user supplied — use it for extra context/facts):\n{$referenceContent}";
+        }
 
         $platformList = implode(', ', $platforms);
         $systemPrompt = $this->systemPrompt($platformList);

@@ -19,6 +19,8 @@ class ProcessingJobResource extends JsonResource
             'progress' => $this->progress,
             'message' => $this->message,
             'error' => $this->error,
+            'request_payload' => $this->request_payload,
+            'response_payload' => $this->response_payload,
             'started_at' => $this->started_at,
             'finished_at' => $this->finished_at,
         ];

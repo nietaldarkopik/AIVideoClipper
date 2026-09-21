@@ -18,6 +18,11 @@ class FaceTrackerReframingProvider implements ReframingProvider
     public function __construct(
         private readonly string $baseUrl,
         private readonly int $timeoutSeconds = 300,
+        // Forwarded to the face-tracker service for its active-speaker path's own
+        // audio extraction — that machine may not have ffmpeg on PATH yet either
+        // (see FFMPEG_BIN's own docs in backend/.env), so it needs the same
+        // absolute path Laravel itself uses rather than guessing "ffmpeg".
+        private readonly string $ffmpegBin = 'ffmpeg',
     ) {
     }
 
@@ -37,6 +42,7 @@ class FaceTrackerReframingProvider implements ReframingProvider
                 'source_width' => $sourceWidth,
                 'source_height' => $sourceHeight,
                 'target_aspect_ratio' => $targetAspectRatio,
+                'ffmpeg_bin' => $this->ffmpegBin,
             ]);
 
         if ($response->failed()) {

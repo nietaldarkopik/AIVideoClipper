@@ -195,4 +195,41 @@ class AutoGenerateAndPublishTest extends TestCase
             ->postJson("/api/social-posts/{$post->id}/publish-now")
             ->assertUnprocessable();
     }
+
+    public function test_scheduler_caps_posts_per_account_per_day_and_rolls_overflow_to_next_day(): void
+    {
+        Queue::fake();
+        $user = User::factory()->create();
+        $account = $user->socialAccounts()->create([
+            'platform' => 'tiktok', 'account_name' => 'test', 'status' => SocialAccount::STATUS_CONNECTED,
+            'auto_publish_enabled' => true,
+        ]);
+
+        $project = $user->projects()->create(['title' => 'Cap test', 'status' => Project::STATUS_RENDERING, 'last_edited_at' => now()]);
+        $video = $project->videos()->create(['source_type' => 'youtube', 'status' => 'ready']);
+
+        // One video producing 7 clips is exactly the kind of burst that used to
+        // schedule 7 back-to-back posts onto one account in a single afternoon.
+        for ($i = 0; $i < 7; $i++) {
+            Clip::create([
+                'project_id' => $project->id, 'video_id' => $video->id,
+                'start_time' => $i * 20, 'end_time' => $i * 20 + 20, 'duration' => 20,
+                'aspect_ratio' => '9:16', 'subtitle_language' => 'en', 'status' => Clip::STATUS_COMPLETED,
+            ]);
+        }
+
+        app(AutoPublishScheduler::class)->scheduleForProject($project);
+
+        $postsPerDay = SocialPost::where('social_account_id', $account->id)
+            ->pluck('scheduled_at')
+            ->map(fn ($dt) => $dt->toDateString())
+            ->countBy();
+
+        $this->assertSame(7, $postsPerDay->sum(), 'all 7 clips should still get scheduled somewhere, none dropped');
+        $this->assertCount(2, $postsPerDay, 'expected the 7 posts split across exactly two calendar days');
+        $this->assertEqualsCanonicalizing(
+            [AutoPublishScheduler::MAX_POSTS_PER_DAY_PER_ACCOUNT, 7 - AutoPublishScheduler::MAX_POSTS_PER_DAY_PER_ACCOUNT],
+            $postsPerDay->values()->all(),
+        );
+    }
 }

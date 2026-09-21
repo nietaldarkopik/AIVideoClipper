@@ -13,6 +13,7 @@ const STEP_LABELS: Record<string, string> = {
   import_video: "Importing video",
   analyze: "Analyzing video",
   render_clip: "Rendering clip",
+  youtube_thumbnail: "Reuploading YouTube thumbnail",
 };
 
 export function ProcessingStatus({ projectId, active }: { projectId: number; active: boolean }) {

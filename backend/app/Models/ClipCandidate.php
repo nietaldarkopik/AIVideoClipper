@@ -16,7 +16,8 @@ class ClipCandidate extends Model
         'overall_score', 'engagement_score', 'hook_score', 'story_score',
         'emotional_score', 'information_score', 'viral_potential',
         'hook_text', 'moment_type', 'reasons', 'explanation',
-        'suggested_title', 'suggested_caption', 'suggested_hashtags', 'status',
+        'suggested_title', 'suggested_caption', 'suggested_hashtags',
+        'cover_titles', 'cover_subtitles', 'status',
     ];
 
     protected $casts = [
@@ -25,6 +26,8 @@ class ClipCandidate extends Model
         'duration' => 'float',
         'reasons' => 'array',
         'suggested_hashtags' => 'array',
+        'cover_titles' => 'array',
+        'cover_subtitles' => 'array',
     ];
 
     public function project(): BelongsTo

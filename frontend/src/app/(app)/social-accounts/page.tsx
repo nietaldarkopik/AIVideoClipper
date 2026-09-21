@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState, Suspense } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { mutate } from "swr";
-import { Plus, Share2, Unlink, RefreshCw, LogIn } from "lucide-react";
+import { Plus, Share2, Unlink, RefreshCw, LogIn, Inbox } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
@@ -15,7 +16,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ConnectAccountModal } from "@/components/social/ConnectAccountModal";
 import { PLATFORM_LABELS, REAL_OAUTH_PLATFORMS } from "@/components/social/platforms";
 import { formatRelativeTime } from "@/lib/format";
-import type { SocialAccount, SocialPlatform } from "@/lib/types";
+import { Select } from "@/components/ui/Input";
+import type { CoverTemplate, SocialAccount, SocialPlatform } from "@/lib/types";
 
 function SocialAccountsPageInner() {
   const router = useRouter();
@@ -24,6 +26,7 @@ function SocialAccountsPageInner() {
   const [reconnectPlatform, setReconnectPlatform] = useState<SocialPlatform | undefined>(undefined);
   const [reconnectingId, setReconnectingId] = useState<number | null>(null);
   const { data, isLoading } = useApi<{ data: SocialAccount[] }>("/social-accounts");
+  const { data: coverTemplatesRes } = useApi<{ data: CoverTemplate[] }>("/cover-templates");
 
   // Lands here after a real OAuth round trip (SocialAccountController::callback
   // always redirects back with ?connected=<platform> or ?error=<message>).
@@ -51,6 +54,26 @@ function SocialAccountsPageInner() {
   async function toggleAutoPublish(account: SocialAccount) {
     try {
       await api.patch(`/social-accounts/${account.id}`, { auto_publish_enabled: !account.auto_publish_enabled });
+      await mutate("/social-accounts");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to update.", "danger");
+    }
+  }
+
+  async function toggleMessengerSync(account: SocialAccount) {
+    try {
+      await api.patch(`/social-accounts/${account.id}`, { messenger_sync_enabled: !account.messenger_sync_enabled });
+      await mutate("/social-accounts");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to update.", "danger");
+    }
+  }
+
+  async function setDefaultCoverTemplate(account: SocialAccount, coverTemplateId: string) {
+    try {
+      await api.patch(`/social-accounts/${account.id}`, {
+        default_cover_template_id: coverTemplateId ? Number(coverTemplateId) : null,
+      });
       await mutate("/social-accounts");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to update.", "danger");
@@ -115,15 +138,23 @@ function SocialAccountsPageInner() {
           <h1 className="text-xl font-semibold">Social Accounts</h1>
           <p className="mt-1 text-sm text-muted">Connect the accounts you publish clips to.</p>
         </div>
-        <Button
-          onClick={() => {
-            setReconnectPlatform(undefined);
-            setModalOpen(true);
-          }}
-        >
-          <Plus className="size-4" />
-          Connect Account
-        </Button>
+        <div className="flex items-center gap-2">
+          <Link href="/social-accounts/messages">
+            <Button variant="outline">
+              <Inbox className="size-4" />
+              Facebook Messages
+            </Button>
+          </Link>
+          <Button
+            onClick={() => {
+              setReconnectPlatform(undefined);
+              setModalOpen(true);
+            }}
+          >
+            <Plus className="size-4" />
+            Connect Account
+          </Button>
+        </div>
       </div>
 
       {isLoading || !data ? (
@@ -174,6 +205,19 @@ function SocialAccountsPageInner() {
                       </p>
                     </div>
                     <StatusBadge status={account.status} />
+                    <Select
+                      value={account.default_cover_template_id ?? ""}
+                      onChange={(e) => setDefaultCoverTemplate(account, e.target.value)}
+                      className="w-auto text-xs"
+                      title="Default cover/thumbnail template auto-applied when publishing this clip here"
+                    >
+                      <option value="">No cover template</option>
+                      {coverTemplatesRes?.data.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </Select>
                     <label className="flex items-center gap-1.5 text-xs text-muted">
                       <input
                         type="checkbox"
@@ -183,6 +227,20 @@ function SocialAccountsPageInner() {
                       />
                       Auto-publish
                     </label>
+                    {account.platform === "facebook" && (
+                      <label
+                        className="flex items-center gap-1.5 text-xs text-muted"
+                        title="Pull inbound Messenger DMs from this Page for content research"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={account.messenger_sync_enabled}
+                          onChange={() => toggleMessengerSync(account)}
+                          className="size-3.5 rounded accent-accent"
+                        />
+                        Sync Messages
+                      </label>
+                    )}
                     {account.status !== "connected" && (
                       <Button
                         size="sm"

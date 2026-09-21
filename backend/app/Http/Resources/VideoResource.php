@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Services\Video\FFmpegService;
 use App\Support\Media;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -19,6 +20,14 @@ class VideoResource extends JsonResource
             'original_filename' => $this->original_filename,
             'url' => Media::url($this->disk_path),
             'thumbnail_url' => Media::url($this->thumbnail_path),
+            // Null for a video imported before this feature, or whose strip/
+            // waveform generation failed/had no audio — TimelineTrack falls back
+            // to a plain bar. tile_count is always the same fixed constant
+            // (FFmpegService::THUMBNAIL_STRIP_TILE_COUNT) but sent explicitly so
+            // the frontend's slice math never hardcodes it.
+            'thumbnail_strip_url' => Media::url($this->thumbnail_strip_path),
+            'thumbnail_strip_tile_count' => FFmpegService::THUMBNAIL_STRIP_TILE_COUNT,
+            'waveform_url' => Media::url($this->waveform_path),
             'duration_seconds' => $this->duration_seconds,
             'width' => $this->width,
             'height' => $this->height,

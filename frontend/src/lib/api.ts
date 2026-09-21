@@ -61,7 +61,7 @@ async function request<T>(
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
+  get: <T>(path: string, options?: RequestInit & { skipAuth?: boolean }) => request<T>(path, options),
   post: <T>(path: string, body?: unknown, options: RequestInit & { skipAuth?: boolean } = {}) =>
     request<T>(path, {
       method: "POST",
@@ -75,4 +75,17 @@ export const api = {
 
 export function apiOrigin(): string {
   return API_URL.replace(/\/api\/?$/, "");
+}
+
+/**
+ * Absolute URL for a path stored on the backend's "media" disk (a layer's
+ * image_path/audio_path, a waveform sidecar, ...). Built from the API origin
+ * rather than the backend's own app.url, so it stays correct when the frontend
+ * talks to a different host than the one Laravel thinks it's serving from.
+ * The /api/media/{path} route is public, so these work in a plain <img>/<audio>
+ * with no bearer token attached.
+ */
+export function mediaUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  return `${apiOrigin()}/api/media/${path.replace(/^\/+/, "")}`;
 }

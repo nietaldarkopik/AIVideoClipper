@@ -17,12 +17,39 @@ class UrlVideoDownloader
     public function __construct(
         private readonly string $ytDlpBin = 'yt-dlp',
         private readonly string $ffmpegBin = 'ffmpeg',
-    ) {
+        // Routes every yt-dlp request through this proxy when set (yt-dlp --proxy
+        // syntax, e.g. "http://user:pass@host:port" or "socks5://host:port") — an
+        // IP block from a platform (observed: TikTok blocking this server's IP
+        // outright, independent of the video/account requested) can't be fixed by
+        // updating yt-dlp; only a different egress IP gets past it.
+        private readonly ?string $proxy = null,
+        // Ceiling for the downloaded source's height. This matters more here than
+        // for a normal downloader: a 9:16 clip is cropped out of a 16:9 source, so
+        // only ~56% of the source's width survives and then gets scaled up to
+        // 1080x1920 — a 360p source ends up as a ~202px-wide strip stretched 5x.
+        // Capped rather than "always best" because 4K sources (usually AV1) are
+        // slow to decode in every ffmpeg pass this pipeline runs, for no visible
+        // gain once the result is a 1080x1920 clip.
+        private readonly int $maxHeight = 1440,
+    ) {}
+
+    private function proxyArgs(): array
+    {
+        return $this->proxy ? ['--proxy', $this->proxy] : [];
     }
 
     /**
-     * @return list<string> e.g. ['android', 'tv', 'web'] — always at least one
-     * element so callers can always loop once even with no override configured.
+     * @return list<string> tried in order; '' means "pass no --extractor-args at
+     *                      all", i.e. let yt-dlp choose its own player clients.
+     *
+     * yt-dlp's own default always goes FIRST, and configured clients are only
+     * fallbacks for when that fails. Pinning a specific client used to be the
+     * default (android), which silently capped every YouTube download at 360p:
+     * YouTube now serves the android client a single progressive itag-18 stream
+     * and no adaptive formats at all, so the download "succeeded" on the first
+     * client and the loop never tried another. yt-dlp tracks which clients
+     * currently get served real formats; this list shouldn't second-guess it
+     * unless the default actually errors.
      */
     private function playerClients(): array
     {
@@ -31,11 +58,11 @@ class UrlVideoDownloader
             explode(',', (string) config('services.ytdlp.player_clients', ''))
         )));
 
-        return $clients ?: [''];
+        return ['', ...array_diff($clients, [''])];
     }
 
     /**
-     * @return array{path: string, title: ?string, captions: ?array{path: string, language: string}}
+     * @return array{path: string, title: ?string, channel_name: ?string, captions: ?array{path: string, language: string}}
      */
     public function download(string $url, string $destinationDir): array
     {
@@ -44,14 +71,19 @@ class UrlVideoDownloader
         }
 
         $destinationDir = rtrim($destinationDir, '/\\');
-        $outputTemplate = $destinationDir . DIRECTORY_SEPARATOR . 'source.%(ext)s';
+        $outputTemplate = $destinationDir.DIRECTORY_SEPARATOR.'source.%(ext)s';
 
-        // Only ask yt-dlp to print the title. The output filename is already
-        // deterministic via -o, and yt-dlp's --print statements aren't guaranteed
-        // to appear in the order they were passed on the command line (the
-        // untagged "title" print fires at metadata-extraction time, *before* the
-        // "after_move:filepath" one does) — so we find the produced files on disk
-        // instead of trying to parse a positional filepath out of stdout.
+        // Ask yt-dlp to print the title and channel/uploader name, tab-separated on
+        // one line so they can't get split across separate --print events (yt-dlp's
+        // --print statements aren't guaranteed to appear in the order they were
+        // passed on the command line — the untagged "title" print used to fire at
+        // metadata-extraction time, *before* the "after_move:filepath" one does).
+        // The output filename is already deterministic via -o, so we still find the
+        // produced files on disk rather than trying to parse a positional filepath
+        // out of stdout. "%(channel,uploader|)s" falls back to the uploader/handle
+        // when a platform has no separate "channel" concept (e.g. TikTok), and to
+        // an empty string when neither is available (e.g. a generic direct link)
+        // — used to credit the source in clip captions, see ClipCreditFormatter.
         //
         // Subtitles are fetched in a *separate* yt-dlp invocation (see
         // downloadCaptions()), not bundled into this command. yt-dlp aborts the
@@ -63,10 +95,32 @@ class UrlVideoDownloader
             $this->ytDlpBin,
             '--no-playlist',
             '--ffmpeg-location', $this->ffmpegBin,
-            '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
+            // Separate video+audio streams merged locally, falling back to a
+            // progressive stream only when no adaptive pair exists. Deliberately
+            // NOT restricted to [ext=mp4]+[ext=m4a] any more: YouTube only offers
+            // its higher resolutions as VP9/AV1 (webm) or with opus audio, so
+            // demanding mp4/m4a threw away every format above 360-720p and fell
+            // through to a progressive stream. The result is re-encoded by
+            // FFmpegService on every render anyway, so the source container and
+            // codec don't need to be web-friendly — only decodable.
+            '-f', 'bv*+ba/b',
+            // Preference order within that: cap the height (see $maxHeight),
+            // then prefer H.264 video and m4a audio so the merge below usually
+            // stays in a real mp4 rather than being remuxed to mkv. These are
+            // preferences, not filters — a video that only publishes VP9 at the
+            // wanted height still downloads at that height.
+            '-S', "res:{$this->maxHeight},vcodec:h264,acodec:m4a",
             '--merge-output-format', 'mp4',
-            '--print', 'after_move:%(title)s',
+            '--print', "after_move:%(title)s\t%(channel,uploader|)s",
             '-o', $outputTemplate,
+            // Mimics a real Chrome TLS/HTTP fingerprint (via curl_cffi) instead of
+            // yt-dlp's default client signature — several sites' anti-bot systems
+            // (TikTok, and Cloudflare-protected generic pages) block the default
+            // signature outright regardless of IP, even though a real browser from
+            // the exact same IP/network is never challenged. No observed downside
+            // on sites that don't need it (verified against YouTube).
+            '--impersonate', 'chrome',
+            ...$this->proxyArgs(),
         ];
 
         // YouTube intermittently 429-rate-limits a server's IP (nothing to do with the
@@ -96,7 +150,7 @@ class UrlVideoDownloader
                 $result = Process::timeout(900)->run($command);
 
                 $videoCandidates = array_filter(
-                    glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*') ?: [],
+                    glob($destinationDir.DIRECTORY_SEPARATOR.'source.*') ?: [],
                     fn (string $f) => in_array(strtolower(pathinfo($f, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true)
                 );
 
@@ -138,11 +192,11 @@ class UrlVideoDownloader
                     continue 2;
                 }
 
-                throw new RuntimeException('Failed to import video from URL: ' . $lastErrorText);
+                throw new RuntimeException('Failed to import video from URL: '.$lastErrorText);
             }
         }
 
-        $title = trim($result->output()) ?: null;
+        [$title, $channelName] = $this->parseTitleAndChannel($result->output());
 
         if (empty($videoCandidates)) {
             throw new RuntimeException('yt-dlp reported success but no output video file was found on disk.');
@@ -153,7 +207,26 @@ class UrlVideoDownloader
         return [
             'path' => reset($videoCandidates),
             'title' => $title,
+            'channel_name' => $channelName,
             'captions' => $this->findCaptions($destinationDir),
+        ];
+    }
+
+    /**
+     * @return array{0: ?string, 1: ?string} [title, channel_name]
+     */
+    private function parseTitleAndChannel(string $output): array
+    {
+        // The last non-empty line is the one from our own --print (a "player
+        // client" retry can emit multiple such lines across attempts; only the
+        // final successful one matters).
+        $lines = array_values(array_filter(explode("\n", str_replace("\r", '', trim($output)))));
+        $lastLine = end($lines) ?: '';
+        [$title, $channelName] = array_pad(explode("\t", $lastLine, 2), 2, null);
+
+        return [
+            trim((string) $title) ?: null,
+            trim((string) $channelName) ?: null,
         ];
     }
 
@@ -193,12 +266,14 @@ class UrlVideoDownloader
                 '--sub-langs', $lang,
                 '--convert-subs', 'srt',
                 '-o', $outputTemplate,
+                '--impersonate', 'chrome',
+                ...$this->proxyArgs(),
                 $url,
             ];
 
             $result = Process::timeout(90)->run($command);
 
-            if (! empty(glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*.srt'))) {
+            if (! empty(glob($destinationDir.DIRECTORY_SEPARATOR.'source.*.srt'))) {
                 return;
             }
 
@@ -221,7 +296,7 @@ class UrlVideoDownloader
      */
     private function findCaptions(string $destinationDir): ?array
     {
-        $files = glob($destinationDir . DIRECTORY_SEPARATOR . 'source.*.srt') ?: [];
+        $files = glob($destinationDir.DIRECTORY_SEPARATOR.'source.*.srt') ?: [];
         if (empty($files)) {
             return null;
         }

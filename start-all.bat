@@ -2,9 +2,9 @@
 setlocal enabledelayedexpansion
 
 rem Starts every clipper-tools process in its own cmd window: Redis, Laravel API,
-rem queue worker, batch downloads worker, scheduler, Next.js frontend, and (if
-rem enabled) the self-hosted whisper-engine transcription, face-tracker reframing,
-rem and instagram-automation services.
+rem queue worker, batch downloads worker, publish worker, scheduler, Next.js
+rem frontend, and (if enabled) the self-hosted whisper-engine transcription,
+rem face-tracker reframing, and instagram-automation services.
 rem
 rem This is the cmd.exe port of start-all.ps1 for people who don't want to run
 rem PowerShell scripts. Behavior mirrors it 1:1, including the .env auto-detection.
@@ -85,6 +85,9 @@ if defined FORCE_INSTAGRAM (
 
 echo Starting clipper-tools...
 
+rem 0. 9router
+start "clipper: 9router" cmd /k "9router"
+
 rem 1. Redis
 start "clipper: redis" cmd /k "cd /d "%ROOT%\tools\redis" && redis-server.exe redis.conf"
 
@@ -102,6 +105,17 @@ rem behind them - see ProcessVideoBatchJob's docblock. Required, not optional: w
 rem it, a created batch just sits there since nothing ever downloads its videos.
 start "clipper: batch downloads" cmd /k "cd /d "%ROOT%\backend" && php artisan queue:work redis --queue=batch-downloads"
 
+rem 3c. Publish worker - PublishClipJob always queues onto 'publish' (see its
+rem constructor), never 'default', so a render backlog on 'default' (e.g. the
+rem large one ReapStuckClipRenders/RepublishOverdueSocialPosts can dump there
+rem after a queue outage - see bootstrap/app.php withSchedule) can never again
+rem starve a scheduled publish behind it, the way it did the day this was added.
+rem Required, not optional: without it, nothing on 'publish' ever runs, so no
+rem clip - scheduled, "Publish Now", or auto-published from a batch - ever
+rem actually reaches YouTube/TikTok/etc, no matter how long you wait.
+rem Also drains 'default' once 'publish' is empty, for extra render throughput.
+start "clipper: publish worker" cmd /k "cd /d "%ROOT%\backend" && php artisan queue:work redis --queue=publish,default"
+
 rem 3b. Scheduler - runs App\Console\Commands\ReapStalledProcessingJobs every 5min
 rem (see bootstrap/app.php withSchedule) to auto-fail ProcessingJob rows stuck at
 rem "running" because their worker died (crash, PC restart) without ever getting to
@@ -109,7 +123,8 @@ rem mark them failed itself.
 start "clipper: scheduler" cmd /k "cd /d "%ROOT%\backend" && php artisan schedule:work"
 
 rem 4. Next.js frontend
-start "clipper: frontend" cmd /k "cd /d "%ROOT%\frontend" && npm run dev"
+rem start "clipper: frontend" cmd /k "cd /d "%ROOT%\frontend" && npm run dev --port=3001"
+start "clipper: frontend" cmd /k "cd /d "%ROOT%\frontend" && npm run start:prod"
 
 rem 5. Whisper engine (optional)
 if "%START_WHISPER%"=="1" (
@@ -142,7 +157,7 @@ if "%START_INSTAGRAM%"=="1" (
 
 echo.
 echo Windows opened (optional services included only if enabled). Close a window to stop that process.
-echo Frontend:  http://localhost:3000
+echo Frontend:  http://localhost:3001
 echo API:       http://localhost:8000
 if "%START_WHISPER%"=="1" echo Whisper:   http://127.0.0.1:8100/health
 if "%START_FACETRACKER%"=="1" echo Face tracker: http://127.0.0.1:8200/health

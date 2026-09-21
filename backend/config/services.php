@@ -23,6 +23,12 @@ return [
     // to have died with its worker process (crash, PC restart) and gets marked failed.
     'processing' => [
         'stall_minutes' => env('PROCESSING_JOB_STALL_MINUTES', 20),
+        // How late a scheduled post's slot must be before
+        // RepublishOverdueSocialPosts treats it as lost rather than merely about
+        // to fire — shorter than stall_minutes above since a missed delayed job
+        // is invisible the instant its slot passes, unlike a stalled ProcessingJob
+        // which has a "still legitimately running" window to wait out first.
+        'publish_grace_minutes' => env('PUBLISH_GRACE_MINUTES', 10),
     ],
 
     'google' => [
@@ -33,6 +39,38 @@ return [
         'client_id' => env('GOOGLE_CLIENT_ID'),
         'client_secret' => env('GOOGLE_CLIENT_SECRET'),
         'redirect_uri' => env('GOOGLE_REDIRECT_URI'),
+
+        // Auto re-apply after publish is OFF by default: YouTubeProvider already sets
+        // the cover as the thumbnail at the moment of upload (thumbnails.set right
+        // after the video finishes uploading), so the follow-up poll-and-reapply
+        // pass (ReapplyYoutubeThumbnailJob, dispatched from PublishClipJob) exists
+        // only to guard against YouTube's own processing pipeline silently resetting
+        // that thumbnail afterward — a quirk that in practice essentially never
+        // fires. The job class and its manual "reupload thumbnail" button
+        // (SocialPostController::retryThumbnail) are unaffected by this flag and
+        // still work either way; this only stops the automatic background pass
+        // PublishClipJob queues after every YouTube publish.
+        'auto_reapply_thumbnail' => (bool) env('YOUTUBE_AUTO_REAPPLY_THUMBNAIL', false),
+    ],
+
+    'tiktok' => [
+        // TikTok for Developers app (developers.tiktok.com) with Login Kit and
+        // Content Posting API both enabled, requesting the user.info.basic,
+        // user.info.profile, video.publish, and video.list scopes. Register
+        // redirect_uri below verbatim as a Redirect URI in the app's Login Kit
+        // settings — TikTok requires an exact HTTPS match (no bare "localhost").
+        //
+        // Publishing lands as PRIVATE (or sent to the creator's TikTok inbox for
+        // manual review, never immediately public) until this app passes TikTok's
+        // audit — see TikTokProvider's class docblock.
+        'client_key' => env('TIKTOK_CLIENT_KEY'),
+        'client_secret' => env('TIKTOK_CLIENT_SECRET'),
+        'redirect_uri' => env('TIKTOK_REDIRECT_URI'),
+        // Separate Redirect URI for the "Login/Sign up with TikTok" flow
+        // (AuthController::tiktokCallback) — must be registered as its own
+        // entry in the TikTok app's Login Kit settings alongside redirect_uri
+        // above, since the two land on different backend routes.
+        'login_redirect_uri' => env('TIKTOK_LOGIN_REDIRECT_URI'),
     ],
 
     'facebook' => [
@@ -47,6 +85,12 @@ return [
         'app_secret' => env('FACEBOOK_APP_SECRET'),
         'graph_version' => env('FACEBOOK_GRAPH_VERSION', 'v21.0'),
         'redirect_uri' => env('FACEBOOK_REDIRECT_URI'),
+        // Facebook Login for Business configuration (App Dashboard > Facebook
+        // Login > Configurations). When set, the OAuth dialog is driven by this
+        // config_id instead of a plain `scope` list — this is what actually lets
+        // the consent screen surface Pages owned by a Business Portfolio (plain
+        // scope-based login silently omits them even if the user manages them).
+        'login_config_id' => env('FACEBOOK_LOGIN_CONFIG_ID'),
     ],
 
     'instagram_automation' => [
@@ -84,6 +128,22 @@ return [
         // go slower (e.g. 'medium') only if you specifically want smaller files and
         // have CPU headroom to spare.
         'ffmpeg_preset' => env('FFMPEG_PRESET', 'superfast'),
+        // Fallback font FILE for template text layers (LayerCompositionService's
+        // drawtext filter). Bare font *names* (drawtext's font= option) need an
+        // ffmpeg build with a working libfontconfig config, which isn't a safe
+        // assumption cross-platform/cross-machine (observed on Windows: fontconfig
+        // compiled in but "Cannot load default config file" at runtime, even though
+        // the same build's libass — a separate, unrelated font-matching path used
+        // for ASS caption burn-in — works fine via DirectWrite). Pointing at a real
+        // .ttf/.otf sidesteps that entirely; a template layer can still override
+        // per-layer via props.font_file.
+        'default_font_file' => env('DEFAULT_FONT_FILE'),
+    ],
+
+    'backup' => [
+        'pg_dump_bin' => env('PG_DUMP_BIN', 'pg_dump'),
+        'psql_bin' => env('PSQL_BIN', 'psql'),
+        'tar_bin' => env('TAR_BIN', 'tar'),
     ],
 
     'trending' => [
@@ -96,6 +156,16 @@ return [
         // (services.google.*) used for real YouTube publishing.
         'youtube_provider' => env('TRENDING_YOUTUBE_PROVIDER', 'mock'),
         'youtube_api_key' => env('YOUTUBE_API_KEY'),
+        // TikTok/Instagram/Facebook/Twitter still have no official trending API, but
+        // can approximate one via 9Router web search (domain-filtered to each
+        // platform) — set to nine_router_search + configure
+        // services.nine_router.web_search_model to switch one on. Best-effort: a
+        // search result isn't guaranteed to be a single yt-dlp-downloadable post the
+        // way the curated mock seed list is — see AbstractNineRouterSearchTrendingProvider.
+        'tiktok_provider' => env('TRENDING_TIKTOK_PROVIDER', 'mock'),
+        'instagram_provider' => env('TRENDING_INSTAGRAM_PROVIDER', 'mock'),
+        'facebook_provider' => env('TRENDING_FACEBOOK_PROVIDER', 'mock'),
+        'twitter_provider' => env('TRENDING_TWITTER_PROVIDER', 'mock'),
         'cache_ttl' => env('TRENDING_CACHE_TTL', 900),
         'region_code' => env('TRENDING_REGION_CODE', 'US'),
     ],
@@ -105,14 +175,44 @@ return [
         'analysis_provider' => env('AI_ANALYSIS_PROVIDER', 'mock'),
         'reframing_provider' => env('AI_REFRAMING_PROVIDER', 'mock'),
         'social_metadata_provider' => env('AI_SOCIAL_METADATA_PROVIDER', 'mock'),
+        // Reaction-intro cover feature: a short provocative one-liner reacting to
+        // the clip's own content (positive/hype if good, satire if not), narrated
+        // over a cover screen before the clip plays — see ReactionScriptProvider.
+        'reaction_script_provider' => env('AI_REACTION_SCRIPT_PROVIDER', 'mock'),
+        // Text-to-speech for that reaction line — see TextToSpeechProvider.
+        'tts_provider' => env('AI_TTS_PROVIDER', 'mock'),
+        // Vector embeddings for clip semantic search — see ClipSearchService.
+        'embedding_provider' => env('AI_EMBEDDING_PROVIDER', 'mock'),
+        // URL -> markdown/text fetch, used as extra context for reaction-script /
+        // social-metadata generation — see WebContentFetcher.
+        'web_fetch_provider' => env('AI_WEB_FETCH_PROVIDER', 'mock'),
+        // Multi-result web search for the trending -> content-brief research
+        // pipeline — see WebSearchProvider / GenerateContentBriefJob.
+        'web_search_provider' => env('AI_WEB_SEARCH_PROVIDER', 'mock'),
+        // Long-form Indonesian video narrative/script generation from gathered
+        // research — see VideoNarrativeProvider / GenerateContentBriefJob.
+        'video_narrative_provider' => env('AI_VIDEO_NARRATIVE_PROVIDER', 'mock'),
+        // Daily content-idea generation from multi-source research — see
+        // ContentIdeaProvider / ResearchChannelJob. Overridable at runtime from the
+        // admin settings panel via the `content_idea_model` setting.
+        'content_idea_provider' => env('AI_CONTENT_IDEA_PROVIDER', 'mock'),
+        // AI-generated background for the reaction intro cover — see
+        // RenderClipJob::composeIntroOutro().
+        'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
         'max_clips_per_video' => env('MAX_CLIPS_PER_VIDEO', 10),
-        'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 30),
+        // Upper bound each AI content-analysis provider is told to target when
+        // picking a candidate's start_time/end_time (see each provider's
+        // systemPrompt()), and the hard ceiling AnalyzeVideoJob::clampToMaxDuration()
+        // enforces afterward regardless of what the model actually returned.
+        'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 45),
     ],
 
     'openai' => [
         'api_key' => env('OPENAI_API_KEY'),
         'transcribe_model' => env('OPENAI_TRANSCRIBE_MODEL', 'whisper-1'),
         'chat_model' => env('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
+        'tts_model' => env('OPENAI_TTS_MODEL', 'tts-1'),
+        'tts_voice' => env('OPENAI_TTS_VOICE', 'alloy'),
     ],
 
     'anthropic' => [
@@ -127,6 +227,17 @@ return [
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
     ],
 
+    'groq' => [
+        // From console.groq.com/keys — free tier, OpenAI-compatible /audio/
+        // transcriptions endpoint. Used for AI_TRANSCRIPTION_PROVIDER=groq, a
+        // fallback when OpenAI's account runs out of credit and self-hosted
+        // whisper_engine isn't an option (CPU load triggering reboots).
+        'api_key' => env('GROQ_API_KEY'),
+        // "whisper-large-v3-turbo" is faster/cheaper; "whisper-large-v3" is the
+        // more accurate (slower) full model — swap if turbo's accuracy isn't enough.
+        'transcribe_model' => env('GROQ_TRANSCRIBE_MODEL', 'whisper-large-v3-turbo'),
+    ],
+
     'nine_router' => [
         // Self-hosted OpenAI-compatible LLM gateway (https://9router.com) — routes
         // each request across many upstream providers, picking the cheapest one
@@ -137,6 +248,53 @@ return [
         // GET {base_url}/models on your own instance for a valid id (e.g.
         // "cc/claude-sonnet-5"); "auto" is NOT a real model id and will 404.
         'model' => env('NINE_ROUTER_MODEL'),
+        // Separate model id for the /audio/transcriptions endpoint — a chat model
+        // id from services.nine_router.model will not work here. Check GET
+        // {base_url}/models for a Whisper-compatible id your instance has
+        // credentials for.
+        'transcribe_model' => env('NINE_ROUTER_TRANSCRIBE_MODEL'),
+        // Model id(s) for the /audio/speech (TTS) endpoint — same caveat as
+        // transcribe_model above. Comma-separated to configure a fallback chain
+        // (e.g. "openai/gpt-4o-mini-tts,gemini/gemini-3.1-flash-tts-preview/Zephyr")
+        // — each upstream credential has its own separate quota, so
+        // NineRouterTextToSpeechProvider tries the next one whenever one is
+        // rate-limited/over quota, only giving up once all of them have failed.
+        'tts_model' => env('NINE_ROUTER_TTS_MODEL'),
+        // Separate model id for moment-detection/clip-scoring (still a plain chat
+        // completion, same endpoint as `model` above). Worth pinning to a named,
+        // capable model rather than an opaque auto-router/combo alias: a whole
+        // long transcript (hundreds of timestamped segments) goes into one
+        // prompt, and a weaker/inconsistent model is prone to writing a
+        // plausible-sounding hook_text/title for one moment while attaching the
+        // timestamp of a completely different one — the clip ends up with a
+        // title that doesn't match what's actually in it. Falls back to `model`
+        // when unset — see AIServiceProvider.
+        'analysis_model' => env('NINE_ROUTER_ANALYSIS_MODEL'),
+        // Separate model id for reaction-script generation (still a plain chat
+        // completion, same endpoint as `model` above) — lets it target a different
+        // registered provider/credential (e.g. a Gemini entry) than clip scoring
+        // does. Falls back to `model` when unset — see AIServiceProvider.
+        'reaction_script_model' => env('NINE_ROUTER_REACTION_SCRIPT_MODEL'),
+        // Model id for the /embeddings endpoint — check GET {base_url}/models/embedding.
+        'embedding_model' => env('NINE_ROUTER_EMBEDDING_MODEL'),
+        // Model id for the /web/fetch endpoint (a provider name, e.g. "jina-reader") —
+        // check GET {base_url}/models/web (kind=="webFetch").
+        'web_fetch_model' => env('NINE_ROUTER_WEB_FETCH_MODEL'),
+        // Model id for the /web/search endpoint (a provider name, e.g. "tavily") — used
+        // by the trending non-YouTube platforms and by WebSearchProvider (content-brief
+        // research), check GET {base_url}/models/web (kind=="webSearch"). See
+        // TrendingServiceProvider and AIServiceProvider.
+        'web_search_model' => env('NINE_ROUTER_WEB_SEARCH_MODEL'),
+        // Separate model id for long-form video narrative generation (still a plain
+        // chat completion, same endpoint as `model` above). Falls back to `model`
+        // when unset — see AIServiceProvider.
+        'video_narrative_model' => env('NINE_ROUTER_VIDEO_NARRATIVE_MODEL'),
+        // Separate model id for daily content-idea generation. Falls back to `model`
+        // when unset — see AIServiceProvider. Worth pointing at a stronger model than
+        // clip scoring: this prompt carries a whole run's research evidence.
+        'content_idea_model' => env('NINE_ROUTER_CONTENT_IDEA_MODEL'),
+        // Model id for the /images/generations endpoint — check GET {base_url}/models/image.
+        'image_model' => env('NINE_ROUTER_IMAGE_MODEL'),
     ],
 
     'whisper_engine' => [
@@ -176,7 +334,23 @@ return [
         // patches this, so it's a comma-separated, tunable list rather than one
         // hardcoded value. Tried in order — UrlVideoDownloader moves to the next
         // client on a 403/blocked error instead of retrying the same one.
-        'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'android,tv,web'),
+        //
+        // These are FALLBACKS ONLY: UrlVideoDownloader::playerClients() always
+        // tries yt-dlp's own default first. "android" used to lead this list,
+        // which quietly capped every YouTube import at 360p — YouTube serves that
+        // client a single progressive stream with no adaptive formats, so the
+        // download succeeded and the better clients were never reached.
+        'player_clients' => env('YTDLP_PLAYER_CLIENTS', 'tv_simply,android'),
+        // Height ceiling for downloaded sources — see UrlVideoDownloader's
+        // $maxHeight for why this app cares more about source resolution than
+        // most (the 9:16 crop throws away ~44% of the width, then upscales).
+        'max_height' => (int) env('YTDLP_MAX_HEIGHT', 1440),
+        // Routes every yt-dlp request (video + captions) through this proxy when
+        // set — yt-dlp's own --proxy syntax, e.g. "http://user:pass@host:port" or
+        // "socks5://host:port". Needed when a platform blocks this server's IP
+        // outright (observed with TikTok — no yt-dlp version fixes that, only a
+        // different egress IP does); leave unset to download directly as before.
+        'proxy' => env('YTDLP_PROXY'),
     ],
 
     'video_batch' => [

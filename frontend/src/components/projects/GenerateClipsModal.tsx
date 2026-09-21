@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { mutate } from "swr";
 import { Sparkles } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
@@ -29,13 +29,26 @@ export function GenerateClipsModal({
   projectId: number;
   candidateIds?: number[];
 }) {
-  const { data: templatesData } = useApi<{ data: Template[] }>(open ? "/templates" : null);
   const [mode, setMode] = useState("top_5");
   const [templateId, setTemplateId] = useState<string>("");
+  // Aspect ratio is a FILTER on which templates are selectable here, not an
+  // independent render parameter — the template actually chosen is what
+  // determines render dimensions (see backend ClipGenerationService /
+  // RenderClipJob). It still gets sent to the API for the "no template"
+  // case, where Clip::targetResolution() falls back to it directly.
   const [aspectRatio, setAspectRatio] = useState("9:16");
+  const { data: templatesData } = useApi<{ data: Template[] }>(
+    open ? `/templates?aspect_ratio=${aspectRatio}` : null
+  );
   const [submitting, setSubmitting] = useState(false);
 
   const isSingleSelection = !!candidateIds && candidateIds.length > 0;
+
+  // Selected template stops matching the filter list when the aspect ratio
+  // changes — clear it instead of silently keeping a now-hidden template_id.
+  useEffect(() => {
+    setTemplateId("");
+  }, [aspectRatio]);
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -73,23 +86,24 @@ export function GenerateClipsModal({
         )}
 
         <div>
-          <Label htmlFor="template">Template</Label>
-          <Select id="template" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
-            <option value="">No template (default captions)</option>
-            {templatesData?.data.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name} — {t.aspect_ratio}
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        <div>
           <Label htmlFor="aspect">Aspect Ratio</Label>
           <Select id="aspect" value={aspectRatio} onChange={(e) => setAspectRatio(e.target.value)}>
             <option value="9:16">9:16 — TikTok / Reels / Shorts</option>
             <option value="1:1">1:1 — Square</option>
             <option value="16:9">16:9 — Landscape</option>
+          </Select>
+          <p className="mt-1 text-xs text-muted">Filters which templates are available below.</p>
+        </div>
+
+        <div>
+          <Label htmlFor="template">Template</Label>
+          <Select id="template" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+            <option value="">No template (default captions)</option>
+            {templatesData?.data.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
           </Select>
         </div>
       </div>

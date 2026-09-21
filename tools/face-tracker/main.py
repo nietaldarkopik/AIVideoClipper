@@ -41,6 +41,11 @@ class DetectCropRequest(BaseModel):
     source_width: int
     source_height: int
     target_aspect_ratio: str
+    # Absolute path to ffmpeg, for the active-speaker path's own audio extraction —
+    # Laravel already resolves this (see backend FFMPEG_BIN) since a fresh shell on
+    # this machine may not have it on PATH yet either. Falls back to "ffmpeg" (PATH
+    # lookup) if the caller doesn't send one.
+    ffmpeg_bin: Optional[str] = "ffmpeg"
 
 
 class Keyframe(BaseModel):
@@ -81,6 +86,7 @@ async def detect_crop(request: DetectCropRequest):
             request.source_width,
             request.source_height,
             request.target_aspect_ratio,
+            ffmpeg_bin=request.ffmpeg_bin or "ffmpeg",
         )
     except Exception as e:
         logger.error(f"Face-tracking crop detection failed: {e}")

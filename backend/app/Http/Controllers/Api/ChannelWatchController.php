@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ChannelWatchResource;
 use App\Models\ChannelWatch;
+use App\Models\VideoBatchItem;
 use App\Services\Channel\ChannelWatchPoller;
 use App\Services\Channel\YouTubeChannelMonitor;
 use App\Services\Social\AutoPublishScheduler;
@@ -22,7 +23,7 @@ class ChannelWatchController extends Controller
         return ChannelWatchResource::collection($watches);
     }
 
-    public function store(Request $request, YouTubeChannelMonitor $monitor)
+    public function store(Request $request, YouTubeChannelMonitor $monitor, ChannelWatchPoller $poller)
     {
         $data = $request->validate([
             'channel_url' => ['required', 'string', 'max:2048'],
@@ -75,12 +76,19 @@ class ChannelWatchController extends Controller
                 'publish_stagger_min_minutes' => $data['publish_stagger_min_minutes'] ?? AutoPublishScheduler::STAGGER_MIN_SECONDS / 60,
                 'publish_stagger_max_minutes' => $data['publish_stagger_max_minutes'] ?? AutoPublishScheduler::STAGGER_MAX_SECONDS / 60,
             ],
-            // Only uploads from here on are auto-clipped — adding a watch never
-            // bulk-processes a channel's existing back catalog as a surprise.
+            // queueLatestVideo() below immediately overwrites this with the
+            // channel's actual latest video (if any) — this is only the fallback
+            // watermark for a channel with no qualifying uploads at all yet.
             'last_video_published_at' => now(),
         ]);
 
-        return ChannelWatchResource::make($watch)->response()->setStatusCode(201);
+        // Immediately queue the channel's current latest video (never its whole
+        // back catalog — see queueLatestVideo()'s docblock) so adding a watch
+        // visibly does something right away instead of silently waiting for the
+        // channel's next organic upload, which can be days off.
+        $poller->queueLatestVideo($watch);
+
+        return ChannelWatchResource::make($watch->fresh())->response()->setStatusCode(201);
     }
 
     public function update(Request $request, ChannelWatch $channelWatch)
@@ -106,6 +114,8 @@ class ChannelWatchController extends Controller
             }
         }
 
+        $oldPublishingProfileId = $channelWatch->settings['publishing_profile_id'] ?? null;
+
         $settingsKeys = [
             'clip_mode', 'template_id', 'aspect_ratio', 'subtitle_language', 'subtitles_enabled',
             'publishing_profile_id', 'publish_stagger_min_minutes', 'publish_stagger_max_minutes',
@@ -115,13 +125,48 @@ class ChannelWatchController extends Controller
             $channelWatch->settings = [...($channelWatch->settings ?? []), ...$settingsUpdate->all()];
         }
 
+        $pausing = array_key_exists('is_active', $data) && $data['is_active'] === false && $channelWatch->is_active;
+
         if (array_key_exists('is_active', $data)) {
             $channelWatch->is_active = $data['is_active'];
         }
 
         $channelWatch->save();
 
-        return ChannelWatchResource::make($channelWatch->fresh());
+        // Stop scanning happens immediately (PollChannelWatches filters on
+        // is_active), but a video from this channel can already be sitting in
+        // the queue from an earlier poll — cancel those now rather than leaving
+        // them to run to completion. ProcessBatchItemJob has its own is_active
+        // check for the case where an item is already mid-run when this fires
+        // (can't be interrupted synchronously from here); this only covers ones
+        // that haven't started yet.
+        $cancelledCount = 0;
+        if ($pausing) {
+            $cancelledCount = VideoBatchItem::whereHas(
+                'videoBatch',
+                fn ($q) => $q->where('channel_watch_id', $channelWatch->id)
+            )
+                ->where('status', VideoBatchItem::STATUS_PENDING)
+                ->update([
+                    'status' => VideoBatchItem::STATUS_CANCELLED,
+                    'message' => 'Skipped — the source channel watch was paused.',
+                ]);
+        }
+
+        // The publishing target just got corrected — redirect whatever this
+        // channel's already-rendered-but-not-yet-published clips are still
+        // scheduled to, onto the new target(s), instead of leaving them queued
+        // to publish to the old (wrong) account. See
+        // AutoPublishScheduler::resyncChannelWatchProfile()'s docblock for what
+        // this does and doesn't cover.
+        $newPublishingProfileId = $channelWatch->settings['publishing_profile_id'] ?? null;
+        $resyncedCount = 0;
+        if (array_key_exists('publishing_profile_id', $data) && $newPublishingProfileId !== $oldPublishingProfileId) {
+            $resyncedCount = app(AutoPublishScheduler::class)->resyncChannelWatchProfile($channelWatch, $newPublishingProfileId);
+        }
+
+        return ChannelWatchResource::make($channelWatch->fresh())
+            ->additional(['resynced_posts' => $resyncedCount, 'cancelled_items' => $cancelledCount]);
     }
 
     public function destroy(Request $request, ChannelWatch $channelWatch)

@@ -8,6 +8,7 @@ use App\Models\VideoBatch;
 use App\Models\VideoBatchItem;
 use App\Services\Social\AutoPublishScheduler;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Creates a VideoBatch + its VideoBatchItem rows and kicks off the batch autobot
@@ -21,12 +22,18 @@ class VideoBatchFactory
     /**
      * @param  array<int, string>  $urls
      * @param  array{clip_mode?: string, template_id?: ?int, aspect_ratio?: string, subtitle_language?: string, subtitles_enabled?: bool, publishing_profile_id?: ?int, publish_stagger_min_minutes?: int, publish_stagger_max_minutes?: int}  $settings
+     * @param  ?int  $channelWatchId  set only by ChannelWatchPoller — lets a later
+     *   fix to the watch's publishing_profile_id find this batch's projects again
+     *   (see AutoPublishScheduler::resyncChannelWatchProfile()). Null for a
+     *   manually-submitted batch (VideoBatchController::store), same as before
+     *   this param existed.
      */
-    public function createFromUrls(User $user, array $urls, array $settings, ?string $name = null): VideoBatch
+    public function createFromUrls(User $user, array $urls, array $settings, ?string $name = null, ?int $channelWatchId = null): VideoBatch
     {
         $urls = Collection::make($urls)->values();
 
         $batch = $user->videoBatches()->create([
+            'channel_watch_id' => $channelWatchId,
             'name' => $name,
             'status' => VideoBatch::STATUS_PENDING,
             'settings' => [
@@ -49,6 +56,13 @@ class VideoBatchFactory
             'source_url' => $url,
             'status' => VideoBatchItem::STATUS_PENDING,
         ]));
+
+        Log::info('Video batch created', [
+            'batch_id' => $batch->id,
+            'user_id' => $user->id,
+            'channel_watch_id' => $channelWatchId,
+            'item_count' => $urls->count(),
+        ]);
 
         // Same dedicated queue as the manual-batch path — see VideoBatchController::store().
         ProcessVideoBatchJob::dispatch($batch->id)->onQueue('batch-downloads');

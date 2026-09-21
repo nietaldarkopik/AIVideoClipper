@@ -5,21 +5,30 @@ namespace App\Jobs;
 use App\Exceptions\JobCancelledException;
 use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\Clip;
-use App\Models\Project;
 use App\Models\ProcessingJob;
+use App\Models\Project;
+use App\Models\Setting;
 use App\Models\Subtitle;
+use App\Models\Video;
 use App\Models\VideoBatchItem;
+use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReframingProvider;
+use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\Social\AutoPublishScheduler;
-use App\Services\Video\AspectRatio;
+use App\Services\Video\CoverGeneratorService;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\FFmpegService;
+use App\Services\Video\LayerOverrideMerger;
+use App\Services\Video\SilenceTrimmer;
+use App\Services\Video\SrtParser;
 use App\Services\Video\SubtitleService;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -28,19 +37,28 @@ class RenderClipJob implements ShouldQueue
     use ChecksCancellation, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 2;
+
     public int $timeout = 1800;
 
-    public function __construct(public int $clipId)
-    {
-    }
+    // How long the silent cover-opener card (composeIntroOutro()) holds when
+    // there's no TTS narration to sync it to — long enough that YouTube's
+    // Shorts auto-thumbnail pick reliably lands inside it, short enough not to
+    // read as a stall before the actual clip starts.
+    private const COVER_INTRO_SECONDS = 1.8;
+
+    public function __construct(public int $clipId) {}
 
     public function handle(
         FFmpegService $ffmpeg,
         SubtitleService $subtitleService,
         ReframingProvider $reframing,
         AutoPublishScheduler $publishScheduler,
+        SilenceTrimmer $silenceTrimmer,
+        TextToSpeechProvider $tts,
+        ImageGenerationProvider $imageGen,
+        CoverGeneratorService $covers,
     ): void {
-        $clip = Clip::with(['video', 'templateVersion'])->findOrFail($this->clipId);
+        $clip = Clip::with(['video', 'template', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
         $disk = Storage::disk('media');
 
         $processingJob = ProcessingJob::create([
@@ -58,10 +76,104 @@ class RenderClipJob implements ShouldQueue
 
             $config = $clip->templateVersion?->config ?? DefaultTemplateConfig::config();
             $captionConfig = array_merge(DefaultTemplateConfig::config()['caption'], $config['caption'] ?? [], $clip->subtitle_config ?? []);
-            [$targetWidth, $targetHeight] = AspectRatio::resolution($clip->aspect_ratio);
+            $effectConfig = array_merge(DefaultTemplateConfig::config()['effects'], $config['effects'] ?? []);
+            $transitionConfig = array_merge(DefaultTemplateConfig::config()['transition'], $config['transition'] ?? []);
+            // Prefers the attached template's own canvas size (a template-level
+            // custom resolution override — see Template::resolution_width/height
+            // and the Template Builder's Canvas Size UI) over the clip's own
+            // aspect_ratio bucket — see Clip::targetResolution()'s docblock.
+            [$targetWidth, $targetHeight] = $clip->targetResolution();
 
             $video = $clip->video;
             $sourcePath = $disk->path($video->disk_path);
+
+            // A user-supplied caption file is assumed timed against this clip's own
+            // (uncut) duration, not the original source video, and a raw .ass's
+            // override tags can't be generically remapped the way transcript word
+            // timestamps can — so when one is present, silence removal is skipped
+            // entirely for this render (same treatment as a reaction clip's webcam
+            // track below) rather than risk silently desyncing captions we can't
+            // safely retime.
+            $customSubtitlePath = $clip->custom_subtitle_path && $disk->exists($clip->custom_subtitle_path)
+                ? $disk->path($clip->custom_subtitle_path)
+                : null;
+
+            $segments = $this->resolveSegments($clip);
+            $clipStart = (float) $segments[0]['start'];
+            $clipEnd = (float) $segments[count($segments) - 1]['end'];
+            $clipDuration = max(0.1, $clipEnd - $clipStart);
+
+            // Reaction clips mix the source's audio with a separately-recorded
+            // webcam track (renderReactionClip) that isn't silence-trimmed itself —
+            // cutting gaps out of the source alone would drift it out of sync with
+            // that untouched webcam recording, so silence removal (and multi-segment
+            // gap removal, below, which reuses the exact same keepIntervals/concat
+            // machinery) only applies to plain (non-reaction) clips; resolveSegments()
+            // already collapses a reaction clip to one segment regardless of any
+            // multi-segment selection stored on it, for the same reason.
+            //
+            // Multiple user-picked segments and AI-detected silence are the same
+            // *kind* of thing from here on: both are just holes in keepIntervals.
+            // Each segment gets its own silence pass (independently, in its own
+            // absolute source-time window) and the results are flattened into one
+            // list, clip-relative to the overall envelope [$clipStart, $clipEnd] —
+            // exactly the shape extractWithoutSilence()/remapWords()/
+            // remapKeyframes() already expect, so nothing downstream needs to know
+            // segments exist at all.
+            // Hand-edited caption cues are timed against the clip's own rendered
+            // timeline as the editor showed it, and (unlike transcript words) carry
+            // no source-time anchor that remapWords() could re-derive them from — so
+            // a clip with edited cues opts out of silence removal for the same
+            // reason a custom .srt/.ass does: better to keep the user's cue timing
+            // exact than to shorten the video underneath it and desync every line.
+            // Multi-segment gap removal below is unaffected (segments are the user's
+            // own explicit cuts, and the editor's caption track is drawn against
+            // them).
+            $hasEditedCaptions = ! empty($clip->caption_cues);
+
+            // Keyed by the KEEPINTERVAL index a crossfade should sit before — see
+            // FFmpegService::extractWithoutSilence()'s $transitions param. Only
+            // ever set at a boundary between two of the user's OWN segments
+            // (segment index > 0, first sub-interval of that segment): the
+            // possibly-many internal cuts AI silence-removal makes WITHIN one
+            // segment always stay plain hard cuts, both loops below only attach
+            // an entry at that one boundary per segment.
+            $transitionsByBoundary = [];
+
+            $keepIntervals = [];
+            if (! $clip->webcam_path && ! $customSubtitlePath && ! $hasEditedCaptions) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(10, 'Detecting silence...');
+                foreach ($segments as $segIndex => $segment) {
+                    $segStart = (float) $segment['start'];
+                    $segDuration = max(0.01, (float) $segment['end'] - $segStart);
+                    $silences = $ffmpeg->detectSilence(
+                        $sourcePath,
+                        $segStart,
+                        $segDuration,
+                        SilenceTrimmer::NOISE_THRESHOLD_DB,
+                        SilenceTrimmer::MIN_SILENCE_SECONDS
+                    );
+                    $subIntervals = $silenceTrimmer->computeKeepIntervals($silences, $segDuration);
+                    foreach ($subIntervals as $subIndex => $k) {
+                        if ($subIndex === 0 && $segIndex > 0 && ! empty($segment['transition_in']['type'])) {
+                            $transitionsByBoundary[count($keepIntervals)] = $segment['transition_in'];
+                        }
+                        $keepIntervals[] = [
+                            'start' => ($segStart - $clipStart) + $k['start'],
+                            'end' => ($segStart - $clipStart) + $k['end'],
+                        ];
+                    }
+                }
+            } else {
+                foreach ($segments as $segIndex => $segment) {
+                    if ($segIndex > 0 && ! empty($segment['transition_in']['type'])) {
+                        $transitionsByBoundary[count($keepIntervals)] = $segment['transition_in'];
+                    }
+                    $keepIntervals[] = ['start' => (float) $segment['start'] - $clipStart, 'end' => (float) $segment['end'] - $clipStart];
+                }
+            }
+            $hasSilenceCuts = $silenceTrimmer->hasCuts($keepIntervals, $clipDuration);
 
             // Split-screen reaction layouts only give the source clip half the frame,
             // which ReframingProvider::detectCropKeyframes() can't target — it only
@@ -70,31 +182,148 @@ class RenderClipJob implements ShouldQueue
             // PIP layouts still fill the whole frame, so they keep smart-pan as-is.
             $isSplitReaction = in_array($clip->reaction_layout, ['split_top_bottom', 'split_side_by_side'], true);
 
+            // Manual crop: the user dragged/sized their own crop keyframes in the
+            // editor (envelope-relative time, exactly like raw AI keyframes before
+            // remapping — see LayerCompositionService-adjacent docs) instead of
+            // asking ReframingProvider for smart-pan ones. Applied identically from
+            // here on (still remapped around cuts below), the only difference is
+            // where $keyframeArrays comes from and that crop_config is NOT
+            // overwritten afterward — unlike the AI path, this is user input that
+            // must survive to the next render unchanged, not regenerated output.
+            $manualCrop = ($clip->crop_config['mode'] ?? null) === 'manual' && ! empty($clip->crop_config['keyframes']);
+
             $keyframeArrays = [];
             if (! $isSplitReaction) {
                 $this->abortIfCancelled($processingJob);
-                $processingJob->markProgress(15, 'Calculating smart crop...');
-                $keyframes = $reframing->detectCropKeyframes(
-                    $sourcePath,
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
-                    (int) $video->width,
-                    (int) $video->height,
-                    $clip->aspect_ratio
-                );
-                $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
-                $clip->update(['crop_config' => ['mode' => 'smart', 'keyframes' => $keyframeArrays]]);
+                if ($manualCrop) {
+                    $keyframeArrays = $clip->crop_config['keyframes'];
+                } else {
+                    $processingJob->markProgress(15, 'Calculating smart crop...');
+                    // Shaped to the same $targetWidth:$targetHeight the final scale
+                    // step below uses (Clip::targetResolution() — template's own
+                    // canvas wins over clip.aspect_ratio when a template is
+                    // attached), not the raw clip.aspect_ratio bucket. Letting
+                    // those two disagree is what stretched/distorted the output:
+                    // FFmpegService::renderClip() crops to this ratio, then hard-
+                    // scales the crop into $targetWidth x $targetHeight with no
+                    // letterboxing — any mismatch between the two ratios shows up
+                    // as non-uniform stretching.
+                    $keyframes = $reframing->detectCropKeyframes(
+                        $sourcePath,
+                        $clipStart,
+                        $clipEnd,
+                        (int) $video->width,
+                        (int) $video->height,
+                        "{$targetWidth}:{$targetHeight}"
+                    );
+                    $keyframeArrays = array_map(fn ($k) => $k->toArray(), $keyframes);
+                }
+                if ($hasSilenceCuts) {
+                    $keyframeArrays = $silenceTrimmer->remapKeyframes($keyframeArrays, $keepIntervals);
+                }
+                if (! $manualCrop) {
+                    $clip->update(['crop_config' => ['mode' => 'smart', 'keyframes' => $keyframeArrays]]);
+                }
+            }
+
+            // Cut the detected silent gaps out of the source now that both the crop
+            // keyframes (above) and, shortly, the caption words are computed against
+            // — and then remapped off of — the original timeline. Everything past
+            // this point renders against the shortened, silence-free file.
+            $renderSourcePath = $sourcePath;
+            $renderClipStart = $clipStart;
+            $renderClipEnd = $clipEnd;
+            $noSilenceRelative = null;
+            if ($hasSilenceCuts) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(25, 'Removing silence...');
+                $noSilenceRelative = "clips/{$clip->id}/no_silence.mp4";
+                $ffmpeg->extractWithoutSilence($sourcePath, $disk->path($noSilenceRelative), $clipStart, $keepIntervals, $transitionsByBoundary);
+                $renderSourcePath = $disk->path($noSilenceRelative);
+                $renderClipStart = 0.0;
+                $renderClipEnd = $silenceTrimmer->totalDuration($keepIntervals);
             }
 
             $assPath = null;
-            if ($clip->subtitles_enabled && $video->transcript) {
+            if ($customSubtitlePath) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(35, 'Using custom captions...');
+
+                $ext = strtolower(pathinfo($customSubtitlePath, PATHINFO_EXTENSION));
+
+                if ($ext === 'ass') {
+                    // Carries its own style (fonts, colors, positions) — burned in
+                    // exactly as provided, template caption settings don't apply.
+                    $assPath = $customSubtitlePath;
+                } elseif ($ext === 'srt') {
+                    // Plain .srt has no style of its own — run it through the same
+                    // template pipeline (color/size/position/background/animation)
+                    // as transcript-generated captions so it still looks
+                    // professional. No per-word timestamps exist in an .srt, so
+                    // 'words' stays empty per segment; toAss() already handles that
+                    // by rendering the whole line styled but without per-word
+                    // highlight, exactly like a segment with highlighting disabled.
+                    $customSegments = array_map(fn (array $seg) => [
+                        'start' => $seg['start'],
+                        'end' => $seg['end'],
+                        'text' => $seg['text'],
+                        'words' => [],
+                    ], SrtParser::parse(file_get_contents($customSubtitlePath)));
+
+                    $ass = $subtitleService->toAss($customSegments, $captionConfig, $targetWidth, $targetHeight);
+                    $assRelative = "subtitles/{$clip->id}/custom.ass";
+                    $disk->put($assRelative, $ass);
+                    $assPath = $disk->path($assRelative);
+                }
+            } elseif ($clip->subtitles_enabled && $hasEditedCaptions) {
+                // The user owns these cues now — burn them in verbatim rather than
+                // rebuilding from the transcript (which would throw away every text
+                // fix and retimed line on the very next render). Word-level timing
+                // is preserved when it survived the edit; toAss() already renders a
+                // wordless segment as a plain styled line, so a cue whose text was
+                // rewritten (and whose stale word list the editor therefore dropped)
+                // degrades to "no per-word highlight" instead of mis-highlighting.
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(35, 'Applying edited captions...');
+
+                $segments = array_values(array_map(fn (array $cue) => [
+                    'start' => (float) $cue['start'],
+                    'end' => (float) $cue['end'],
+                    'text' => (string) $cue['text'],
+                    'words' => array_values($cue['words'] ?? []),
+                ], $clip->caption_cues));
+
+                $srt = $subtitleService->toSrt($segments);
+                $ass = $subtitleService->toAss($segments, $captionConfig, $targetWidth, $targetHeight);
+
+                $srtRelative = "subtitles/{$clip->id}/{$clip->subtitle_language}.srt";
+                $assRelative = "subtitles/{$clip->id}/{$clip->subtitle_language}.ass";
+                $disk->put($srtRelative, $srt);
+                $disk->put($assRelative, $ass);
+
+                Subtitle::updateOrCreate(
+                    ['clip_id' => $clip->id, 'language' => $clip->subtitle_language],
+                    ['segments' => $segments, 'srt_path' => $srtRelative, 'ass_path' => $assRelative]
+                );
+
+                $assPath = $disk->path($assRelative);
+            } elseif ($clip->subtitles_enabled && $video->transcript) {
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(35, 'Generating captions...');
 
+                $words = $video->transcript->words ?? [];
+                $captionClipStart = $clipStart;
+                $captionClipEnd = $clipEnd;
+                if ($hasSilenceCuts) {
+                    $words = $silenceTrimmer->remapWords($words, $clipStart, $clipEnd, $keepIntervals);
+                    $captionClipStart = 0.0;
+                    $captionClipEnd = $renderClipEnd;
+                }
+
                 $segments = $subtitleService->buildClipSegments(
-                    $video->transcript->words ?? [],
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $words,
+                    $captionClipStart,
+                    $captionClipEnd,
                     (int) ($captionConfig['words_per_line'] ?? 3)
                 );
 
@@ -120,6 +349,32 @@ class RenderClipJob implements ShouldQueue
             }
             $watermarkOpacity = (float) ($config['branding']['watermark_opacity'] ?? 0.8);
 
+            // Absent/v1 config['layers'] (every template/clip before this feature)
+            // merges down to an empty array, so pre-existing renders are unaffected.
+            $layers = LayerOverrideMerger::merge($config['layers'] ?? [], $clip->layer_overrides ?? []);
+            $resolveLayerPath = fn (string $relative) => $disk->path($relative);
+
+            // config['progress_bar'] is a legacy top-level toggle that predates the
+            // layers system (still written by the template editor's "Progress bar"
+            // checkbox and a couple of seeded templates) — it was never actually
+            // read anywhere in the render pipeline, so enabling it silently did
+            // nothing. Translate it into an equivalent progress_bar layer here so
+            // it renders, unless the template/clip already has one via Layers
+            // (avoid drawing two bars).
+            if (! empty($config['progress_bar']['enabled']) && ! $this->hasProgressBarLayer($layers)) {
+                $layers[] = [
+                    'id' => 'legacy-progress-bar',
+                    'type' => 'progress_bar',
+                    'z_index' => 999,
+                    'props' => [
+                        'color' => $config['progress_bar']['color'] ?? '#7C5CFF',
+                        'background_color' => $config['progress_bar']['background_color'] ?? '#000000',
+                        'height_px' => $config['progress_bar']['height_px'] ?? 6,
+                        'position' => $config['progress_bar']['position'] ?? 'bottom',
+                    ],
+                ];
+            }
+
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(55, 'Rendering video...');
             $clip->update(['progress' => 55]);
@@ -127,11 +382,11 @@ class RenderClipJob implements ShouldQueue
             $outputRelative = "clips/{$clip->id}/output.mp4";
             if ($clip->webcam_path) {
                 $ffmpeg->renderReactionClip(
-                    $sourcePath,
+                    $renderSourcePath,
                     $disk->path($clip->webcam_path),
                     $disk->path($outputRelative),
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $renderClipStart,
+                    $renderClipEnd,
                     $targetWidth,
                     $targetHeight,
                     $clip->reaction_layout,
@@ -139,33 +394,121 @@ class RenderClipJob implements ShouldQueue
                     $assPath,
                     $watermarkPath,
                     $watermarkOpacity,
+                    $layers,
+                    $resolveLayerPath,
+                    $effectConfig,
+                    (float) $clip->speed,
+                    (float) $clip->volume,
                 );
             } else {
                 $ffmpeg->renderClip(
-                    $sourcePath,
+                    $renderSourcePath,
                     $disk->path($outputRelative),
-                    (float) $clip->start_time,
-                    (float) $clip->end_time,
+                    $renderClipStart,
+                    $renderClipEnd,
                     $targetWidth,
                     $targetHeight,
                     $keyframeArrays,
                     $assPath,
                     $watermarkPath,
                     $watermarkOpacity,
+                    $layers,
+                    $resolveLayerPath,
+                    $config['video_region'] ?? null,
+                    (string) ($config['canvas_background_color'] ?? '#000000'),
+                    $effectConfig,
+                    (float) $clip->speed,
+                    (float) $clip->volume,
                 );
+            }
+
+            if ($noSilenceRelative) {
+                $disk->delete($noSilenceRelative);
+            }
+
+            // Additional video clips — each cut from a DIFFERENT Video in the
+            // project, independently rendered (own smart-crop, own audio; no
+            // captions/layers of its own in this pass — those are keyed to this
+            // clip's own template/transcript and have no per-additional-clip
+            // equivalent yet) and appended after the main clip's own output.
+            // Folded in here, BEFORE the thumbnail grab and intro/outro below,
+            // so both naturally treat the joined result as "the clip" — the
+            // thumbnail becomes representative of the whole thing, and
+            // composeIntroOutro() wraps intro/outro cards around all of it
+            // rather than just the main clip's own portion.
+            $additionalClips = $this->renderAdditionalVideoClips($clip, $ffmpeg, $reframing, $disk, $targetWidth, $targetHeight, $watermarkPath, $watermarkOpacity);
+            if (! empty($additionalClips)) {
+                $this->abortIfCancelled($processingJob);
+                $processingJob->markProgress(88, 'Joining additional video clips...');
+
+                $transitionsByBoundary = [];
+                foreach ($additionalClips as $i => $additionalClip) {
+                    if (! empty($additionalClip['transition_in']['type'])) {
+                        // +1: index 0 in the joined segment list below is the
+                        // main clip's own output, not this additional clip.
+                        $transitionsByBoundary[$i + 1] = $additionalClip['transition_in'];
+                    }
+                }
+
+                $joinedRelative = "clips/{$clip->id}/joined.mp4";
+                $ffmpeg->concatSegments(
+                    array_map(fn (string $p) => $disk->path($p), [$outputRelative, ...array_column($additionalClips, 'path')]),
+                    $disk->path($joinedRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    null,
+                    $transitionsByBoundary,
+                );
+
+                $disk->delete($outputRelative);
+                foreach (array_column($additionalClips, 'path') as $p) {
+                    $disk->delete($p);
+                }
+                $outputRelative = $joinedRelative;
             }
 
             $this->abortIfCancelled($processingJob);
             $processingJob->markProgress(90, 'Generating thumbnail...');
             $thumbRelative = "clips/{$clip->id}/thumbnail.jpg";
+            // Always grabbed from the main clip content (not the intro/outro cover
+            // below), so the thumbnail stays representative of the clip itself.
             $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($thumbRelative), 0.3);
+
+            // Generated here, BEFORE composeIntroOutro(), specifically so the cover
+            // exists in time to be burned into the video's own opening frame(s) down
+            // there (see that method — the whole reason this moved earlier from where
+            // it used to run, after everything else, is YouTube Shorts having no API
+            // for a custom thumbnail: it always auto-picks a frame FROM the video).
+            // output_path is set to the raw pre-intro/outro render first so
+            // CoverGeneratorService grabs its background frame from THIS render, not
+            // a stale one from a previous attempt. Never fatal — a clip without a
+            // cover still gets a normal render, just with no opening frame below.
+            $clip->update(['output_path' => $outputRelative]);
+            try {
+                $processingJob->markProgress(93, 'Generating cover...');
+                $covers->generateForClip($clip);
+                $clip->refresh();
+            } catch (Throwable $e) {
+                Log::warning('Cover generation failed before render, clip kept without one', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            $this->abortIfCancelled($processingJob);
+            $processingJob->markProgress(96, 'Building intro/outro...');
+            // Always attempted now, not just when intro_enabled/outro_enabled — see
+            // composeIntroOutro()'s own docblock. It's a no-op (returns
+            // $outputRelative unchanged) when there's no cover and neither flag is
+            // set, same as before this feature.
+            $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight, $transitionConfig);
 
             $clip->update([
                 'status' => Clip::STATUS_COMPLETED,
                 'progress' => 100,
-                'output_path' => $outputRelative,
+                'output_path' => $finalOutputRelative,
                 'thumbnail_path' => $thumbRelative,
-                'output_size_bytes' => $disk->exists($outputRelative) ? $disk->size($outputRelative) : null,
+                'output_size_bytes' => $disk->exists($finalOutputRelative) ? $disk->size($finalOutputRelative) : null,
                 'rendered_at' => now(),
             ]);
 
@@ -183,6 +526,379 @@ class RenderClipJob implements ShouldQueue
 
             throw $e;
         }
+    }
+
+    /**
+     * Builds the AI reaction intro cover (cover frame grabbed from the main clip +
+     * cached/lazily-synthesized TTS narration of clip.reaction_script + the script
+     * as an overlay caption) and/or a static outro card, then concatenates whichever
+     * of [intro, main clip, outro] apply into one final file via
+     * FFmpegService::concatSegments(). Returns the disk-relative path of that final
+     * file — or, if neither intro nor outro actually produced a segment (e.g.
+     * intro_enabled but reaction_script was never generated), $outputRelative
+     * unchanged, so callers always get back a valid, playable clip path.
+     */
+    /**
+     * Independently renders each entry in $clip->additional_video_clips — own
+     * source video, own smart-crop to the target resolution, own watermark
+     * (matching the main clip's, for a consistent look across the whole
+     * joined result) — into its own file. No captions, no template layers, no
+     * silence removal on these in this pass: those are keyed to the MAIN
+     * clip's own template/transcript, and there's no obvious per-additional-
+     * clip equivalent yet without a much larger redesign.
+     *
+     * An entry whose video is missing/deleted, or whose start/end no longer
+     * make sense, is silently skipped rather than failing the whole render —
+     * same defensiveness this app already applies to a dangling image/audio
+     * layer path.
+     *
+     * @return list<array{path: string, transition_in: ?array}> disk-relative paths in order, paired with each one's own transition_in so a skipped entry can never desync the pairing the caller builds its $transitions boundary map from
+     */
+    private function renderAdditionalVideoClips(
+        Clip $clip,
+        FFmpegService $ffmpeg,
+        ReframingProvider $reframing,
+        Filesystem $disk,
+        int $targetWidth,
+        int $targetHeight,
+        ?string $watermarkPath,
+        float $watermarkOpacity,
+    ): array {
+        $entries = $clip->additional_video_clips ?? [];
+        if (empty($entries)) {
+            return [];
+        }
+
+        $results = [];
+
+        foreach ($entries as $i => $entry) {
+            $video = isset($entry['video_id']) ? Video::find($entry['video_id']) : null;
+            if (! $video || ! $video->disk_path || ! $disk->exists($video->disk_path)) {
+                Log::warning('Skipping an additional video clip whose source video is missing', [
+                    'clip_id' => $clip->id, 'video_id' => $entry['video_id'] ?? null,
+                ]);
+
+                continue;
+            }
+
+            $start = max(0.0, (float) ($entry['start'] ?? 0));
+            $end = (float) ($entry['end'] ?? 0);
+            if ($end <= $start) {
+                continue;
+            }
+
+            $keyframes = [];
+            try {
+                // Same $targetWidth:$targetHeight this additional clip is about to
+                // be scaled to below (renderClip() call) — see the primary crop
+                // detection call above for why this must match, not clip.aspect_ratio.
+                $detected = $reframing->detectCropKeyframes(
+                    $disk->path($video->disk_path),
+                    $start,
+                    $end,
+                    (int) $video->width,
+                    (int) $video->height,
+                    "{$targetWidth}:{$targetHeight}"
+                );
+                $keyframes = array_map(fn ($k) => $k->toArray(), $detected);
+            } catch (Throwable $e) {
+                // A center-crop fallback (renderClip() with empty keyframes)
+                // beats failing the whole render over one additional clip's
+                // framing.
+                Log::warning('Smart crop failed for an additional video clip, falling back to a center crop', [
+                    'clip_id' => $clip->id, 'video_id' => $video->id, 'error' => $e->getMessage(),
+                ]);
+            }
+
+            $relative = "clips/{$clip->id}/additional_{$i}.mp4";
+            $ffmpeg->renderClip(
+                $disk->path($video->disk_path),
+                $disk->path($relative),
+                $start,
+                $end,
+                $targetWidth,
+                $targetHeight,
+                $keyframes,
+                null,
+                $watermarkPath,
+                $watermarkOpacity,
+            );
+
+            $results[] = ['path' => $relative, 'transition_in' => $entry['transition_in'] ?? null];
+        }
+
+        return $results;
+    }
+
+    private function composeIntroOutro(
+        Clip $clip,
+        FFmpegService $ffmpeg,
+        TextToSpeechProvider $tts,
+        ImageGenerationProvider $imageGen,
+        Filesystem $disk,
+        string $outputRelative,
+        int $targetWidth,
+        int $targetHeight,
+        array $transitionConfig = ['type' => 'cut', 'duration' => 0.4],
+    ): string {
+        $segments = [$disk->path($outputRelative)];
+        $introIndex = null;
+        $tmpFiles = [];
+
+        // Opening cover frame — attempted for every clip that has a cover image,
+        // regardless of intro_enabled. Exists because YouTube's Data API has no
+        // way to set a Shorts thumbnail (thumbnails.set only affects the classic
+        // watch-page derivatives — see YouTubeProvider's docblock); the ONLY
+        // frame YouTube's Shorts shelf ever shows is one it auto-picks FROM the
+        // video. Burning the actual cover in as the opening frame(s) is what
+        // makes that auto-pick land on the cover instead of a random moment.
+        //
+        // A reaction clip with a working TTS narration shows the cover DURING
+        // that narration (one frame serving both jobs, using the real styled
+        // cover instead of the separate AI-generated reaction background this
+        // used to render); everything else — no reaction script, TTS failed, or
+        // intro_enabled off — gets it as a brief silent opening card instead.
+        // Skipped entirely when there's no cover_path yet (e.g. cover generation
+        // itself failed after render) — a clip is still a perfectly good clip
+        // without this.
+        $coverForIntro = ($clip->cover_path && $disk->exists($clip->cover_path)) ? $clip->cover_path : null;
+        $introBuilt = false;
+
+        // Global master switches (Setting::use_intro / use_outro) let the user turn
+        // narrated intros / outro cards off across every clip at once instead of
+        // unchecking intro_enabled/outro_enabled on each one individually. They only
+        // gate the narrated-intro and outro-card behavior below — the silent cover
+        // opener a few lines down stays unconditional on cover_path, since it exists
+        // for the unrelated YouTube Shorts auto-thumbnail reason explained above, not
+        // as part of the "intro" the user is toggling.
+        $introEnabled = $clip->intro_enabled && Setting::get('use_intro', true);
+        $outroEnabled = $clip->outro_enabled && Setting::get('use_outro', true);
+
+        if ($coverForIntro && $introEnabled && $clip->reaction_script) {
+            // TTS hits a real external quota/rate-limit often enough (each upstream
+            // credential behind whichever provider is configured has its own) that
+            // it can't be allowed to fail the whole render — $introBuilt staying
+            // false here (not a `return`/`continue` out of this whole block) is
+            // what lets the silent-cover-opener branch below actually run instead
+            // of just being dead code next to a log line that lied about it.
+            try {
+                $introAudioRelative = $clip->intro_audio_path;
+                if (! $introAudioRelative || ! $disk->exists($introAudioRelative)) {
+                    $introAudioRelative = "clips/{$clip->id}/intro_audio.mp3";
+                    $tts->synthesize($clip->reaction_script, $disk->path($introAudioRelative), $clip->intro_voice);
+                    $clip->update(['intro_audio_path' => $introAudioRelative]);
+                }
+                $introAudioPath = $disk->path($introAudioRelative);
+                $introDuration = ($ffmpeg->probeDuration($introAudioPath) ?? 4.0) + 0.3;
+
+                $introSegmentRelative = "clips/{$clip->id}/intro_segment.mp4";
+                $ffmpeg->renderCoverSegment(
+                    $disk->path($coverForIntro),
+                    $introAudioPath,
+                    $disk->path($introSegmentRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    $introDuration,
+                );
+
+                array_unshift($segments, $disk->path($introSegmentRelative));
+                $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
+            } catch (Throwable $e) {
+                Log::warning('Reaction intro TTS failed, falling back to a silent cover opener', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if (! $introBuilt && $coverForIntro) {
+            // Covers both the common case (no reaction narration, or intro_enabled
+            // off — most clips) and the TTS-failure fallback from above: a brief
+            // silent card so the cover is still the video's opening frame for
+            // YouTube's Shorts auto-thumbnail to land on.
+            try {
+                $introSegmentRelative = "clips/{$clip->id}/cover_intro_segment.mp4";
+                $ffmpeg->renderCoverSegment(
+                    $disk->path($coverForIntro),
+                    null,
+                    $disk->path($introSegmentRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    self::COVER_INTRO_SECONDS,
+                );
+
+                array_unshift($segments, $disk->path($introSegmentRelative));
+                $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
+            } catch (Throwable $e) {
+                Log::warning('Cover opener build failed, rendering clip without it', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if (! $introBuilt && ! $coverForIntro && $introEnabled && $clip->reaction_script) {
+            // No styled cover to reuse (cover generation failed/hasn't run) but
+            // this clip still wants a narrated intro — fall back to the original
+            // AI-generated reaction-background card, same as before this feature.
+            try {
+                $introAudioRelative = $clip->intro_audio_path;
+                if (! $introAudioRelative || ! $disk->exists($introAudioRelative)) {
+                    $introAudioRelative = "clips/{$clip->id}/intro_audio.mp3";
+                    $tts->synthesize($clip->reaction_script, $disk->path($introAudioRelative), $clip->intro_voice);
+                    $clip->update(['intro_audio_path' => $introAudioRelative]);
+                }
+                $introAudioPath = $disk->path($introAudioRelative);
+                $introDuration = ($ffmpeg->probeDuration($introAudioPath) ?? 4.0) + 0.3;
+
+                $coverFrameRelative = "clips/{$clip->id}/intro_cover.jpg";
+                if (! $clip->intro_cover_path || ! $disk->exists($clip->intro_cover_path)) {
+                    $fallbackFrameRelative = "clips/{$clip->id}/intro_cover_fallback.jpg";
+                    $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($fallbackFrameRelative), 0.0);
+                    $imageGen->generateCoverImage(
+                        $this->buildCoverPrompt($clip),
+                        $disk->path($coverFrameRelative),
+                        $disk->path($fallbackFrameRelative)
+                    );
+                    $tmpFiles[] = $disk->path($fallbackFrameRelative);
+                    $clip->update(['intro_cover_path' => $coverFrameRelative]);
+                } else {
+                    $coverFrameRelative = $clip->intro_cover_path;
+                }
+
+                $introSegmentRelative = "clips/{$clip->id}/intro_segment.mp4";
+                $ffmpeg->renderCoverSegment(
+                    $disk->path($coverFrameRelative),
+                    $introAudioPath,
+                    $disk->path($introSegmentRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    $introDuration,
+                    $clip->reaction_script,
+                );
+
+                array_unshift($segments, $disk->path($introSegmentRelative));
+                $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
+            } catch (Throwable $e) {
+                Log::warning('Reaction intro build failed, rendering clip without it', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($introBuilt) {
+            $introIndex = 0;
+        }
+
+        if ($outroEnabled) {
+            $mainDuration = $ffmpeg->probeDuration($disk->path($outputRelative)) ?? 0.0;
+            $outroFrameRelative = "clips/{$clip->id}/outro_cover.jpg";
+            $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($outroFrameRelative), max(0.0, $mainDuration - 0.2));
+
+            $outroSegmentRelative = "clips/{$clip->id}/outro_segment.mp4";
+            $ffmpeg->renderCoverSegment(
+                $disk->path($outroFrameRelative),
+                null,
+                $disk->path($outroSegmentRelative),
+                $targetWidth,
+                $targetHeight,
+                2.5,
+                'Follow for more',
+            );
+
+            $segments[] = $disk->path($outroSegmentRelative);
+            $tmpFiles[] = $disk->path($outroFrameRelative);
+            $tmpFiles[] = $disk->path($outroSegmentRelative);
+        }
+
+        if ($introIndex === null && count($segments) === 1) {
+            // Neither stage actually produced a segment (e.g. outro_enabled=false and
+            // intro_enabled=true but reaction_script was empty) — nothing to compose.
+            return $outputRelative;
+        }
+
+        $finalRelative = "clips/{$clip->id}/output_final.mp4";
+        $ffmpeg->concatSegments($segments, $disk->path($finalRelative), $targetWidth, $targetHeight, $transitionConfig);
+
+        foreach ($tmpFiles as $tmp) {
+            @unlink($tmp);
+        }
+
+        return $finalRelative;
+    }
+
+    /**
+     * Short text-to-image prompt for the reaction-intro cover — built from whatever
+     * content context is available. Ignored entirely by MockImageGenerationProvider
+     * (which just reuses the video frame instead), only used by a real
+     * ImageGenerationProvider.
+     */
+    private function buildCoverPrompt(Clip $clip): string
+    {
+        $candidate = $clip->clipCandidate;
+
+        return sprintf(
+            'Eye-catching vertical video cover thumbnail, dramatic and high-contrast, no text or logos. '
+            .'Illustrates: %s. Mood/type: %s.',
+            $clip->reaction_script ?: ($candidate?->hook_text ?? $clip->title ?: 'a short video clip'),
+            $candidate?->moment_type ?? 'engaging moment'
+        );
+    }
+
+    /**
+     * Normalizes a clip's multi-segment selection (clips.segments — a "jump cut"
+     * multi-trim, see its migration) into a sorted, non-empty list of absolute
+     * source-video {start,end} windows. A clip with no segments (every clip before
+     * this feature, and any clip that's just been simply trimmed) synthesizes
+     * exactly one segment from start_time/end_time, which is byte-for-byte the
+     * single window the rest of this job already worked with before segments
+     * existed. Reaction clips always collapse to one segment regardless of what's
+     * stored — see the caller's docblock for why.
+     *
+     * @return list<array{start: float, end: float}>
+     */
+    private function resolveSegments(Clip $clip): array
+    {
+        if ($clip->webcam_path || empty($clip->segments)) {
+            return [['start' => (float) $clip->start_time, 'end' => (float) $clip->end_time]];
+        }
+
+        $segments = collect($clip->segments)
+            // transition_in (see FFmpegService::extractWithoutSilence()'s
+            // $transitions param) travels with its segment through the sort
+            // below, exactly like start/end — it describes the cut INTO this
+            // segment from whichever one ends up immediately before it once
+            // segments are ordered, so it has to survive that reordering
+            // together with the segment it belongs to.
+            ->map(fn ($s) => [
+                'start' => (float) $s['start'],
+                'end' => (float) $s['end'],
+                'transition_in' => $s['transition_in'] ?? null,
+            ])
+            ->filter(fn ($s) => $s['end'] > $s['start'])
+            ->sortBy('start')
+            ->values()
+            ->all();
+
+        return $segments ?: [['start' => (float) $clip->start_time, 'end' => (float) $clip->end_time]];
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $layers
+     */
+    private function hasProgressBarLayer(array $layers): bool
+    {
+        foreach ($layers as $layer) {
+            if (($layer['type'] ?? null) === 'progress_bar') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

@@ -19,6 +19,10 @@ class SocialAccountResource extends JsonResource
             'token_status' => $this->token_expires_at && $this->token_expires_at->isPast() ? 'expired' : 'valid',
             'permissions' => $this->permissions ?? [],
             'auto_publish_enabled' => $this->auto_publish_enabled,
+            'default_cover_template_id' => $this->default_cover_template_id,
+            'default_cover_template' => CoverTemplateResource::make($this->whenLoaded('defaultCoverTemplate')),
+            'messenger_sync_enabled' => $this->messenger_sync_enabled,
+            'messenger_last_synced_at' => $this->messenger_last_synced_at,
             'last_synced_at' => $this->last_synced_at,
             'created_at' => $this->created_at,
         ];

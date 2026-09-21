@@ -27,7 +27,10 @@
   --color-warning: var(--warning);
   --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* No --font-mono override: nothing in the app uses `font-mono`, and pulling
+     Geist Mono from Google Fonts made every build depend on network access
+     (it fails to "Failed to download ... Using a fallback font instead").
+     Tailwind's own monospace stack still backs `font-mono` if it's ever used. */
 }
 
 * {

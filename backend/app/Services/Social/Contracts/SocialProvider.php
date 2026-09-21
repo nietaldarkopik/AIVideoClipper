@@ -22,9 +22,12 @@ interface SocialProvider
      * SocialAccountController::authorize()) that must be echoed back verbatim
      * as the `state` query param on the redirect URI — it's how the callback
      * (which Google/etc. hit directly, with no bearer token attached) recovers
-     * which user initiated the connection.
+     * which user initiated the connection. $user is null for "Login/Sign up
+     * with {Platform}" flows (AuthController), where no app user exists yet —
+     * no implementation actually reads $user, it's kept for interface parity
+     * with connect().
      */
-    public function getAuthorizationUrl(User $user, string $redirectUri, string $state): string;
+    public function getAuthorizationUrl(?User $user, string $redirectUri, string $state): string;
 
     /**
      * Exchange the OAuth callback (or, for mock providers, a user-supplied handle)
@@ -36,9 +39,18 @@ interface SocialProvider
     /**
      * Upload and publish the clip's rendered video to this platform.
      *
+     * $coverImagePath is the clip's generated cover/thumbnail image (see
+     * CoverGeneratorService/Clip::cover_path), when one exists — attached as
+     * a custom thumbnail on platforms whose API actually supports uploading
+     * one (currently YouTube via thumbnails.set, Facebook via the `thumb`
+     * video field); ignored by platforms whose API doesn't (Instagram's
+     * automation service and TikTok's Content Posting API, which only
+     * supports picking a timestamp WITHIN the uploaded video, not an
+     * arbitrary custom image, for an organic/non-ad post).
+     *
      * @return array{success: bool, post_url?: string, external_post_id?: string, error?: string}
      */
-    public function publish(SocialPost $post, string $videoFilePath): array;
+    public function publish(SocialPost $post, string $videoFilePath, ?string $coverImagePath = null): array;
 
     /**
      * @return array{views: int, likes: int, comments: int, shares: int, saves: int, watch_time: float, retention: float}

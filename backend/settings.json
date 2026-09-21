@@ -1,0 +1,9 @@
+{
+    "default_template_id": 3,
+    "max_clips_per_video": 10,
+    "default_clip_duration": 60,
+    "clip_scoring_model": "nine_router",
+    "reaction_script_model": "nine_router",
+    "tts_model": "nine_router",
+    "transcript_model": "nine_router"
+}

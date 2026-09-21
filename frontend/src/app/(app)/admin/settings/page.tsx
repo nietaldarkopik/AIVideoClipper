@@ -16,9 +16,13 @@ interface AISettings {
   ai_model: string;
   transcript_model: string;
   clip_scoring_model: string;
+  reaction_script_model: string;
+  tts_model: string;
   default_clip_duration: number;
   default_template_id: number | null;
   max_clips_per_video: number;
+  use_intro: boolean;
+  use_outro: boolean;
 }
 
 export default function AdminAISettingsPage() {
@@ -39,9 +43,13 @@ export default function AdminAISettingsPage() {
       await api.patch(key, {
         transcript_model: form.transcript_model,
         clip_scoring_model: form.clip_scoring_model,
+        reaction_script_model: form.reaction_script_model,
+        tts_model: form.tts_model,
         default_clip_duration: form.default_clip_duration,
         max_clips_per_video: form.max_clips_per_video,
         default_template_id: form.default_template_id,
+        use_intro: form.use_intro,
+        use_outro: form.use_outro,
       });
       await mutate(key);
       toast("Settings saved.", "success");
@@ -75,6 +83,7 @@ export default function AdminAISettingsPage() {
               <option value="mock">Mock (deterministic filler, no cost)</option>
               <option value="openai">OpenAI Whisper (real, paid)</option>
               <option value="whisper_engine">Whisper Engine (real, self-hosted, free)</option>
+              <option value="nine_router">9Router (real, self-hosted gateway)</option>
             </Select>
           </div>
           <div>
@@ -96,13 +105,42 @@ export default function AdminAISettingsPage() {
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <Label htmlFor="default_duration">Default Clip Duration (sec)</Label>
+            <Label htmlFor="reaction_script_model">Reaction Script Model</Label>
+            <Select
+              id="reaction_script_model"
+              value={form.reaction_script_model}
+              onChange={(e) => setForm({ ...form, reaction_script_model: e.target.value })}
+            >
+              <option value="mock">Mock (deterministic filler, no cost)</option>
+              <option value="openai">OpenAI (real, paid)</option>
+              <option value="ollama">Ollama (real, self-hosted, free)</option>
+              <option value="gemini">Gemini / Google AI Studio (real, paid)</option>
+              <option value="nine_router">9Router (real, self-hosted gateway)</option>
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="tts_model">Text-to-Speech Model</Label>
+            <Select id="tts_model" value={form.tts_model} onChange={(e) => setForm({ ...form, tts_model: e.target.value })}>
+              <option value="mock">Mock (silent placeholder, no cost)</option>
+              <option value="openai">OpenAI TTS (real, paid)</option>
+              <option value="nine_router">9Router (self-hosted gateway — needs a TTS-capable provider registered there)</option>
+            </Select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <Label htmlFor="default_duration">Max Clip Duration (sec)</Label>
             <Input
               id="default_duration"
               type="number"
               value={form.default_clip_duration}
               onChange={(e) => setForm({ ...form, default_clip_duration: Number(e.target.value) })}
             />
+            <p className="mt-1 text-xs text-muted">
+              Hard ceiling for AI-picked clips — sent to every AI provider's prompt and enforced again after
+              analysis (trimmed to the nearest sentence end, never mid-sentence).
+            </p>
           </div>
           <div>
             <Label htmlFor="max_clips">Max Clips Per Video</Label>
@@ -129,6 +167,34 @@ export default function AdminAISettingsPage() {
               </option>
             ))}
           </Select>
+        </div>
+
+        <div>
+          <Label>Intro / Outro</Label>
+          <div className="mt-1 flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={form.use_intro}
+                onChange={(e) => setForm({ ...form, use_intro: e.target.checked })}
+                className="size-4 rounded accent-accent"
+              />
+              Use intro on rendered clips
+            </label>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={form.use_outro}
+                onChange={(e) => setForm({ ...form, use_outro: e.target.checked })}
+                className="size-4 rounded accent-accent"
+              />
+              Use outro on rendered clips
+            </label>
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            Master switch for every clip's render, on top of each clip's own intro/outro toggle — turn one off here
+            to stop using it everywhere without editing clips one by one.
+          </p>
         </div>
 
         <Button onClick={handleSave} loading={saving}>

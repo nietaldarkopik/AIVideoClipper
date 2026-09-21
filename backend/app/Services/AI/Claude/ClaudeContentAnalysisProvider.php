@@ -2,6 +2,7 @@
 
 namespace App\Services\AI\Claude;
 
+use App\Models\Setting;
 use App\Models\Transcript;
 use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
@@ -34,8 +35,7 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
         private readonly string $apiKey,
         private readonly string $model = 'claude-sonnet-5',
         private readonly int $timeoutSeconds = 180,
-    ) {
-    }
+    ) {}
 
     /**
      * Real shot-boundary detection would need a full frame-diff decode pass; kept as
@@ -72,7 +72,7 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
 
         $systemPrompt = $this->systemPrompt($maxCandidates);
         $userPrompt = $this->userPrompt($transcriptText, $durationSeconds, $transcript->language);
-        $span = $this->aiLogger()->start('content_analysis', 'claude', $this->model, $systemPrompt . "\n\n" . $userPrompt);
+        $span = $this->aiLogger()->start('content_analysis', 'claude', $this->model, $systemPrompt."\n\n".$userPrompt);
 
         $response = Http::withHeaders([
             'x-api-key' => $this->apiKey,
@@ -95,7 +95,7 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
         if ($response->failed()) {
             $span->failure($response->body());
 
-            throw new RuntimeException('Claude analysis failed: ' . $response->body());
+            throw new RuntimeException('Claude analysis failed: '.$response->body());
         }
 
         $span->success(json_encode($response->json('content')));
@@ -133,6 +133,8 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
                 suggestedTitle: (string) ($c['suggested_title'] ?? ''),
                 suggestedCaption: (string) ($c['suggested_caption'] ?? ''),
                 hashtags: array_values(array_filter((array) ($c['hashtags'] ?? []), 'is_string')),
+                coverTitles: ClipCandidateData::normalizeCoverStrings($c['cover_titles'] ?? [], 42),
+                coverSubtitles: ClipCandidateData::normalizeCoverStrings($c['cover_subtitles'] ?? [], 18),
             );
         }
 
@@ -173,6 +175,8 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
                                 'suggested_title' => ['type' => 'string'],
                                 'suggested_caption' => ['type' => 'string'],
                                 'hashtags' => ['type' => 'array', 'items' => ['type' => 'string']],
+                                'cover_titles' => ['type' => 'array', 'items' => ['type' => 'string']],
+                                'cover_subtitles' => ['type' => 'array', 'items' => ['type' => 'string']],
                             ],
                             'required' => ['start_time', 'end_time', 'hook_text', 'suggested_title'],
                         ],
@@ -185,6 +189,9 @@ class ClaudeContentAnalysisProvider implements ContentAnalysisProvider
 
     private function systemPrompt(int $maxCandidates): string
     {
+        $coverInstructions = ClipCandidateData::coverPromptInstructions();
+        $maxDuration = (int) Setting::get('default_clip_duration', config('services.ai.default_clip_duration', 45));
+
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
 long video, find the {$maxCandidates} best self-contained "punchline" moments to cut
@@ -192,16 +199,22 @@ into short vertical clips (like TikTok/Reels/Shorts) — cold-open hooks, twist
 reveals, and payoff lines that work with little to no extra context.
 
 Call the submit_clip_candidates tool with up to {$maxCandidates} picks. Each
-candidate needs: start_time/end_time (seconds; 15-90s span after start_time unless the
-moment genuinely needs longer), the six 1-100 scores plus viral_potential, hook_text
+candidate needs: start_time/end_time (seconds; 15-{$maxDuration}s span after start_time —
+{$maxDuration}s is a HARD CEILING, never exceed it even if the moment feels like it
+deserves more room), the six 1-100 scores plus viral_potential, hook_text
 (the exact or near-exact opening line, in the transcript's own language), moment_type,
 2-4 short reasons, a one-sentence explanation, a short punchy suggested_title, a
 1-2 sentence suggested_caption, and 4-6 relevant hashtags.
 
+{$coverInstructions}
+
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
-self-contained idea, and an emotional or informational payoff. Only use start_time/end_time
+self-contained idea, and an emotional or informational payoff. end_time MUST land at the
+end of a complete sentence/thought — never cut off mid-sentence, mid-word, or mid-idea; if
+the payoff needs more than {$maxDuration}s to land cleanly, pick a tighter, more
+self-contained moment instead of overrunning the limit. Only use start_time/end_time
 values that fall within the transcript's timestamp range.
 PROMPT;
     }

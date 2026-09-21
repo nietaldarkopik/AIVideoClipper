@@ -16,6 +16,8 @@ class TemplateResource extends JsonResource
             'slug' => $this->slug,
             'description' => $this->description,
             'thumbnail_url' => Media::url($this->thumbnail_path),
+            'preview_url' => $this->preview_path ? Media::url($this->preview_path) : null,
+            'preview_status' => $this->preview_status,
             'category' => TemplateCategoryResource::make($this->whenLoaded('category')),
             'aspect_ratio' => $this->aspect_ratio,
             'resolution' => ['width' => $this->resolution_width, 'height' => $this->resolution_height],
