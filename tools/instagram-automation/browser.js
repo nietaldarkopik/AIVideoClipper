@@ -31,7 +31,12 @@ async function launchPage(profileKey) {
   const browser = await puppeteer.launch({
     headless: process.env.IG_HEADLESS !== "false",
     userDataDir: profileDir(profileKey),
-    args: ["--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
+    args: [
+      "--window-size=1280,900",
+      "--disable-blink-features=AutomationControlled",
+      // Chromium's sandbox can't start inside a default Docker container.
+      ...(process.env.IG_NO_SANDBOX === "true" ? ["--no-sandbox", "--disable-setuid-sandbox"] : []),
+    ],
     ignoreDefaultArgs: ["--enable-automation"],
   });
   const page = await browser.newPage();

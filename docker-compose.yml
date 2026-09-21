@@ -1,0 +1,149 @@
+# AI Video Clipper — full stack in containers.
+#   cp .env.example .env   # then fill in APP_KEY (see the file's header)
+#   docker compose up -d --build
+# Optional self-hosted services are opt-in via profiles:
+#   docker compose --profile whisper --profile face-tracker --profile instagram up -d
+
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  restart: unless-stopped
+  environment: &backend-env
+    APP_ENV: production
+    APP_DEBUG: "false"
+    LOG_CHANNEL: stderr
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_DATABASE: ${DB_DATABASE:-clipper_tool}
+    DB_USERNAME: ${DB_USERNAME:-clipper}
+    DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    QUEUE_CONNECTION: redis
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_PASSWORD: "null"
+    FFMPEG_BIN: ffmpeg
+    FFPROBE_BIN: ffprobe
+    YTDLP_BIN: yt-dlp
+    DEFAULT_FONT_FILE: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+    WHISPER_ENGINE_URL: http://whisper:8100
+    FACE_TRACKER_URL: http://face-tracker:8200
+    IG_AUTOMATION_URL: http://instagram:8300
+  volumes:
+    - app_storage:/var/www/html/storage/app
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-clipper_tool}
+      POSTGRES_USER: ${DB_USERNAME:-clipper}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "true"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    # Healthy only after entrypoint's migrations finished and artisan serve is up,
+    # so workers/scheduler never start against a half-migrated schema.
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/up"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  worker-default:
+    <<: *backend
+    command: ["php", "artisan", "queue:work", "redis", "--queue=default"]
+    stop_grace_period: 60s
+    depends_on:
+      api: { condition: service_healthy }
+
+  worker-batch:
+    <<: *backend
+    command: ["php", "artisan", "queue:work", "redis", "--queue=batch-downloads"]
+    stop_grace_period: 60s
+    depends_on:
+      api: { condition: service_healthy }
+
+  worker-publish:
+    <<: *backend
+    command: ["php", "artisan", "queue:work", "redis", "--queue=publish,default"]
+    stop_grace_period: 60s
+    depends_on:
+      api: { condition: service_healthy }
+
+  scheduler:
+    <<: *backend
+    command: ["php", "artisan", "schedule:work"]
+    depends_on:
+      api: { condition: service_healthy }
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the browser bundle: must be reachable from the user's browser.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
+  # --- optional, self-hosted (enable with the matching profile) ---------------
+  # These receive absolute file paths from Laravel, so they mount the shared
+  # storage volume at the exact same path the backend uses.
+  whisper:
+    profiles: [whisper]
+    build: ./tools/whisper-engine
+    restart: unless-stopped
+    volumes:
+      - app_storage:/var/www/html/storage/app
+      - whisper_models:/models
+
+  face-tracker:
+    profiles: [face-tracker]
+    build: ./tools/face-tracker
+    restart: unless-stopped
+    volumes:
+      - app_storage:/var/www/html/storage/app
+
+  instagram:
+    profiles: [instagram]
+    build: ./tools/instagram-automation
+    restart: unless-stopped
+    shm_size: 1gb
+    volumes:
+      - ig_profiles:/app/profiles
+
+volumes:
+  pgdata:
+  redisdata:
+  app_storage:
+  whisper_models:
+  ig_profiles:
