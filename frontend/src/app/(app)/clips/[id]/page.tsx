@@ -47,7 +47,7 @@ import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
 import { diffLayers } from "@/lib/layerOverrides";
 import { newLayer } from "@/lib/layers";
 import { EFFECTS, FILTERS } from "@/lib/videoFx";
-import { formatDuration } from "@/lib/format";
+import { formatDuration, withDownload } from "@/lib/format";
 import type {
   Clip,
   CropKeyframe,
@@ -849,7 +849,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
               Duplicate
             </Button>
             {clip.url && (
-              <a href={`${clip.url}?download=1`}>
+              <a href={withDownload(clip.url)}>
                 <Button variant="outline" size="sm">
                   <Download className="size-3.5" />
                   Download
@@ -951,7 +951,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                     downloadAction={
                       clip?.srt_url && (
                         <a
-                          href={`${clip.srt_url}?download=1`}
+                          href={withDownload(clip.srt_url)}
                           title="Download caption (.srt)"
                           className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-muted hover:bg-white/5 hover:text-foreground"
                         >

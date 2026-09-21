@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\Media;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -18,6 +19,12 @@ class MediaStreamController extends Controller
      */
     public function stream(Request $request, string $path)
     {
+        // Anonymous by design (media tags can't send a token) but never open: every
+        // URL carries an expiring HMAC issued by Media::url() / POST /media/sign.
+        if (! Media::valid($path, $request->query('expires'), $request->query('signature'))) {
+            abort(403, 'Invalid or expired media link.');
+        }
+
         $disk = Storage::disk('media');
         $normalized = str_replace('\\', '/', $path);
 
@@ -41,7 +48,7 @@ class MediaStreamController extends Controller
         $headers = [
             'Content-Type' => $mime,
             'Accept-Ranges' => 'bytes',
-            'Cache-Control' => 'public, max-age=31536000, immutable',
+            'Cache-Control' => 'private, max-age=3600',
             'X-Content-Type-Options' => 'nosniff',
         ];
 

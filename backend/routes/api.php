@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\ContentBriefController;
 use App\Http\Controllers\Api\CoverTemplateController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\FacebookMessageController;
+use App\Http\Controllers\Api\MediaSignController;
 use App\Http\Controllers\Api\MediaUploadController;
 use App\Http\Controllers\Api\ProcessingJobController;
 use App\Http\Controllers\Api\ProjectController;
@@ -40,6 +41,7 @@ Route::post('/auth/tiktok/exchange', [AuthController::class, 'tiktokExchange'])-
 // as the /social-accounts/{platform}/callback route below.
 Route::get('/auth/tiktok/callback', [AuthController::class, 'tiktokCallback'])->middleware('throttle:auth');
 
+// Requires a valid `expires`/`signature` query pair (see App\Support\Media).
 Route::get('/media/{path}', [MediaStreamController::class, 'stream'])
     ->where('path', '.*')
     ->name('media.stream');
@@ -94,6 +96,7 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     // see MediaUploadController and LayerCompositionService.
     Route::get('/stickers', [StickerController::class, 'index']);
 
+    Route::post('/media/sign', MediaSignController::class);
     Route::get('/media-uploads', [MediaUploadController::class, 'index']);
     Route::post('/media-uploads', [MediaUploadController::class, 'store'])->middleware('throttle:expensive');
     Route::delete('/media-uploads', [MediaUploadController::class, 'destroy']);

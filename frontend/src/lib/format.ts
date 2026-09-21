@@ -110,3 +110,8 @@ export function formatDayHeading(dateStr: string | null | undefined): string {
 
   return date.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 }
+
+/** Adds `download=1` to a signed media URL (which already carries a query string). */
+export function withDownload(url: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}download=1`;
+}
