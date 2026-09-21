@@ -29,6 +29,13 @@ class ResearchTopic
 
     public int $originalityScore = 0;
 
+    /**
+     * How much this topic resembles what has actually performed for the channel's
+     * owner. Null — not 0 — when there isn't enough measured history to say, which
+     * is what makes TopicScorer drop the component instead of scoring it zero.
+     */
+    public ?int $performanceScore = null;
+
     public int $priorityScore = 0;
 
     /**

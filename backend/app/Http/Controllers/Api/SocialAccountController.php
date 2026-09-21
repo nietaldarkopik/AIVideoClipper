@@ -164,6 +164,7 @@ class SocialAccountController extends Controller
         $data = $request->validate([
             'auto_publish_enabled' => ['sometimes', 'boolean'],
             'default_cover_template_id' => ['sometimes', 'nullable', 'exists:cover_templates,id'],
+            'messenger_sync_enabled' => ['sometimes', 'boolean'],
         ]);
 
         $socialAccount->update($data);

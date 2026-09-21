@@ -34,6 +34,8 @@ class Setting extends Model
             'default_clip_duration' => (int) config('services.ai.default_clip_duration', 30),
             'default_template_id' => null,
             'max_clips_per_video' => (int) config('services.ai.max_clips_per_video', 10),
+            'use_intro' => true,
+            'use_outro' => true,
         ];
     }
 

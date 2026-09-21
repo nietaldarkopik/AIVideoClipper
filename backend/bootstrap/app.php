@@ -34,6 +34,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // 5-minute reap job is; runInBackground() for the same reason as above.
         $schedule->command('channels:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
 
+        // See App\Console\Commands\PollFacebookMessages. Only Pages with
+        // messenger_sync_enabled are polled, so this stays cheap even at 15 min.
+        // Same schedule:work / runInBackground caveats as channels:poll above.
+        $schedule->command('messenger:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+
         // See App\Console\Commands\DailyContentResearch. Hourly rather than at a fixed
         // daily time on purpose: each content channel stores its own research times in
         // its own timezone (one channel at 06:00, another at 06:00/12:00/18:00/21:00),
@@ -43,6 +48,34 @@ return Application::configure(basePath: dirname(__DIR__))
         // withoutOverlapping() still guards against a slow database making two ticks
         // race and double-dispatch the same channel.
         $schedule->command('research:daily')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+
+        // See App\Console\Commands\SyncSocialMetrics. Hourly is the finest granularity
+        // any tier in SocialMetricsSyncer asks for, so a more frequent tick would only
+        // re-query rows that aren't due yet. withoutOverlapping() because one run walks
+        // up to 200 posts, each a network call, and two overlapping runs would double
+        // the API spend against the same YouTube quota channels:poll draws from. Same
+        // schedule:work caveat as the three above.
+        $schedule->command('social:sync-metrics')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+
+        // See App\Console\Commands\RefreshSocialTokens. Hourly against a 6-hour renewal
+        // window, so an account gets several attempts before its token could actually
+        // lapse — the point being that an overnight auto-publish never wakes up to a
+        // dead token. Same schedule:work caveat as the ones above.
+        $schedule->command('social:refresh-tokens')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+
+        // See App\Console\Commands\ReapStuckClipRenders and
+        // App\Console\Commands\RepublishOverdueSocialPosts. Both exist because a
+        // dispatched job can be silently lost by the queue driver (e.g. Redis
+        // restarting with AOF persistence off, which drops anything not yet
+        // flushed to an RDB snapshot) with nothing else in the app noticing —
+        // unlike jobs:reap-stalled, which only catches a job that reached RUNNING
+        // and then went stale, these two catch dispatches that never ran at all.
+        // Every 10 minutes, not on the hour like the sync jobs above: a stuck clip
+        // or a missed publish slot is directly visible to the end user, so it's
+        // worth checking more often than an API sync nobody is staring at.
+        // withoutOverlapping() + runInBackground() for the same reasons as above.
+        $schedule->command('clips:reap-stuck-renders')->everyTenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('social:republish-overdue')->everyTenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([

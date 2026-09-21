@@ -7,6 +7,7 @@ use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\Clip;
 use App\Models\ProcessingJob;
 use App\Models\Project;
+use App\Models\Setting;
 use App\Models\Subtitle;
 use App\Models\Video;
 use App\Models\VideoBatchItem;
@@ -38,6 +39,12 @@ class RenderClipJob implements ShouldQueue
     public int $tries = 2;
 
     public int $timeout = 1800;
+
+    // How long the silent cover-opener card (composeIntroOutro()) holds when
+    // there's no TTS narration to sync it to — long enough that YouTube's
+    // Shorts auto-thumbnail pick reliably lands inside it, short enough not to
+    // read as a stall before the actual clip starts.
+    private const COVER_INTRO_SECONDS = 1.8;
 
     public function __construct(public int $clipId) {}
 
@@ -467,12 +474,34 @@ class RenderClipJob implements ShouldQueue
             // below), so the thumbnail stays representative of the clip itself.
             $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($thumbRelative), 0.3);
 
-            $finalOutputRelative = $outputRelative;
-            if ($clip->intro_enabled || $clip->outro_enabled) {
-                $this->abortIfCancelled($processingJob);
-                $processingJob->markProgress(93, 'Building intro/outro...');
-                $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight, $transitionConfig);
+            // Generated here, BEFORE composeIntroOutro(), specifically so the cover
+            // exists in time to be burned into the video's own opening frame(s) down
+            // there (see that method — the whole reason this moved earlier from where
+            // it used to run, after everything else, is YouTube Shorts having no API
+            // for a custom thumbnail: it always auto-picks a frame FROM the video).
+            // output_path is set to the raw pre-intro/outro render first so
+            // CoverGeneratorService grabs its background frame from THIS render, not
+            // a stale one from a previous attempt. Never fatal — a clip without a
+            // cover still gets a normal render, just with no opening frame below.
+            $clip->update(['output_path' => $outputRelative]);
+            try {
+                $processingJob->markProgress(93, 'Generating cover...');
+                $covers->generateForClip($clip);
+                $clip->refresh();
+            } catch (Throwable $e) {
+                Log::warning('Cover generation failed before render, clip kept without one', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
+
+            $this->abortIfCancelled($processingJob);
+            $processingJob->markProgress(96, 'Building intro/outro...');
+            // Always attempted now, not just when intro_enabled/outro_enabled — see
+            // composeIntroOutro()'s own docblock. It's a no-op (returns
+            // $outputRelative unchanged) when there's no cover and neither flag is
+            // set, same as before this feature.
+            $finalOutputRelative = $this->composeIntroOutro($clip, $ffmpeg, $tts, $imageGen, $disk, $outputRelative, $targetWidth, $targetHeight, $transitionConfig);
 
             $clip->update([
                 'status' => Clip::STATUS_COMPLETED,
@@ -482,24 +511,6 @@ class RenderClipJob implements ShouldQueue
                 'output_size_bytes' => $disk->exists($finalOutputRelative) ? $disk->size($finalOutputRelative) : null,
                 'rendered_at' => now(),
             ]);
-
-            // The social cover is grabbed from the finished video, so this is the
-            // first moment it can exist at all — and doing it here (rather than
-            // only on the way to a platform, as before) means every clip has one
-            // ready to look at and swap in the Cover tab instead of it appearing
-            // silently at publish time. CoverGeneratorService::resolveTemplate()
-            // falls back to a random published template when nothing has been
-            // configured, so this works for an account that never picked one.
-            // Never fatal: a clip without a cover is still a finished clip.
-            try {
-                $processingJob->markProgress(97, 'Generating cover...');
-                $covers->generateForClip($clip);
-            } catch (Throwable $e) {
-                Log::warning('Cover generation failed after render, clip kept without one', [
-                    'clip_id' => $clip->id,
-                    'error' => $e->getMessage(),
-                ]);
-            }
 
             $processingJob->markCompleted('Clip rendered');
             $this->settleProjectStatus($clip->project_id, $publishScheduler);
@@ -634,14 +645,104 @@ class RenderClipJob implements ShouldQueue
         $introIndex = null;
         $tmpFiles = [];
 
-        if ($clip->intro_enabled && $clip->reaction_script) {
+        // Opening cover frame — attempted for every clip that has a cover image,
+        // regardless of intro_enabled. Exists because YouTube's Data API has no
+        // way to set a Shorts thumbnail (thumbnails.set only affects the classic
+        // watch-page derivatives — see YouTubeProvider's docblock); the ONLY
+        // frame YouTube's Shorts shelf ever shows is one it auto-picks FROM the
+        // video. Burning the actual cover in as the opening frame(s) is what
+        // makes that auto-pick land on the cover instead of a random moment.
+        //
+        // A reaction clip with a working TTS narration shows the cover DURING
+        // that narration (one frame serving both jobs, using the real styled
+        // cover instead of the separate AI-generated reaction background this
+        // used to render); everything else — no reaction script, TTS failed, or
+        // intro_enabled off — gets it as a brief silent opening card instead.
+        // Skipped entirely when there's no cover_path yet (e.g. cover generation
+        // itself failed after render) — a clip is still a perfectly good clip
+        // without this.
+        $coverForIntro = ($clip->cover_path && $disk->exists($clip->cover_path)) ? $clip->cover_path : null;
+        $introBuilt = false;
+
+        // Global master switches (Setting::use_intro / use_outro) let the user turn
+        // narrated intros / outro cards off across every clip at once instead of
+        // unchecking intro_enabled/outro_enabled on each one individually. They only
+        // gate the narrated-intro and outro-card behavior below — the silent cover
+        // opener a few lines down stays unconditional on cover_path, since it exists
+        // for the unrelated YouTube Shorts auto-thumbnail reason explained above, not
+        // as part of the "intro" the user is toggling.
+        $introEnabled = $clip->intro_enabled && Setting::get('use_intro', true);
+        $outroEnabled = $clip->outro_enabled && Setting::get('use_outro', true);
+
+        if ($coverForIntro && $introEnabled && $clip->reaction_script) {
             // TTS hits a real external quota/rate-limit often enough (each upstream
             // credential behind whichever provider is configured has its own) that
-            // it can't be allowed to fail the whole render — a clip is still a
-            // perfectly good clip without its intro narration. Anything that goes
-            // wrong while building the intro (TTS itself, or the cover-frame/segment
-            // render right after) is caught here and just skips the intro segment;
-            // the outro stage below and the main clip output are unaffected.
+            // it can't be allowed to fail the whole render — $introBuilt staying
+            // false here (not a `return`/`continue` out of this whole block) is
+            // what lets the silent-cover-opener branch below actually run instead
+            // of just being dead code next to a log line that lied about it.
+            try {
+                $introAudioRelative = $clip->intro_audio_path;
+                if (! $introAudioRelative || ! $disk->exists($introAudioRelative)) {
+                    $introAudioRelative = "clips/{$clip->id}/intro_audio.mp3";
+                    $tts->synthesize($clip->reaction_script, $disk->path($introAudioRelative), $clip->intro_voice);
+                    $clip->update(['intro_audio_path' => $introAudioRelative]);
+                }
+                $introAudioPath = $disk->path($introAudioRelative);
+                $introDuration = ($ffmpeg->probeDuration($introAudioPath) ?? 4.0) + 0.3;
+
+                $introSegmentRelative = "clips/{$clip->id}/intro_segment.mp4";
+                $ffmpeg->renderCoverSegment(
+                    $disk->path($coverForIntro),
+                    $introAudioPath,
+                    $disk->path($introSegmentRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    $introDuration,
+                );
+
+                array_unshift($segments, $disk->path($introSegmentRelative));
+                $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
+            } catch (Throwable $e) {
+                Log::warning('Reaction intro TTS failed, falling back to a silent cover opener', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if (! $introBuilt && $coverForIntro) {
+            // Covers both the common case (no reaction narration, or intro_enabled
+            // off — most clips) and the TTS-failure fallback from above: a brief
+            // silent card so the cover is still the video's opening frame for
+            // YouTube's Shorts auto-thumbnail to land on.
+            try {
+                $introSegmentRelative = "clips/{$clip->id}/cover_intro_segment.mp4";
+                $ffmpeg->renderCoverSegment(
+                    $disk->path($coverForIntro),
+                    null,
+                    $disk->path($introSegmentRelative),
+                    $targetWidth,
+                    $targetHeight,
+                    self::COVER_INTRO_SECONDS,
+                );
+
+                array_unshift($segments, $disk->path($introSegmentRelative));
+                $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
+            } catch (Throwable $e) {
+                Log::warning('Cover opener build failed, rendering clip without it', [
+                    'clip_id' => $clip->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if (! $introBuilt && ! $coverForIntro && $introEnabled && $clip->reaction_script) {
+            // No styled cover to reuse (cover generation failed/hasn't run) but
+            // this clip still wants a narrated intro — fall back to the original
+            // AI-generated reaction-background card, same as before this feature.
             try {
                 $introAudioRelative = $clip->intro_audio_path;
                 if (! $introAudioRelative || ! $disk->exists($introAudioRelative)) {
@@ -653,10 +754,6 @@ class RenderClipJob implements ShouldQueue
                 $introDuration = ($ffmpeg->probeDuration($introAudioPath) ?? 4.0) + 0.3;
 
                 $coverFrameRelative = "clips/{$clip->id}/intro_cover.jpg";
-                // Cached like intro_audio_path above — only (re)generated when empty
-                // or missing, cleared by ClipController::update() whenever
-                // reaction_script changes, so a real image-gen provider isn't called
-                // on every re-render (e.g. a caption-only "Save & Re-render").
                 if (! $clip->intro_cover_path || ! $disk->exists($clip->intro_cover_path)) {
                     $fallbackFrameRelative = "clips/{$clip->id}/intro_cover_fallback.jpg";
                     $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($fallbackFrameRelative), 0.0);
@@ -682,9 +779,9 @@ class RenderClipJob implements ShouldQueue
                     $clip->reaction_script,
                 );
 
-                $introIndex = 0;
                 array_unshift($segments, $disk->path($introSegmentRelative));
                 $tmpFiles[] = $disk->path($introSegmentRelative);
+                $introBuilt = true;
             } catch (Throwable $e) {
                 Log::warning('Reaction intro build failed, rendering clip without it', [
                     'clip_id' => $clip->id,
@@ -693,7 +790,11 @@ class RenderClipJob implements ShouldQueue
             }
         }
 
-        if ($clip->outro_enabled) {
+        if ($introBuilt) {
+            $introIndex = 0;
+        }
+
+        if ($outroEnabled) {
             $mainDuration = $ffmpeg->probeDuration($disk->path($outputRelative)) ?? 0.0;
             $outroFrameRelative = "clips/{$clip->id}/outro_cover.jpg";
             $ffmpeg->generateThumbnail($disk->path($outputRelative), $disk->path($outroFrameRelative), max(0.0, $mainDuration - 0.2));

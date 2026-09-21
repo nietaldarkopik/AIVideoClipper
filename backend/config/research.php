@@ -21,6 +21,12 @@ return [
             'freshness' => (float) env('RESEARCH_WEIGHT_FRESHNESS', 0.10),
             'engagement' => (float) env('RESEARCH_WEIGHT_ENGAGEMENT', 0.10),
             'cross_source' => (float) env('RESEARCH_WEIGHT_CROSS_SOURCE', 0.05),
+            // How much a topic resembling the owner's best-performing published
+            // clips counts (see AudiencePerformanceProfile). Only applies once
+            // there are enough measured posts to build a profile; until then
+            // TopicScorer drops the component and its weight entirely, so
+            // rankings match what they were before this existed.
+            'performance' => (float) env('RESEARCH_WEIGHT_PERFORMANCE', 0.10),
         ],
 
         // A topic seen in this many independent sources scores 100 for cross_source.
@@ -71,6 +77,15 @@ return [
         // rate limits.
         'cache_ttl' => (int) env('RESEARCH_CACHE_TTL', 900),
         'user_agent' => env('RESEARCH_USER_AGENT', 'ClipperToolResearchBot/1.0'),
+        // Optional outbound proxy for every research provider, e.g.
+        // http://user:pass@host:port. Left unset normally.
+        //
+        // Worth knowing before reaching for this against Reddit: free public proxy
+        // lists are entirely datacenter IPs, which is the exact category Reddit
+        // blocks — 79 working proxies were tested and all 79 returned the same 403.
+        // Only a residential/mobile proxy changes that outcome, and Reddit's own
+        // OAuth API (see providers.reddit) is free and needs no proxy at all.
+        'proxy' => env('RESEARCH_HTTP_PROXY'),
     ],
 
     /*
@@ -98,6 +113,16 @@ return [
         'twitch' => [
             'client_id' => env('TWITCH_CLIENT_ID'),
             'client_secret' => env('TWITCH_CLIENT_SECRET'),
+        ],
+        'reddit' => [
+            // Optional. Without these the provider uses Reddit's public .json
+            // endpoints, which need no setup — but Reddit blocks those outright from
+            // datacenter/VPN IP ranges (a flat 403 no User-Agent can talk its way
+            // past). Its OAuth API is reachable from exactly those same addresses,
+            // so filling these in is the fix when the public endpoints 403.
+            // Create a free "script" app at https://www.reddit.com/prefs/apps.
+            'client_id' => env('REDDIT_CLIENT_ID'),
+            'client_secret' => env('REDDIT_CLIENT_SECRET'),
         ],
     ],
 

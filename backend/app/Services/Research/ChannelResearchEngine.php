@@ -12,6 +12,7 @@ use App\Services\AI\Contracts\ContentIdeaProvider;
 use App\Services\AI\DTOs\ContentIdeaData;
 use App\Services\Research\DTOs\ResearchItem;
 use App\Services\Research\DTOs\ResearchQuery;
+use App\Services\Research\Engine\AudiencePerformanceProfile;
 use App\Services\Research\Engine\ContentIdeaPromptBuilder;
 use App\Services\Research\Engine\DuplicateDetector;
 use App\Services\Research\Engine\ResearchQueryBuilder;
@@ -43,6 +44,7 @@ class ChannelResearchEngine
         private readonly ResearchQueryBuilder $queryBuilder,
         private readonly TopicExtractor $extractor,
         private readonly TopicScorer $scorer,
+        private readonly AudiencePerformanceProfile $performanceProfile,
         private readonly ContentIdeaProvider $ideaProvider,
         private readonly ContentIdeaPromptBuilder $promptBuilder,
     ) {}
@@ -69,7 +71,12 @@ class ChannelResearchEngine
             $query = $this->firstQueryFor($channel);
             $items = $this->extractor->applyExclusions($this->extractor->deduplicate($items), $query);
 
-            $topics = $this->scorer->score($this->extractor->cluster($items, $sourceWeights), $channel);
+            // Built once per run, not per topic: it queries the owner's whole
+            // published back catalogue, and every topic in this run is scored
+            // against the same profile anyway.
+            $profile = $this->performanceProfile->build($channel->user);
+
+            $topics = $this->scorer->score($this->extractor->cluster($items, $sourceWeights), $channel, $profile);
             $topics = $this->applyThresholds($topics, $channel);
             $topics = array_slice($topics, 0, (int) config('research.topics.max_per_run', 25));
 
@@ -353,6 +360,7 @@ class ChannelResearchEngine
                     'freshness_score' => $topic->freshnessScore,
                     'engagement_score' => $topic->engagementScore,
                     'cross_source_score' => $topic->crossSourceScore,
+                    'performance_score' => $topic->performanceScore,
                     'priority_score' => $topic->priorityScore,
                     'suggested_content_type' => $idea->suggestedContentType,
                     'suggested_format' => $idea->suggestedFormat,

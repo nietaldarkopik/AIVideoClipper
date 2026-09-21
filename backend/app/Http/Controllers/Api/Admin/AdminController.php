@@ -101,6 +101,11 @@ class AdminController extends Controller
             'default_clip_duration' => ['sometimes', 'integer', 'min:5', 'max:180'],
             'default_template_id' => ['sometimes', 'nullable', 'exists:templates,id'],
             'max_clips_per_video' => ['sometimes', 'integer', 'min:1', 'max:50'],
+            // Master switches: when off, RenderClipJob skips the narrated intro /
+            // outro card for every clip regardless of its own intro_enabled /
+            // outro_enabled flag — see composeIntroOutro().
+            'use_intro' => ['sometimes', 'boolean'],
+            'use_outro' => ['sometimes', 'boolean'],
         ]);
 
         foreach ($data as $key => $value) {

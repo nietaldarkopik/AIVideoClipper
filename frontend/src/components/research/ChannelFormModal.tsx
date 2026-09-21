@@ -125,6 +125,7 @@ function ChannelForm({
       platform_id: Number(form.platform_id),
       name: form.name.trim(),
       handle: form.handle.trim() || null,
+      avatar_url: form.avatar_url.trim() || null,
       description: form.description.trim() || null,
       language: form.language,
       timezone: form.timezone,
@@ -225,6 +226,13 @@ function ChannelForm({
                 value={form.handle}
                 onChange={(e) => setForm({ ...form, handle: e.target.value })}
                 placeholder="@channel"
+              />
+            </Field>
+            <Field label="URL Logo" error={errors.avatar_url}>
+              <Input
+                value={form.avatar_url}
+                onChange={(e) => setForm({ ...form, avatar_url: e.target.value })}
+                placeholder="https://yt3.ggpht.com/..."
               />
             </Field>
             <Field label="Bahasa" error={errors.language}>
@@ -435,6 +443,7 @@ function formFromChannel(channel: ContentChannel) {
     platform_id: String(channel.platform_id),
     name: channel.name,
     handle: channel.handle ?? "",
+    avatar_url: channel.avatar_url ?? "",
     description: channel.description ?? "",
     language: channel.language,
     timezone: channel.timezone,
@@ -462,6 +471,7 @@ function emptyForm() {
     platform_id: "",
     name: "",
     handle: "",
+    avatar_url: "",
     description: "",
     language: "id",
     timezone: "Asia/Jakarta",

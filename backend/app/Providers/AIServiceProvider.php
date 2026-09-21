@@ -155,7 +155,7 @@ class AIServiceProvider extends ServiceProvider
                 'nine_router' => new NineRouterContentAnalysisProvider(
                     (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
                     config('services.nine_router.api_key'),
-                    (string) config('services.nine_router.model'),
+                    (string) (config('services.nine_router.analysis_model') ?: config('services.nine_router.model')),
                 ),
                 default => throw new InvalidArgumentException("Unknown AI_ANALYSIS_PROVIDER [{$provider}]. Valid values: mock, openai, ollama, claude, gemini, nine_router."),
             };

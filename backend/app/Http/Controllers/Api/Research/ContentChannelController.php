@@ -106,6 +106,7 @@ class ContentChannelController extends Controller
             'platform_id' => [$required, 'integer', 'exists:platforms,id'],
             'name' => [$required, 'string', 'max:255'],
             'handle' => ['nullable', 'string', 'max:255'],
+            'avatar_url' => ['nullable', 'url', 'max:1000'],
             'description' => ['nullable', 'string', 'max:2000'],
             'language' => ['sometimes', 'string', 'max:16'],
             'timezone' => ['sometimes', 'string', 'max:64', 'timezone'],

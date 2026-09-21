@@ -77,6 +77,7 @@ if (Stop-ByPort -Port 8000 -Label 'Laravel API') { $stopped++ }
 if (Stop-ByPort -Port 3000 -Label 'Frontend (Next.js)') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=default') -Label 'Queue worker') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=batch-downloads') -Label 'Batch downloads worker') { $stopped++ }
+if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'queue:work', '--queue=publish,default') -Label 'Publish worker') { $stopped++ }
 if (Stop-ByCommandLine -ProcessName 'php.exe' -MustContainAll @('artisan', 'schedule:work') -Label 'Scheduler') { $stopped++ }
 
 # --- optional AI services (port kill + a command-line sweep, since these run with

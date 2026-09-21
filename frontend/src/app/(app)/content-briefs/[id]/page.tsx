@@ -67,7 +67,7 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
   async function handleCreateProject(url: string, title: string) {
     setCreatingProjectFor(url);
     try {
-      const project = await createProjectFromUrl(url, title);
+      const project = await createProjectFromUrl(url, title, { type: "content_brief", id: briefId });
       await mutate("/projects");
       toast("Import dimulai.", "success");
       router.push(`/projects/${project.id}`);

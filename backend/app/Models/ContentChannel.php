@@ -27,7 +27,7 @@ class ContentChannel extends Model
     ];
 
     protected $fillable = [
-        'user_id', 'platform_id', 'name', 'handle', 'description', 'language', 'timezone', 'is_active',
+        'user_id', 'platform_id', 'name', 'handle', 'avatar_url', 'description', 'language', 'timezone', 'is_active',
         'niche', 'sub_niches', 'keywords', 'excluded_keywords', 'target_audience',
         'content_style', 'content_types', 'content_formats', 'tone', 'hook_styles',
         'scheduler_enabled', 'research_frequency', 'research_times', 'interval_hours',

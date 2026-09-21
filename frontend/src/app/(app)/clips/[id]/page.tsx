@@ -18,6 +18,7 @@ import {
   X,
   Play,
   Pause,
+  FileText,
 } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
@@ -39,7 +40,8 @@ import { StickerPanel } from "@/components/clips/timeline/StickerPanel";
 import { AdditionalClipsPanel } from "@/components/clips/timeline/AdditionalClipsPanel";
 import { ManualCropEditor } from "@/components/clips/timeline/ManualCropEditor";
 import { useClipEditorHistory, type EditorSnapshot } from "@/components/clips/timeline/useClipEditorHistory";
-import { clipDuration, sourceTimeToClip } from "@/components/clips/timeline/timelineMath";
+import { clipDuration, clipTimeToSource, sourceTimeToClip } from "@/components/clips/timeline/timelineMath";
+import { TranscriptPanel } from "@/components/clips/TranscriptPanel";
 import { LayerEditor } from "@/components/layers/LayerEditor";
 import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
 import { diffLayers } from "@/lib/layerOverrides";
@@ -473,6 +475,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   const [uploadingSubtitle, setUploadingSubtitle] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("trim");
   const [isPlaying, setIsPlaying] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
 
@@ -886,47 +889,85 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                 <Redo2 className="size-3.5" />
               </Button>
             </div>
-            {history.current.segments.length <= 1 && (
-              <Button variant="outline" size="sm" onClick={handleSplit} loading={splitting}>
-                <Scissors className="size-3.5" />
-                Split at playhead
+            <div className="flex items-center gap-2">
+              <Button
+                variant={showTranscript ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setShowTranscript((v) => !v)}
+              >
+                <FileText className="size-3.5" />
+                Transcript
               </Button>
-            )}
+              {history.current.segments.length <= 1 && (
+                <Button variant="outline" size="sm" onClick={handleSplit} loading={splitting}>
+                  <Scissors className="size-3.5" />
+                  Split at playhead
+                </Button>
+              )}
+            </div>
           </div>
 
           {videoRes?.data && preview && historyReady ? (
             <div className="space-y-4">
-              <div className="mx-auto w-full max-w-[420px]">
-                <ClipVideoPreview
-                  videoRef={videoRef}
-                  videoUrl={videoRes.data.url}
-                  posterUrl={videoRes.data.thumbnail_url}
-                  resolution={
-                    form.template_id && templatesRes?.data
-                      ? (() => {
-                          const tpl = templatesRes.data.find((t) => String(t.id) === form.template_id);
-                          return tpl?.resolution ?? preview.resolution;
-                        })()
-                      : preview.resolution
-                  }
-                  captionConfig={
-                    form.template_id && templatesRes?.data
-                      ? templatesRes.data.find((t) => String(t.id) === form.template_id)?.current_version?.config?.caption ?? preview.caption
-                      : preview.caption
-                  }
-                  layers={history.current.layers}
-                  clipTime={clipTime}
-                  duration={outputDuration}
-                  captionCues={history.current.captionCues}
-                  activeCaptionIndex={selection?.kind === "caption" ? selection.index : null}
-                  onTimeUpdate={setCurrentTime}
-                  interactive
-                  selectedLayerId={selectedLayerId}
-                  onSelectLayer={selectLayer}
-                  onLayersChange={setLayers}
-                  segments={history.current.segments}
-                  isPlaying={isPlaying}
-                />
+              <div className="flex flex-col items-start gap-4 md:flex-row md:justify-center">
+                <div className="mx-auto w-full max-w-[420px] md:mx-0 md:shrink-0">
+                  <ClipVideoPreview
+                    videoRef={videoRef}
+                    videoUrl={videoRes.data.url}
+                    posterUrl={videoRes.data.thumbnail_url}
+                    resolution={
+                      form.template_id && templatesRes?.data
+                        ? (() => {
+                            const tpl = templatesRes.data.find((t) => String(t.id) === form.template_id);
+                            return tpl?.resolution ?? preview.resolution;
+                          })()
+                        : preview.resolution
+                    }
+                    captionConfig={
+                      form.template_id && templatesRes?.data
+                        ? templatesRes.data.find((t) => String(t.id) === form.template_id)?.current_version?.config?.caption ?? preview.caption
+                        : preview.caption
+                    }
+                    layers={history.current.layers}
+                    clipTime={clipTime}
+                    duration={outputDuration}
+                    captionCues={history.current.captionCues}
+                    activeCaptionIndex={selection?.kind === "caption" ? selection.index : null}
+                    onTimeUpdate={setCurrentTime}
+                    interactive
+                    selectedLayerId={selectedLayerId}
+                    onSelectLayer={selectLayer}
+                    onLayersChange={setLayers}
+                    segments={history.current.segments}
+                    isPlaying={isPlaying}
+                  />
+                </div>
+
+                {showTranscript && (
+                  <TranscriptPanel
+                    lines={history.current.captionCues}
+                    time={clipTime}
+                    emptyLabel="No captions on this clip yet."
+                    downloadAction={
+                      clip?.srt_url && (
+                        <a
+                          href={`${clip.srt_url}?download=1`}
+                          title="Download caption (.srt)"
+                          className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-muted hover:bg-white/5 hover:text-foreground"
+                        >
+                          <Download className="size-3.5" />
+                          .srt
+                        </a>
+                      )
+                    }
+                    onSeek={(t) => {
+                      const sourceTime = clipTimeToSource(t, history.current.segments);
+                      setCurrentTime(sourceTime);
+                      if (videoRef.current) videoRef.current.currentTime = sourceTime;
+                    }}
+                    className="w-full md:max-w-sm"
+                  />
+                )}
               </div>
 
               <MultiTrackTimeline

@@ -48,6 +48,10 @@ export function ScoreGrid({ scores }: { scores: ContentIdea["scores"] }) {
       <ScoreBar label="Kesegaran" value={scores.freshness} />
       <ScoreBar label="Engagement" value={scores.engagement} />
       <ScoreBar label="Lintas Sumber" value={scores.cross_source} />
+      {/* Hidden, not zeroed, when null: the owner had too little published history
+          to judge, which is "unknown" rather than "scored nothing" — and it was
+          left out of the priority calculation on the same reasoning. */}
+      {scores.performance !== null && <ScoreBar label="Cocok Performa" value={scores.performance} />}
     </div>
   );
 }

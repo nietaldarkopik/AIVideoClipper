@@ -21,6 +21,8 @@ interface AISettings {
   default_clip_duration: number;
   default_template_id: number | null;
   max_clips_per_video: number;
+  use_intro: boolean;
+  use_outro: boolean;
 }
 
 export default function AdminAISettingsPage() {
@@ -46,6 +48,8 @@ export default function AdminAISettingsPage() {
         default_clip_duration: form.default_clip_duration,
         max_clips_per_video: form.max_clips_per_video,
         default_template_id: form.default_template_id,
+        use_intro: form.use_intro,
+        use_outro: form.use_outro,
       });
       await mutate(key);
       toast("Settings saved.", "success");
@@ -126,13 +130,17 @@ export default function AdminAISettingsPage() {
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <Label htmlFor="default_duration">Default Clip Duration (sec)</Label>
+            <Label htmlFor="default_duration">Max Clip Duration (sec)</Label>
             <Input
               id="default_duration"
               type="number"
               value={form.default_clip_duration}
               onChange={(e) => setForm({ ...form, default_clip_duration: Number(e.target.value) })}
             />
+            <p className="mt-1 text-xs text-muted">
+              Hard ceiling for AI-picked clips — sent to every AI provider's prompt and enforced again after
+              analysis (trimmed to the nearest sentence end, never mid-sentence).
+            </p>
           </div>
           <div>
             <Label htmlFor="max_clips">Max Clips Per Video</Label>
@@ -159,6 +167,34 @@ export default function AdminAISettingsPage() {
               </option>
             ))}
           </Select>
+        </div>
+
+        <div>
+          <Label>Intro / Outro</Label>
+          <div className="mt-1 flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={form.use_intro}
+                onChange={(e) => setForm({ ...form, use_intro: e.target.checked })}
+                className="size-4 rounded accent-accent"
+              />
+              Use intro on rendered clips
+            </label>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={form.use_outro}
+                onChange={(e) => setForm({ ...form, use_outro: e.target.checked })}
+                className="size-4 rounded accent-accent"
+              />
+              Use outro on rendered clips
+            </label>
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            Master switch for every clip's render, on top of each clip's own intro/outro toggle — turn one off here
+            to stop using it everywhere without editing clips one by one.
+          </p>
         </div>
 
         <Button onClick={handleSave} loading={saving}>

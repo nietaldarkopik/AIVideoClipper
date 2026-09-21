@@ -2,6 +2,7 @@
 
 namespace App\Services\AI\Gemini;
 
+use App\Models\Setting;
 use App\Models\Transcript;
 use App\Services\AI\Concerns\LogsAiRequests;
 use App\Services\AI\Concerns\ParsesJsonResponses;
@@ -186,6 +187,7 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
     private function systemPrompt(int $maxCandidates): string
     {
         $coverInstructions = ClipCandidateData::coverPromptInstructions();
+        $maxDuration = (int) Setting::get('default_clip_duration', config('services.ai.default_clip_duration', 45));
 
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
@@ -194,7 +196,8 @@ into short vertical clips (like TikTok/Reels/Shorts) — cold-open hooks, twist
 reveals, and payoff lines that work with little to no extra context.
 
 Return up to {$maxCandidates} candidates. Each needs: start_time/end_time (seconds;
-15-90s span after start_time unless the moment genuinely needs longer), the six
+15-{$maxDuration}s span after start_time — {$maxDuration}s is a HARD CEILING, never
+exceed it even if the moment feels like it deserves more room), the six
 1-100 scores plus viral_potential, hook_text (the exact or near-exact opening line,
 in the transcript's own language), moment_type, 2-4 short reasons, a one-sentence
 explanation, a short punchy suggested_title, a 1-2 sentence suggested_caption, and
@@ -205,7 +208,10 @@ explanation, a short punchy suggested_title, a 1-2 sentence suggested_caption, a
 Critical: hook_text, suggested_title, suggested_caption, and reasons/explanation must be
 written in the SAME LANGUAGE as the transcript — never translate to English unless the
 transcript itself is in English. Prefer moments with a strong opening line, a clear
-self-contained idea, and an emotional or informational payoff. Only use start_time/end_time
+self-contained idea, and an emotional or informational payoff. end_time MUST land at the
+end of a complete sentence/thought — never cut off mid-sentence, mid-word, or mid-idea; if
+the payoff needs more than {$maxDuration}s to land cleanly, pick a tighter, more
+self-contained moment instead of overrunning the limit. Only use start_time/end_time
 values that fall within the transcript's timestamp range.
 PROMPT;
     }

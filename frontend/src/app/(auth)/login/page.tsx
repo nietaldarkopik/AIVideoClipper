@@ -119,9 +119,6 @@ function LoginPageInner() {
           </Button>
         </form>
 
-        <p className="mt-5 text-center text-xs text-muted">
-          Demo account prefilled — admin@clipper.test / password for admin access.
-        </p>
         <p className="mt-3 text-center text-sm text-muted">
           Don&apos;t have an account?{" "}
           <Link href="/register" className="font-medium text-accent-2 hover:underline">

@@ -17,6 +17,7 @@ class ContentChannelResource extends JsonResource
             'id' => $this->id,
             'name' => $this->name,
             'handle' => $this->handle,
+            'avatar_url' => $this->avatar_url,
             'description' => $this->description,
             'language' => $this->language,
             'timezone' => $this->timezone,

@@ -29,7 +29,9 @@ export function TrendingCard({ item }: { item: TrendingItem }) {
   async function handleCreateProject() {
     setCreating(true);
     try {
-      const project = await createProjectFromUrl(item.source_url, item.title);
+      // No id: trending items are fetched live from each platform and have no
+      // local row, so the type alone carries the provenance.
+      const project = await createProjectFromUrl(item.source_url, item.title, { type: "trending" });
       await mutate("/projects");
       await mutate("/dashboard");
       toast("Import started.", "success");

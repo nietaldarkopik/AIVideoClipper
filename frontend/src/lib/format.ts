@@ -22,6 +22,19 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+/**
+ * Compact engagement counts ("1.7K", "2.4M"). Distinct from formatBytes: this
+ * rounds to the platforms' own convention for view/like counts, which is the only
+ * number in the app that routinely reaches seven digits and would otherwise blow
+ * out a table column.
+ */
+export function formatCount(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "--";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
+  return String(value);
+}
+
 export function formatRelativeTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "--";
   const date = new Date(dateStr);

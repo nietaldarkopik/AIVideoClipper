@@ -8,7 +8,7 @@ const geistSans = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "AI Video Clipper",
+  title: "Existcode",
   description: "Turn long videos into social-ready clips, automatically.",
 };
 

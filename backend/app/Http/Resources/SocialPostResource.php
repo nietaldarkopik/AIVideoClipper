@@ -16,7 +16,7 @@ class SocialPostResource extends JsonResource
             'clip' => $this->whenLoaded('clip', fn () => [
                 'id' => $this->clip->id,
                 'title' => $this->clip->title,
-                'thumbnail_url' => Media::url($this->clip->thumbnail_path),
+                'thumbnail_url' => Media::url($this->clip->displayThumbnailPath()),
                 'url' => Media::url($this->clip->output_path),
                 'duration' => (float) $this->clip->duration,
                 'project_id' => $this->clip->project_id,

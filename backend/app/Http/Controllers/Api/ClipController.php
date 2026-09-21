@@ -8,12 +8,16 @@ use App\Jobs\GenerateClipEmbeddingJob;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
 use App\Models\CoverTemplate;
+use App\Models\SocialAccount;
+use App\Models\SocialPost;
 use App\Models\Template;
+use App\Models\Video;
 use App\Services\AI\ClipSearchService;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\WebContentFetcher;
+use App\Services\Social\AutoPublishScheduler;
 use App\Services\Video\ClipCreditFormatter;
 use App\Services\Video\CoverGeneratorService;
 use App\Services\Video\DefaultTemplateConfig;
@@ -41,12 +45,135 @@ class ClipController extends Controller
         if ($request->filled('status')) {
             $query->where('status', $request->string('status'));
         }
+        // "Published" here means actually posted to at least one platform
+        // (SocialPost::STATUS_PUBLISHED) — not just scheduled/in-flight, so a
+        // clip queued to publish tomorrow still shows up under "Not Published"
+        // until it really goes out. "unlinked" is stricter still: zero SocialPost
+        // rows of ANY status — never even assigned a destination, as opposed to
+        // "not published" which still matches a clip that's merely scheduled/failed.
+        if ($request->string('published')->toString() === 'unlinked') {
+            $query->doesntHave('socialPosts');
+        } elseif ($request->filled('published')) {
+            $isPublished = $request->boolean('published');
+            $query->{$isPublished ? 'whereHas' : 'whereDoesntHave'}(
+                'socialPosts',
+                fn ($q) => $q->where('status', SocialPost::STATUS_PUBLISHED)
+            );
+        }
+        // Which platform a clip is published TO — distinct from `published`
+        // above (which only says "anywhere or not at all"). A clip currently
+        // just scheduled (not yet actually published) to this platform doesn't
+        // match, same "published means published" rule as the `published` filter.
+        if ($request->filled('platform')) {
+            $query->whereHas(
+                'socialPosts',
+                fn ($q) => $q->where('platform', $request->string('platform'))
+                    ->where('status', SocialPost::STATUS_PUBLISHED)
+            );
+        }
+        // Narrows `platform` down to one specific connected account — e.g. which
+        // of several Facebook Pages or YouTube channels. Independent of `platform`
+        // above (a bare social_account_id is unambiguous on its own), so either
+        // can be passed alone.
+        if ($request->filled('social_account_id')) {
+            $query->whereHas(
+                'socialPosts',
+                fn ($q) => $q->where('social_account_id', $request->integer('social_account_id'))
+                    ->where('status', SocialPost::STATUS_PUBLISHED)
+            );
+        }
+        // Mirrors platform/social_account_id above but against SCHEDULED posts —
+        // "will be published to X" rather than "already published to X". A clip
+        // can obviously match both filters at once (published to A, separately
+        // scheduled to B), so this is deliberately independent of the pair above.
+        if ($request->filled('scheduled_platform')) {
+            $query->whereHas(
+                'socialPosts',
+                fn ($q) => $q->where('platform', $request->string('scheduled_platform'))
+                    ->where('status', SocialPost::STATUS_SCHEDULED)
+            );
+        }
+        if ($request->filled('scheduled_social_account_id')) {
+            $query->whereHas(
+                'socialPosts',
+                fn ($q) => $q->where('social_account_id', $request->integer('scheduled_social_account_id'))
+                    ->where('status', SocialPost::STATUS_SCHEDULED)
+            );
+        }
+        // The YouTube/etc uploader name captured at import time (Video::metadata->
+        // channel_name — see UrlVideoDownloader), NOT a foreign key to any Channel
+        // model: most videos here arrive via a pasted URL, not a watched channel,
+        // so a free-text match against the video's own metadata is the only value
+        // that exists for every clip regardless of how its source video arrived.
+        if ($request->filled('source_channel')) {
+            $query->whereHas(
+                'video',
+                fn ($q) => $q->where('metadata->channel_name', $request->string('source_channel'))
+            );
+        }
+        if ($request->filled('template_id')) {
+            $query->where('template_id', $request->integer('template_id'));
+        }
+        if ($request->filled('aspect_ratio')) {
+            $query->where('aspect_ratio', $request->string('aspect_ratio'));
+        }
 
-        $clips = $query->with(['template', 'subtitle'])
-            ->latest()
+        // Sorting happens in the database, not in the page the client already
+        // received — the table can page through thousands of clips, so a
+        // client-side sort would only ever reorder the current page.
+        $direction = $request->string('sort_dir')->lower()->toString() === 'desc' ? 'desc' : 'asc';
+
+        match ($request->string('sort_by')->toString()) {
+            'title' => $query->orderByRaw('title IS NULL')->orderBy('title', $direction),
+            'status' => $query->orderBy('status', $direction),
+            'duration' => $query->orderBy('duration', $direction),
+            'rendered_at' => $query->orderByRaw('rendered_at IS NULL')->orderBy('rendered_at', $direction),
+            default => $query->orderBy('created_at', $direction),
+        };
+
+        $clips = $query->with([
+            'template', 'subtitle', 'project', 'video',
+            // Published AND scheduled both loaded here — ClipResource splits them
+            // by status into published_targets vs scheduled_targets rather than
+            // this needing two separate eager-loaded relations.
+            'socialPosts' => fn ($q) => $q->whereIn('status', [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_SCHEDULED])
+                ->select(['id', 'clip_id', 'platform', 'social_account_id', 'status'])
+                ->with('socialAccount:id,account_name'),
+        ])
+            ->withExists(['socialPosts as is_published' => fn ($q) => $q->where('status', SocialPost::STATUS_PUBLISHED)])
+            // Stable tiebreaker: without one, rows sharing a sort value (several
+            // clips finishing render in the same second, say) can swap places
+            // between pages and show up twice or not at all while paging.
+            ->orderByDesc('id')
             ->paginate($request->integer('per_page', 24));
 
         return ClipResource::collection($clips);
+    }
+
+    /**
+     * Distinct source-channel names (Video::metadata->channel_name) across the
+     * user's clips, for the "Source channel" filter dropdown — see the
+     * `source_channel` filter in index() for why this is a free-text value
+     * rather than a foreign key.
+     */
+    public function sourceChannels(Request $request)
+    {
+        $clipsQuery = $request->user()->isAdmin()
+            ? Clip::query()
+            : Clip::whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id));
+
+        $videoIds = $clipsQuery->pluck('video_id')->unique();
+
+        $channels = Video::whereIn('id', $videoIds)
+            ->whereNotNull('metadata->channel_name')
+            ->pluck('metadata')
+            ->map(fn ($m) => $m['channel_name'] ?? null)
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values();
+
+        return response()->json(['data' => $channels]);
     }
 
     /**
@@ -322,6 +449,131 @@ class ClipController extends Controller
         return response()->json(['message' => 'Clip deleted.']);
     }
 
+    public function bulkDestroy(Request $request)
+    {
+        $data = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1'],
+            'clip_ids.*' => ['integer', 'exists:clips,id'],
+        ]);
+
+        $clips = Clip::whereIn('id', $data['clip_ids'])
+            ->whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        foreach ($clips as $clip) {
+            $clip->delete();
+        }
+
+        return response()->json([
+            'message' => "Deleted {$clips->count()} clip(s).",
+            'deleted_count' => $clips->count(),
+        ]);
+    }
+
+    /**
+     * Clip-page counterpart to SocialPostController::bulkMoveChannel — same
+     * destination-account retargeting, but selection is by clip (this page's
+     * checkboxes) rather than by an already-existing SocialPost id. The extra
+     * case that method doesn't have to handle: a clip with no SocialPost at all
+     * (e.g. one of the "not linked to any account" clips — see the `published=
+     * unlinked` filter above) gets a brand new one created and scheduled, instead
+     * of just being skipped as ineligible.
+     *
+     * Duplicate handling mirrors that method exactly: if the clip already has a
+     * post (any status) targeting the destination, nothing new is created/moved
+     * for it — and if the clip ALSO had another non-terminal post elsewhere, that
+     * one is cancelled rather than left pointing at a second, now-redundant
+     * destination.
+     */
+    public function bulkMoveChannel(Request $request, AutoPublishScheduler $scheduler)
+    {
+        $data = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1'],
+            'clip_ids.*' => ['integer', 'exists:clips,id'],
+            'target_social_account_id' => ['required', 'exists:social_accounts,id'],
+        ]);
+
+        $targetAccount = SocialAccount::where('user_id', $request->user()->id)
+            ->where('status', SocialAccount::STATUS_CONNECTED)
+            ->find($data['target_social_account_id']);
+        if (! $targetAccount) {
+            return response()->json(['message' => 'Target channel not found.'], 422);
+        }
+
+        $nonTerminalStatuses = [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING];
+
+        $clips = Clip::whereIn('id', $data['clip_ids'])
+            ->whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->where('status', Clip::STATUS_COMPLETED)
+            ->with('socialPosts')
+            ->get();
+
+        $movedIds = [];
+        $createdIds = [];
+        $cancelledCount = 0;
+
+        foreach ($clips as $clip) {
+            $alreadyAtTarget = $clip->socialPosts->firstWhere('social_account_id', $targetAccount->id);
+            $movable = $clip->socialPosts->whereNotIn('status', $nonTerminalStatuses);
+
+            if ($movable->isEmpty()) {
+                // Never scheduled anywhere (or every existing post there is
+                // already published/in-flight) — nothing to retarget, so create
+                // fresh, unless the destination is already covered.
+                if ($alreadyAtTarget) {
+                    continue;
+                }
+
+                $post = SocialPost::create([
+                    'clip_id' => $clip->id,
+                    'social_account_id' => $targetAccount->id,
+                    'platform' => $targetAccount->platform,
+                    'title' => $clip->title,
+                    'caption' => $clip->caption,
+                    'hashtags' => $clip->hashtags,
+                    'status' => SocialPost::STATUS_SCHEDULED,
+                ]);
+                $createdIds[] = $post->id;
+
+                continue;
+            }
+
+            foreach ($movable as $post) {
+                if ($post->social_account_id === $targetAccount->id) {
+                    continue;
+                }
+
+                $duplicate = $clip->socialPosts->contains(
+                    fn ($p) => $p->social_account_id === $targetAccount->id && $p->id !== $post->id
+                );
+                if ($duplicate) {
+                    $post->update(['status' => SocialPost::STATUS_CANCELLED]);
+                    $cancelledCount++;
+
+                    continue;
+                }
+
+                $post->update(['social_account_id' => $targetAccount->id, 'platform' => $targetAccount->platform]);
+                $movedIds[] = $post->id;
+            }
+        }
+
+        $toReschedule = SocialPost::whereIn('id', array_merge($movedIds, $createdIds))->get();
+        if ($toReschedule->isNotEmpty()) {
+            $scheduler->rescheduleBulk($toReschedule);
+        }
+
+        $total = count($movedIds) + count($createdIds);
+
+        return response()->json([
+            'message' => "Moved/scheduled {$total} clip(s) to {$targetAccount->account_name}."
+                .($cancelledCount ? " ({$cancelledCount} duplicate(s) cancelled.)" : ''),
+            'moved_count' => count($movedIds),
+            'created_count' => count($createdIds),
+            'cancelled_count' => $cancelledCount,
+        ]);
+    }
+
     /**
      * AI-generated per-platform title/caption/description/hashtags/CTA suggestions.
      */
@@ -512,6 +764,88 @@ class ClipController extends Controller
         RenderClipJob::dispatch($clip->id);
 
         return ClipResource::make($clip);
+    }
+
+    /**
+     * Same as regenerate() above, for several clips at once — re-renders don't
+     * touch any field values, just re-queue RenderClipJob, so unlike
+     * bulkGenerateCover() below there's nothing to skip: every owned clip in
+     * the request is eligible regardless of its current status.
+     */
+    public function bulkRegenerate(Request $request)
+    {
+        $data = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1'],
+            'clip_ids.*' => ['integer', 'exists:clips,id'],
+        ]);
+
+        $clips = Clip::whereIn('id', $data['clip_ids'])
+            ->whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        foreach ($clips as $clip) {
+            $clip->update(['status' => Clip::STATUS_QUEUED, 'progress' => 0, 'failure_reason' => null]);
+            RenderClipJob::dispatch($clip->id);
+        }
+
+        return response()->json([
+            'message' => "Queued {$clips->count()} clip(s) for regeneration.",
+            'regenerated_count' => $clips->count(),
+            'skipped_count' => count($data['clip_ids']) - $clips->count(),
+        ]);
+    }
+
+    /**
+     * Same as generateCover() above, for several clips at once. Unlike the
+     * single-clip endpoint there's no per-request cover_template_id override —
+     * each clip regenerates with whatever template it already has, so a clip
+     * with no cover_template_id yet (never had a cover generated) is skipped
+     * rather than guessing one for it. Runs synchronously in a loop, same as
+     * the single-clip version (one ffmpeg still-frame pass each — fast), with
+     * a generous time limit for a large selection.
+     */
+    public function bulkGenerateCover(Request $request, CoverGeneratorService $covers)
+    {
+        set_time_limit(600);
+
+        $data = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1'],
+            'clip_ids.*' => ['integer', 'exists:clips,id'],
+        ]);
+
+        $clips = Clip::whereIn('id', $data['clip_ids'])
+            ->whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->with('clipCandidate')
+            ->get();
+
+        $regenerated = 0;
+        $skipped = 0;
+        foreach ($clips as $clip) {
+            $coverTemplate = $clip->cover_template_id ? CoverTemplate::find($clip->cover_template_id) : null;
+            if (! $coverTemplate) {
+                $skipped++;
+
+                continue;
+            }
+
+            try {
+                $relative = $covers->generate($clip, $coverTemplate, $clip->cover_text);
+                $clip->update(['cover_path' => $relative]);
+                $regenerated++;
+            } catch (\Throwable $e) {
+                Log::warning('Bulk cover regeneration failed for one clip', [
+                    'clip_id' => $clip->id, 'error' => $e->getMessage(),
+                ]);
+                $skipped++;
+            }
+        }
+
+        return response()->json([
+            'message' => "Regenerated {$regenerated} cover(s)."
+                .($skipped > 0 ? " Skipped {$skipped} (no cover template yet, or generation failed)." : ''),
+            'regenerated_count' => $regenerated,
+            'skipped_count' => $skipped,
+        ]);
     }
 
     /**

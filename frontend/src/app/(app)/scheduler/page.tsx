@@ -3,9 +3,10 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { mutate } from "swr";
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, CalendarClock, CalendarDays, ImageUp, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, BarChart3, CalendarClock, CalendarDays, ImageUp, LayoutList, Pencil, PlayCircle, Plus, RotateCcw, Shuffle, Trash2, Zap } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import { toast } from "@/store/toast";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -164,6 +165,24 @@ export default function SchedulerPage() {
     mutate(key);
   }
 
+  /**
+   * Pulls one post's numbers on demand instead of waiting for the hourly
+   * social:sync-metrics run — the "I just posted this, what's it doing?" case,
+   * which the tiered background sync deliberately doesn't chase.
+   */
+  async function handleSyncMetrics(postId: number) {
+    setBusyId(postId);
+    try {
+      await api.post(`/social-posts/${postId}/sync-metrics`);
+      refresh();
+      toast("Metrics diperbarui.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Gagal mengambil metrics.", "danger");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function handlePublishNow(postId: number) {
     setBusyId(postId);
     try {
@@ -305,6 +324,80 @@ export default function SchedulerPage() {
     setMoveChannelOpen(true);
   }
 
+  // Only posts a "Reupload Thumbnails" bulk action can actually do anything
+  // with — same eligibility as the single-row button (see the table's Actions
+  // column) — restricted to the current checkbox selection, unlike the other
+  // bulk actions above which fall back to "everything in view" when nothing's
+  // checked: reuploading a thumbnail is a narrow, deliberate cleanup action,
+  // not something you'd want to fire across an entire filtered view by accident.
+  const thumbnailReuploadIds = useMemo(
+    () =>
+      posts
+        .filter(
+          (p) => selectedIds.has(p.id) && p.platform === "youtube" && p.status === "published" && p.thumbnail_status !== "uploaded"
+        )
+        .map((p) => p.id),
+    [posts, selectedIds]
+  );
+
+  const [reuploadingBulk, setReuploadingBulk] = useState(false);
+
+  async function handleBulkRetryThumbnail() {
+    if (thumbnailReuploadIds.length === 0) return;
+    setReuploadingBulk(true);
+    try {
+      const res = await api.post<{ message: string; queued_count: number; skipped_count: number }>(
+        "/social-posts/bulk-retry-thumbnail",
+        { social_post_ids: thumbnailReuploadIds }
+      );
+      setSelectedIds(new Set());
+      refresh();
+      toast(res.message, "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reupload thumbnails.", "danger");
+    } finally {
+      setReuploadingBulk(false);
+    }
+  }
+
+  // Same "checkbox selection only, no filtered-view fallback" reasoning as
+  // thumbnailReuploadIds above — re-rendering a clip replaces its output, so
+  // it should only ever fire on posts someone deliberately picked, not
+  // whatever the active filters happen to be showing. Deduped: a clip
+  // published to several platforms has one SocialPost row per platform, all
+  // sharing the same clip_id — regenerating it once covers every one of them.
+  const regenerateClipIds = useMemo(
+    () => Array.from(new Set(posts.filter((p) => selectedIds.has(p.id)).map((p) => p.clip_id))),
+    [posts, selectedIds]
+  );
+
+  const [regeneratingClips, setRegeneratingClips] = useState(false);
+
+  async function handleBulkRegenerateClips() {
+    if (regenerateClipIds.length === 0) return;
+    if (
+      !confirm(
+        `Re-render ${regenerateClipIds.length} clip(s)? This replaces their current rendered output (so the cover shows in the opening frames — see YouTube Shorts thumbnail workaround).`
+      )
+    ) {
+      return;
+    }
+    setRegeneratingClips(true);
+    try {
+      const res = await api.post<{ message: string; regenerated_count: number; skipped_count: number }>(
+        "/clips/bulk-regenerate",
+        { clip_ids: regenerateClipIds }
+      );
+      setSelectedIds(new Set());
+      refresh();
+      toast(res.message, "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to regenerate clips.", "danger");
+    } finally {
+      setRegeneratingClips(false);
+    }
+  }
+
   function toggleSelected(id: number) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -396,6 +489,18 @@ export default function SchedulerPage() {
             <Button variant="danger" onClick={handleBulkDelete} loading={deletingBulk}>
               <Trash2 className="size-4" />
               {selectedIds.size > 0 ? `Delete ${selectedIds.size}` : "Delete All Visible"}
+            </Button>
+          )}
+          {thumbnailReuploadIds.length > 0 && (
+            <Button variant="outline" onClick={handleBulkRetryThumbnail} loading={reuploadingBulk}>
+              <ImageUp className="size-4" />
+              Reupload {thumbnailReuploadIds.length} Thumbnail{thumbnailReuploadIds.length > 1 ? "s" : ""}
+            </Button>
+          )}
+          {regenerateClipIds.length > 0 && (
+            <Button variant="outline" onClick={handleBulkRegenerateClips} loading={regeneratingClips}>
+              <RotateCcw className="size-4" />
+              Regenerate {regenerateClipIds.length} Clip{regenerateClipIds.length > 1 ? "s" : ""}
             </Button>
           )}
           <Button variant="outline" onClick={handleOpenMoveChannel}>
@@ -580,10 +685,23 @@ export default function SchedulerPage() {
             <tbody className="divide-y divide-border-subtle">
               {posts.map((post) => {
                 const locked = ["published", "uploading", "publishing"].includes(post.status);
+                // A published post can't be rescheduled/deleted/moved (that's
+                // what `locked` guards against for those bulk actions), but IS
+                // still selectable so it can be picked up by "Reupload
+                // Thumbnails" or "Regenerate Clips" above — both specifically
+                // target already-published posts (re-rendering is exactly how
+                // a published clip's cover gets fixed after the fact, and
+                // re-uploading a thumbnail only makes sense once something's
+                // actually live). Still-in-flight rows (uploading/publishing)
+                // stay unselectable — editing mid-publish is a different can
+                // of worms.
+                const canThumbnailReupload =
+                  post.platform === "youtube" && post.status === "published" && post.thumbnail_status !== "uploaded";
+                const canSelect = !locked || post.status === "published";
                 return (
                 <tr key={post.id} className="hover:bg-white/5">
                   <td className="px-4 py-3">
-                    {!locked && (
+                    {(canSelect || canThumbnailReupload) && (
                       <input
                         type="checkbox"
                         checked={selectedIds.has(post.id)}
@@ -635,6 +753,16 @@ export default function SchedulerPage() {
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={post.status} />
+                    {/* Published posts carry their platform numbers here so the
+                        scheduler answers "did it do anything?" without a trip to
+                        Analytics. Absent until the hourly social:sync-metrics run
+                        (or the refresh button in the actions column) has reached
+                        this post. */}
+                    {post.status === "published" && post.metrics && (
+                      <p className="mt-1 whitespace-nowrap text-[11px] text-muted">
+                        {formatCount(post.metrics.views ?? 0)} views · {formatCount(post.metrics.likes ?? 0)} likes
+                      </p>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-muted">
                     {post.scheduled_at
@@ -675,6 +803,17 @@ export default function SchedulerPage() {
                           className="rounded-lg p-1.5 text-muted hover:bg-white/5 hover:text-foreground cursor-pointer disabled:opacity-50"
                         >
                           <Zap className="size-3.5" />
+                        </button>
+                      )}
+                      {post.status === "published" && (
+                        <button
+                          onClick={() => handleSyncMetrics(post.id)}
+                          disabled={busyId === post.id}
+                          title="Refresh metrics"
+                          aria-label="Refresh metrics"
+                          className="rounded-lg p-1.5 text-muted hover:bg-white/5 hover:text-foreground cursor-pointer disabled:opacity-50"
+                        >
+                          <BarChart3 className="size-3.5" />
                         </button>
                       )}
                       {post.status === "failed" && (

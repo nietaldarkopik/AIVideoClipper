@@ -33,6 +33,10 @@ class ContentIdeaResource extends JsonResource
                 'freshness' => $this->freshness_score,
                 'engagement' => $this->engagement_score,
                 'cross_source' => $this->cross_source_score,
+                // Null when the owner had too little published history to judge —
+                // the UI hides the bar rather than drawing an empty one, since it
+                // means "unknown", not "scored zero".
+                'performance' => $this->performance_score,
                 'priority' => $this->priority_score,
             ],
             // Kept flat as well as nested: the list view sorts and filters on these two

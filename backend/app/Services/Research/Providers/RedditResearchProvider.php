@@ -5,18 +5,37 @@ namespace App\Services\Research\Providers;
 use App\Services\Research\DTOs\ResearchItem;
 use App\Services\Research\DTOs\ResearchQuery;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Cache;
+use RuntimeException;
 
 /**
- * Reddit's public read-only JSON endpoints (.json suffix) — no OAuth app needed,
- * which is why this is one of the sources that works with zero setup.
- *
  * Two modes, both driven by per-channel config: when subreddits are configured we
  * pull each one's hot/top listing (the "what is my community talking about" signal);
  * otherwise we fall back to site-wide keyword search.
+ *
+ * Also two TRANSPORTS, picked automatically:
+ *
+ * - No credentials -> the public read-only .json endpoints on www.reddit.com.
+ *   Zero setup, which is why this source worked out of the box.
+ * - REDDIT_CLIENT_ID/SECRET set -> OAuth against oauth.reddit.com.
+ *
+ * The second exists because Reddit blocks the public endpoints from datacenter and
+ * VPN IP ranges with a flat 403 that no User-Agent gets past, while its OAuth API
+ * answers normally from those same addresses. Proxying is not a workaround here:
+ * free proxy pools are datacenter IPs by definition and hit the identical block.
+ * Credentials are free — a "script" app at https://www.reddit.com/prefs/apps — and
+ * they also raise the rate limit from ~10 to 100 requests/minute.
+ *
+ * The two APIs return the same listing JSON, so only the base URL, the path suffix
+ * and the auth header differ; mapListing() is shared verbatim.
  */
 class RedditResearchProvider extends AbstractHttpResearchProvider
 {
     private const BASE = 'https://www.reddit.com';
+
+    private const OAUTH_BASE = 'https://oauth.reddit.com';
+
+    private const TOKEN_URL = 'https://www.reddit.com/api/v1/access_token';
 
     public function key(): string
     {
@@ -80,7 +99,7 @@ class RedditResearchProvider extends AbstractHttpResearchProvider
                 $params['t'] = (string) $query->option('time_filter', 'day');
             }
 
-            $payload = $this->getJson(self::BASE."/r/{$subreddit}/{$listing}.json", $params);
+            $payload = $this->fetch("/r/{$subreddit}/{$listing}", $params);
 
             foreach ($this->mapListing($payload, $query) as $item) {
                 $items[] = $item;
@@ -98,7 +117,7 @@ class RedditResearchProvider extends AbstractHttpResearchProvider
         $items = [];
 
         foreach ($query->primaryTerms(3) as $term) {
-            $payload = $this->getJson(self::BASE.'/search.json', [
+            $payload = $this->fetch('/search', [
                 'q' => $term,
                 'sort' => 'top',
                 // Reddit's search `t` is coarse (hour/day/week/...), so map the query's
@@ -115,6 +134,76 @@ class RedditResearchProvider extends AbstractHttpResearchProvider
         }
 
         return $items;
+    }
+
+    /**
+     * One listing fetch, over whichever transport is available. $path is given
+     * WITHOUT the `.json` suffix: the public API needs it, the OAuth API rejects
+     * it, so it is appended only on the branch that wants it.
+     *
+     * @param  array<string, mixed>  $params
+     * @return array<mixed>
+     */
+    private function fetch(string $path, array $params): array
+    {
+        $token = $this->accessToken();
+
+        if ($token === null) {
+            return $this->getJson(self::BASE.$path.'.json', $params);
+        }
+
+        return $this->getJson(
+            self::OAUTH_BASE.$path,
+            $params,
+            ['Authorization' => 'Bearer '.$token],
+        );
+    }
+
+    /**
+     * A client-credentials token, or null when no app is configured (the caller
+     * then falls back to the public endpoints).
+     *
+     * Cached just under the token's own lifetime so a research run reuses one
+     * token across every subreddit instead of authenticating per request. The
+     * 60-second haircut covers the gap between issuing and using it.
+     */
+    private function accessToken(): ?string
+    {
+        $clientId = config('research.providers.reddit.client_id');
+        $clientSecret = config('research.providers.reddit.client_secret');
+
+        if (! $clientId || ! $clientSecret) {
+            return null;
+        }
+
+        $cacheKey = 'research:reddit:token:'.md5((string) $clientId);
+        $cached = Cache::get($cacheKey);
+
+        if (is_string($cached) && $cached !== '') {
+            return $cached;
+        }
+
+        $response = $this->http()
+            ->withBasicAuth($clientId, $clientSecret)
+            ->asForm()
+            ->post(self::TOKEN_URL, ['grant_type' => 'client_credentials'])
+            ->json();
+
+        $token = $response['access_token'] ?? null;
+
+        if (! is_string($token) || $token === '') {
+            // Surfaced as a source failure the same way any other provider error is,
+            // rather than silently degrading to the public endpoints — which are
+            // exactly what the credentials were added to get away from.
+            throw new RuntimeException('Reddit menolak kredensial OAuth (periksa REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET).');
+        }
+
+        // Stored just under the token's stated lifetime, so a run reuses one token
+        // across every subreddit instead of authenticating per request. The
+        // 60-second haircut covers the gap between issuing and using it.
+        Cache::put($cacheKey, $token, max(60, (int) ($response['expires_in'] ?? 3600) - 60));
+
+        return $token;
     }
 
     /**

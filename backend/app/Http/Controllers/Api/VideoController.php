@@ -7,9 +7,11 @@ use App\Http\Resources\VideoResource;
 use App\Jobs\ImportVideoJob;
 use App\Models\Project;
 use App\Models\Video;
+use App\Services\Video\SubtitleService;
 use App\Services\Video\UrlVideoDownloader;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class VideoController extends Controller
@@ -58,6 +60,52 @@ class VideoController extends Controller
         $this->authorizeProject($request, $video->project);
 
         return VideoResource::make($video->load('transcript'));
+    }
+
+    /**
+     * The FULL source video's transcript (absolute source-video seconds, not
+     * clip-relative — see Clip::caption_cues for the per-clip, already-cut-and-
+     * retimed version of this used by the clip editor's own transcript panel).
+     * Segments are whatever AnalyzeVideoJob saved via the configured
+     * TranscriptionProvider — sentence-level {start, end, text, speaker?}.
+     */
+    public function transcript(Request $request, Video $video)
+    {
+        $this->authorizeProject($request, $video->project);
+        $video->loadMissing('transcript');
+
+        if (! $video->transcript) {
+            return response()->json(['message' => 'No transcript available for this video yet.'], 404);
+        }
+
+        return response()->json([
+            'language' => $video->transcript->language,
+            'segments' => $video->transcript->segments ?? [],
+        ]);
+    }
+
+    /**
+     * Same segments as transcript() above, rendered to a plain .srt file — there
+     * is no full-video .srt on disk anywhere (only per-clip ones, built from
+     * clip-relative cues at render time), so this renders one on the fly from
+     * the raw JSON segments rather than pointing at a stored file.
+     */
+    public function downloadTranscript(Request $request, Video $video, SubtitleService $subtitles)
+    {
+        $this->authorizeProject($request, $video->project);
+        $video->loadMissing('transcript');
+
+        if (! $video->transcript) {
+            return response()->json(['message' => 'No transcript available for this video yet.'], 404);
+        }
+
+        $srt = $subtitles->toSrt($video->transcript->segments ?? []);
+        $filename = Str::slug($video->title ?: "video-{$video->id}") ?: "video-{$video->id}";
+
+        return response($srt, 200, [
+            'Content-Type' => 'text/plain; charset=UTF-8',
+            'Content-Disposition' => "attachment; filename=\"{$filename}.srt\"",
+        ]);
     }
 
     private function authorizeProject(Request $request, Project $project): void

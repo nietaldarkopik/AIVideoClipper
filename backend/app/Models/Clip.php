@@ -65,6 +65,11 @@ class Clip extends Model
         return $this->belongsTo(Video::class);
     }
 
+    public function processingJobs(): HasMany
+    {
+        return $this->hasMany(ProcessingJob::class);
+    }
+
     public function clipCandidate(): BelongsTo
     {
         return $this->belongsTo(ClipCandidate::class);
@@ -106,6 +111,22 @@ class Clip extends Model
         }
 
         return AspectRatio::resolution($this->aspect_ratio);
+    }
+
+    /**
+     * The best available image to represent this clip visually (clip grid
+     * cards, video player poster, the clip preview embedded in a scheduled
+     * post, ...): the styled cover (CoverGeneratorService — has the headline
+     * text burned in) when one exists, otherwise the plain frame grab every
+     * rendered clip gets automatically. Distinct from `cover_path` itself,
+     * which stays null when there's no cover so the Cover tab can tell "never
+     * generated one" apart from "generated one" — use THIS accessor anywhere
+     * that just wants a thumbnail, and `cover_path` directly only where that
+     * cover/no-cover distinction actually matters.
+     */
+    public function displayThumbnailPath(): ?string
+    {
+        return $this->cover_path ?: $this->thumbnail_path;
     }
 
     public function subtitle(): HasOne

@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ChannelFormModal } from "@/components/research/ChannelFormModal";
+import { ChannelAvatar } from "@/components/research/ChannelAvatar";
 import { formatRelativeTime, formatUpcomingTime } from "@/lib/format";
 import type { ContentChannel } from "@/lib/types";
 
@@ -57,7 +58,8 @@ export default function ResearchChannelsPage() {
             <Link key={channel.id} href={`/research/channels/${channel.id}`}>
               <Card className="h-full p-4 transition-colors hover:border-accent/40">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  <ChannelAvatar channel={channel} className="size-9" />
+                  <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <h2 className="truncate text-sm font-semibold">{channel.name}</h2>
                       {!channel.is_active && <Badge tone="muted">nonaktif</Badge>}

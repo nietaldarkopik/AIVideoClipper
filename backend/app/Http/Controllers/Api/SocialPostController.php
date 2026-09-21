@@ -12,6 +12,7 @@ use App\Models\PublishingProfile;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
 use App\Services\Social\AutoPublishScheduler;
+use App\Services\Social\SocialMetricsSyncer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
@@ -372,6 +373,30 @@ class SocialPostController extends Controller
     }
 
     /**
+     * Pull this post's numbers from the platform right now, ignoring the
+     * staleness tiers the hourly `social:sync-metrics` run follows. Runs inline
+     * rather than queued so the caller can render the fresh numbers straight from
+     * the response — it's a single API call, and the alternative (queue it, then
+     * poll) is a lot of machinery for one button.
+     */
+    public function syncMetrics(Request $request, SocialPost $socialPost, SocialMetricsSyncer $syncer)
+    {
+        $this->authorizePost($request, $socialPost);
+
+        if ($socialPost->status !== SocialPost::STATUS_PUBLISHED || ! $socialPost->external_post_id) {
+            return response()->json(['message' => 'Only published posts have metrics to sync.'], 422);
+        }
+
+        if (! $syncer->syncOne($socialPost)) {
+            return response()->json([
+                'message' => 'Could not reach the platform for this post. Its account may need reconnecting.',
+            ], 502);
+        }
+
+        return SocialPostResource::make($socialPost->fresh()->load(['socialAccount', 'clip.project']));
+    }
+
+    /**
      * Override an auto-scheduled post's staggered delay and publish it right away —
      * the "publish now if you don't want to wait" escape hatch for auto-scheduled
      * (batch autobot or regular-project auto-publish) posts.
@@ -401,12 +426,66 @@ class SocialPostController extends Controller
     {
         $this->authorizePost($request, $socialPost);
 
+        $error = $this->queueThumbnailReupload($socialPost);
+        if ($error) {
+            return response()->json(['message' => $error], 422);
+        }
+
+        return SocialPostResource::make($socialPost->fresh());
+    }
+
+    /**
+     * Same as retryThumbnail() above, for several posts at once — e.g. after a
+     * batch of clips all failed to get their YouTube thumbnail confirmed.
+     * Ineligible posts (wrong platform, not published, no cover image
+     * available) are silently skipped rather than failing the whole batch,
+     * same convention as bulkDelete/bulkReschedule below.
+     */
+    public function bulkRetryThumbnail(Request $request)
+    {
+        $data = $request->validate([
+            'social_post_ids' => ['required', 'array', 'min:1'],
+            'social_post_ids.*' => ['integer', 'exists:social_posts,id'],
+        ]);
+
+        $posts = SocialPost::with('clip')
+            ->whereIn('id', $data['social_post_ids'])
+            ->whereHas('clip.project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->get();
+
+        $queued = 0;
+        $skipped = 0;
+        foreach ($posts as $post) {
+            if ($this->queueThumbnailReupload($post)) {
+                $skipped++;
+            } else {
+                $queued++;
+            }
+        }
+
+        return response()->json([
+            'message' => "Queued {$queued} thumbnail reupload(s)."
+                .($skipped > 0 ? " Skipped {$skipped} (not a published YouTube post, or no cover image available)." : ''),
+            'queued_count' => $queued,
+            'skipped_count' => $skipped,
+        ]);
+    }
+
+    /**
+     * Shared by retryThumbnail()/bulkRetryThumbnail() — resolves this post's
+     * cover image (same cover_path -> thumbnail_path -> intro_cover_path
+     * fallback chain PublishClipJob uses at publish time), creates the
+     * Processing-tab-tracked job, and dispatches the reapply. Returns an error
+     * message on failure (nothing dispatched), or null on success.
+     */
+    private function queueThumbnailReupload(SocialPost $socialPost): ?string
+    {
         if ($socialPost->platform !== 'youtube') {
-            return response()->json(['message' => 'Thumbnail reupload is only available for YouTube posts.'], 422);
+            return 'Thumbnail reupload is only available for YouTube posts.';
         }
 
         if ($socialPost->status !== SocialPost::STATUS_PUBLISHED || ! $socialPost->external_post_id) {
-            return response()->json(['message' => 'This post has not been published yet.'], 422);
+            return 'This post has not been published yet.';
         }
 
         $clip = $socialPost->clip;
@@ -422,7 +501,7 @@ class SocialPostController extends Controller
         }
 
         if (! $coverRelativePath) {
-            return response()->json(['message' => 'No cover image is available for this clip to upload.'], 422);
+            return 'No cover image is available for this clip to upload.';
         }
 
         $socialPost->update(['thumbnail_status' => SocialPost::THUMBNAIL_STATUS_PENDING, 'thumbnail_error' => null]);
@@ -437,7 +516,7 @@ class SocialPostController extends Controller
             'clip_id' => $clip->id,
             'type' => 'youtube_thumbnail',
             'status' => ProcessingJob::STATUS_QUEUED,
-            'message' => 'Reuploading YouTube thumbnail (manual retry)...',
+            'message' => 'Reuploading YouTube thumbnail...',
             'started_at' => now(),
         ]);
 
@@ -445,7 +524,7 @@ class SocialPostController extends Controller
             $socialPost->id, $coverRelativePath, $socialPost->external_post_id, 1, $processingJob->id
         );
 
-        return SocialPostResource::make($socialPost->fresh());
+        return null;
     }
 
     public function bulkDelete(Request $request)

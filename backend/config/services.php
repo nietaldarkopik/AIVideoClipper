@@ -23,6 +23,12 @@ return [
     // to have died with its worker process (crash, PC restart) and gets marked failed.
     'processing' => [
         'stall_minutes' => env('PROCESSING_JOB_STALL_MINUTES', 20),
+        // How late a scheduled post's slot must be before
+        // RepublishOverdueSocialPosts treats it as lost rather than merely about
+        // to fire — shorter than stall_minutes above since a missed delayed job
+        // is invisible the instant its slot passes, unlike a stalled ProcessingJob
+        // which has a "still legitimately running" window to wait out first.
+        'publish_grace_minutes' => env('PUBLISH_GRACE_MINUTES', 10),
     ],
 
     'google' => [
@@ -33,6 +39,18 @@ return [
         'client_id' => env('GOOGLE_CLIENT_ID'),
         'client_secret' => env('GOOGLE_CLIENT_SECRET'),
         'redirect_uri' => env('GOOGLE_REDIRECT_URI'),
+
+        // Auto re-apply after publish is OFF by default: YouTubeProvider already sets
+        // the cover as the thumbnail at the moment of upload (thumbnails.set right
+        // after the video finishes uploading), so the follow-up poll-and-reapply
+        // pass (ReapplyYoutubeThumbnailJob, dispatched from PublishClipJob) exists
+        // only to guard against YouTube's own processing pipeline silently resetting
+        // that thumbnail afterward — a quirk that in practice essentially never
+        // fires. The job class and its manual "reupload thumbnail" button
+        // (SocialPostController::retryThumbnail) are unaffected by this flag and
+        // still work either way; this only stops the automatic background pass
+        // PublishClipJob queues after every YouTube publish.
+        'auto_reapply_thumbnail' => (bool) env('YOUTUBE_AUTO_REAPPLY_THUMBNAIL', false),
     ],
 
     'tiktok' => [
@@ -67,6 +85,12 @@ return [
         'app_secret' => env('FACEBOOK_APP_SECRET'),
         'graph_version' => env('FACEBOOK_GRAPH_VERSION', 'v21.0'),
         'redirect_uri' => env('FACEBOOK_REDIRECT_URI'),
+        // Facebook Login for Business configuration (App Dashboard > Facebook
+        // Login > Configurations). When set, the OAuth dialog is driven by this
+        // config_id instead of a plain `scope` list — this is what actually lets
+        // the consent screen surface Pages owned by a Business Portfolio (plain
+        // scope-based login silently omits them even if the user manages them).
+        'login_config_id' => env('FACEBOOK_LOGIN_CONFIG_ID'),
     ],
 
     'instagram_automation' => [
@@ -176,7 +200,11 @@ return [
         // RenderClipJob::composeIntroOutro().
         'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
         'max_clips_per_video' => env('MAX_CLIPS_PER_VIDEO', 10),
-        'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 30),
+        // Upper bound each AI content-analysis provider is told to target when
+        // picking a candidate's start_time/end_time (see each provider's
+        // systemPrompt()), and the hard ceiling AnalyzeVideoJob::clampToMaxDuration()
+        // enforces afterward regardless of what the model actually returned.
+        'default_clip_duration' => env('DEFAULT_CLIP_DURATION', 45),
     ],
 
     'openai' => [
@@ -232,6 +260,16 @@ return [
         // NineRouterTextToSpeechProvider tries the next one whenever one is
         // rate-limited/over quota, only giving up once all of them have failed.
         'tts_model' => env('NINE_ROUTER_TTS_MODEL'),
+        // Separate model id for moment-detection/clip-scoring (still a plain chat
+        // completion, same endpoint as `model` above). Worth pinning to a named,
+        // capable model rather than an opaque auto-router/combo alias: a whole
+        // long transcript (hundreds of timestamped segments) goes into one
+        // prompt, and a weaker/inconsistent model is prone to writing a
+        // plausible-sounding hook_text/title for one moment while attaching the
+        // timestamp of a completely different one — the clip ends up with a
+        // title that doesn't match what's actually in it. Falls back to `model`
+        // when unset — see AIServiceProvider.
+        'analysis_model' => env('NINE_ROUTER_ANALYSIS_MODEL'),
         // Separate model id for reaction-script generation (still a plain chat
         // completion, same endpoint as `model` above) — lets it target a different
         // registered provider/credential (e.g. a Gemini entry) than clip scoring

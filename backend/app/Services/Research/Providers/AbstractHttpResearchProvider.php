@@ -97,7 +97,12 @@ abstract class AbstractHttpResearchProvider implements ResearchProvider
 
     protected function http(): PendingRequest
     {
+        $proxy = config('research.http.proxy');
+
         return Http::withHeaders(['User-Agent' => config('research.http.user_agent')])
+            // Only applied when configured — withOptions(['proxy' => null]) would
+            // still hand Guzzle the option and disable its env-based proxy detection.
+            ->when($proxy, fn (PendingRequest $request) => $request->withOptions(['proxy' => $proxy]))
             ->timeout((int) config('research.http.timeout', 20))
             ->retry(
                 (int) config('research.http.retries', 2) + 1,

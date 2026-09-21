@@ -59,6 +59,13 @@ class ReapplyYoutubeThumbnailJobTest extends TestCase
 
     public function test_a_successful_youtube_publish_with_a_cover_schedules_a_reapply_check(): void
     {
+        // The automatic pass is off by default now (see PublishClipJob) — the
+        // initial thumbnails.set below sticks in practice, making this background
+        // recheck redundant. This test verifies the feature still works end to end
+        // when explicitly re-enabled; the off-by-default behavior itself is
+        // covered separately below.
+        config(['services.google.auto_reapply_thumbnail' => true]);
+
         Bus::fake();
         Storage::fake('media');
         Storage::disk('media')->put('covers/x.jpg', 'fake-cover-bytes');
@@ -97,6 +104,55 @@ class ReapplyYoutubeThumbnailJobTest extends TestCase
                 && $job->videoId === 'VIDEO123'
                 && $job->attempt === 1;
         });
+    }
+
+    public function test_by_default_a_youtube_publish_does_not_schedule_a_reapply_check(): void
+    {
+        // No config() override here — this is the actual out-of-the-box default,
+        // set because the initial thumbnails.set at upload time (below) already
+        // sticks in practice, making the background recheck redundant.
+        Bus::fake();
+        Storage::fake('media');
+        // A real JPEG, not the plain 'fake-cover-bytes' text used elsewhere in this
+        // file for tests that don't care — YouTubeProvider checks the cover's MIME
+        // type before calling thumbnails/set at all, and this test needs that call
+        // to actually happen in order to prove it's unaffected by the flag below.
+        Storage::disk('media')->put('covers/x.jpg', base64_decode(
+            '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AKgH/9k='
+        ));
+        Storage::disk('media')->put('clips/x.mp4', 'fake-video-bytes');
+
+        $user = User::factory()->create();
+        $account = $user->socialAccounts()->create([
+            'platform' => 'youtube', 'account_name' => 'Test Channel', 'status' => SocialAccount::STATUS_CONNECTED,
+            'access_token' => 'fake-access-token', 'refresh_token' => 'fake-refresh-token', 'token_expires_at' => now()->addHour(),
+        ]);
+        $project = $user->projects()->create(['title' => 'P', 'status' => Project::STATUS_COMPLETED, 'last_edited_at' => now()]);
+        $video = $project->videos()->create(['source_type' => 'youtube', 'status' => 'ready', 'duration_seconds' => 20]);
+        $clip = Clip::create([
+            'project_id' => $project->id, 'video_id' => $video->id,
+            'start_time' => 0, 'end_time' => 20, 'duration' => 20,
+            'aspect_ratio' => '9:16', 'subtitle_language' => 'en',
+            'title' => 'Clip', 'status' => Clip::STATUS_COMPLETED, 'output_path' => 'clips/x.mp4',
+            'cover_path' => 'covers/x.jpg',
+        ]);
+        $post = SocialPost::create([
+            'clip_id' => $clip->id, 'social_account_id' => $account->id, 'platform' => 'youtube',
+            'status' => SocialPost::STATUS_UPLOADING, 'scheduled_at' => now(),
+        ]);
+
+        Http::fake([
+            '*/upload/youtube/v3/videos*' => Http::response('', 200, ['Location' => 'https://upload.example.com/session']),
+            'https://upload.example.com/session' => Http::response(['id' => 'VIDEO123']),
+            '*/upload/youtube/v3/thumbnails/set*' => Http::response([]),
+        ]);
+
+        (new PublishClipJob($post->id))->handle(app(\App\Services\Social\SocialProviderManager::class), app(\App\Services\Video\CoverGeneratorService::class));
+
+        // The publish itself (and its immediate thumbnails.set) is unaffected —
+        // only the follow-up background recheck is skipped.
+        Http::assertSent(fn (Request $request) => str_contains($request->url(), 'thumbnails/set'));
+        Bus::assertNotDispatched(ReapplyYoutubeThumbnailJob::class);
     }
 
     public function test_still_processing_reschedules_another_check_instead_of_setting_the_thumbnail(): void

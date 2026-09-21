@@ -18,9 +18,12 @@ class TopicScorer
 {
     /**
      * @param  ResearchTopic[]  $topics
+     * @param  array<string, float>|null  $performanceProfile  token => 0..1 strength from
+     *                                                         AudiencePerformanceProfile; null when the
+     *                                                         owner has too little measured history
      * @return ResearchTopic[] scored, ranked by priority descending
      */
-    public function score(array $topics, ContentChannel $channel): array
+    public function score(array $topics, ContentChannel $channel, ?array $performanceProfile = null): array
     {
         $keywordTokens = $this->channelTokens($channel);
         $saturation = max(1, (int) config('research.scoring.cross_source_saturation', 4));
@@ -32,6 +35,7 @@ class TopicScorer
             $topic->freshnessScore = $this->freshness($topic);
             $topic->engagementScore = $this->engagement($topic);
             $topic->trendScore = $this->trend($topic);
+            $topic->performanceScore = $this->performance($topic, $performanceProfile);
             // Originality is only knowable against the channel's existing ideas, which
             // is DuplicateDetector's job — it overwrites this before persistence. The
             // neutral 70 here keeps priority meaningful if a caller scores without
@@ -66,12 +70,20 @@ class TopicScorer
             'freshness' => $topic->freshnessScore,
             'engagement' => $topic->engagementScore,
             'cross_source' => $topic->crossSourceScore,
+            // Null when the owner has no measured publishing history — skipped
+            // below rather than scored 0, so a new channel's priorities come out
+            // exactly as they did before this component existed.
+            'performance' => $topic->performanceScore,
         ];
 
         $total = 0.0;
         $weightSum = 0.0;
 
         foreach ($components as $key => $value) {
+            if ($value === null) {
+                continue;
+            }
+
             $weight = (float) ($weights[$key] ?? 0);
             $total += $value * $weight;
             $weightSum += $weight;
@@ -104,6 +116,43 @@ class TopicScorer
         // Saturating at 4 matched keyword tokens: beyond that a topic is squarely in
         // the niche and extra matches say nothing more.
         return (int) round(min(1.0, $matched / 4) * 100);
+    }
+
+    /**
+     * How much this topic's vocabulary overlaps what has actually performed for
+     * the channel's owner (see AudiencePerformanceProfile).
+     *
+     * Null propagates deliberately: without a profile there is no evidence either
+     * way, and scoring that 0 would punish every topic equally while still
+     * consuming its weight — which reads as "nothing is promising" rather than
+     * "we don't know yet".
+     *
+     * @param  array<string, float>|null  $profile
+     */
+    private function performance(ResearchTopic $topic, ?array $profile): ?int
+    {
+        if ($profile === null || $topic->tokens === []) {
+            return null;
+        }
+
+        $matched = array_intersect_key($profile, array_flip($topic->tokens));
+
+        if ($matched === []) {
+            // A real "nothing in this topic resembles what worked" reading, which
+            // is information — unlike the null case above.
+            return 0;
+        }
+
+        // Averaging the top few matches rather than taking the single best: one
+        // incidental common word shared with a hit clip shouldn't score a topic as
+        // highly as one that overlaps substantially. Saturates at 3 — beyond that
+        // the topic is squarely in familiar territory and more matches say nothing
+        // extra, mirroring how relevance() saturates.
+        arsort($matched);
+        $best = array_slice($matched, 0, 3);
+        $strength = array_sum($best) / 3;
+
+        return (int) round(min(100, max(0, $strength * 100)));
     }
 
     private function freshness(ResearchTopic $topic): int

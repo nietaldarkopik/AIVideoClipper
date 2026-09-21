@@ -13,6 +13,8 @@ class ProjectResource extends JsonResource
             'id' => $this->id,
             'title' => $this->title,
             'description' => $this->description,
+            'origin_type' => $this->origin_type,
+            'origin_id' => $this->origin_id,
             'status' => $this->status,
             'failure_reason' => $this->failure_reason,
             'video' => VideoResource::make($this->whenLoaded('videos', fn () => $this->videos->last())),

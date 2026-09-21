@@ -1,15 +1,19 @@
 import type { Metadata } from "next";
+import { Header } from "@/components/layout/Header";
+import { Footer } from "@/components/layout/Footer";
 
 export const metadata: Metadata = {
-  title: "Terms of Service — ExistCode",
-  description: "The terms that govern your use of ExistCode.",
+  title: "Terms of Service — Existcode",
+  description: "The terms that govern your use of Existcode.",
 };
 
 const LAST_UPDATED = "September 5, 2026";
 
 export default function TermsOfServicePage() {
   return (
-    <div className="mx-auto max-w-3xl px-6 py-16">
+    <div className="flex min-h-screen flex-col bg-background">
+    <Header />
+    <div className="mx-auto w-full max-w-3xl flex-1 px-6 py-16">
       <h1 className="text-2xl font-semibold text-foreground">Terms of Service</h1>
       <p className="mt-2 text-sm text-muted">Last updated: {LAST_UPDATED}</p>
 
@@ -17,7 +21,7 @@ export default function TermsOfServicePage() {
         <section>
           <p>
             These Terms of Service (&quot;Terms&quot;) govern your access to and use of
-            ExistCode (&quot;the Service&quot;), a web application for creating short-form
+            Existcode (&quot;the Service&quot;), a web application for creating short-form
             video clips and publishing them to social platforms. By using the Service,
             you agree to these Terms.
           </p>
@@ -90,7 +94,7 @@ export default function TermsOfServicePage() {
         <section>
           <h2 className="text-base font-semibold text-foreground">7. Limitation of liability</h2>
           <p className="text-muted">
-            To the maximum extent permitted by law, ExistCode is not liable for
+            To the maximum extent permitted by law, Existcode is not liable for
             indirect, incidental, or consequential damages arising from your use of
             the Service, including actions taken by third-party platforms on content
             you publish through it.
@@ -116,6 +120,8 @@ export default function TermsOfServicePage() {
           </p>
         </section>
       </div>
+    </div>
+    <Footer />
     </div>
   );
 }

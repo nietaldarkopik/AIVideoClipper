@@ -9,6 +9,7 @@ use App\Models\VideoBatchItem;
 use App\Services\Social\SocialProviderManager;
 use App\Services\Video\CoverGeneratorService;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -21,14 +22,49 @@ use Throwable;
 /**
  * One job per (clip, social account) destination — a Facebook failure never blocks
  * the TikTok/Instagram/YouTube jobs for the same clip (spec: platforms fail independently).
+ *
+ * ShouldBeUnique (keyed on socialPostId): this post's status only advances away
+ * from STATUS_SCHEDULED partway through handle(), so two instances for the same
+ * post dispatched close together (the original delayed slot firing late, a
+ * manual "Publish Now", a reconciliation sweep like RepublishOverdueSocialPosts)
+ * can both still read status=scheduled and both proceed to actually call the
+ * platform's publish() — a real duplicate upload, not just a wasted retry. The
+ * status checks below are correct but not sufficient on their own once more than
+ * one worker can pull from the same queue at once.
  */
-class PublishClipJob implements ShouldQueue
+class PublishClipJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 4;
 
-    public function __construct(public int $socialPostId) {}
+    public function __construct(public int $socialPostId)
+    {
+        // On its own queue, not 'default': RenderClipJob (and the bulk
+        // re-renders ReapStuckClipRenders can dump onto 'default' after a queue
+        // outage — see today's incident) share 'default' with nothing else that
+        // publishes, so a render backlog can never again starve a scheduled
+        // publish behind it. The 'clipper: publish priority' worker in
+        // start-all.bat/.ps1 is what actually drains this queue — without it
+        // running, jobs here simply wait.
+        $this->onQueue('publish');
+    }
+
+    public function uniqueId(): string
+    {
+        return (string) $this->socialPostId;
+    }
+
+    /**
+     * Bounds how long the uniqueness lock can be held, in case the job dies in a
+     * way that never releases it (e.g. the worker process itself is killed mid
+     * upload) — long enough to cover a real video upload plus every backoff step
+     * below, so a legitimate retry is never the thing that gets locked out.
+     */
+    public function uniqueFor(): int
+    {
+        return 900;
+    }
 
     public function backoff(): array
     {
@@ -191,7 +227,21 @@ class PublishClipJob implements ShouldQueue
         // finishes. There's no webhook for that, so a follow-up job polls and
         // re-applies the thumbnail once the video is actually done — see
         // ReapplyYoutubeThumbnailJob and YouTubeProvider::reapplyThumbnail().
-        if ($post->platform === 'youtube' && $coverRelativePath && ($result['external_post_id'] ?? null)) {
+        //
+        // Off by default (services.google.auto_reapply_thumbnail): the
+        // thumbnails.set call made during publish() above already sticks in
+        // practice, so this background poll-and-reapply pass no longer runs
+        // unless explicitly turned back on (YOUTUBE_AUTO_REAPPLY_THUMBNAIL=true).
+        // The job class itself and the manual "reupload thumbnail" button
+        // (SocialPostController::retryThumbnail / queueThumbnailReupload) are
+        // untouched by this flag and still work regardless — this only stops the
+        // automatic pass queued after every YouTube publish.
+        if (
+            $post->platform === 'youtube'
+            && $coverRelativePath
+            && ($result['external_post_id'] ?? null)
+            && config('services.google.auto_reapply_thumbnail')
+        ) {
             $processingJob = ProcessingJob::create([
                 'project_id' => $post->clip->project_id,
                 'video_id' => $post->clip->video_id,

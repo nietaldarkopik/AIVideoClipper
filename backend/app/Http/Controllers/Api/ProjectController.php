@@ -36,11 +36,21 @@ class ProjectController extends Controller
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
+            // Optional provenance — see Project::ORIGINS. Callers that create a
+            // project from a brief, a trending item, or a research idea pass it so
+            // the clip's eventual performance can be traced back to the suggestion.
+            // A plain upload sends neither and stays null.
+            'origin_type' => ['nullable', 'string', Rule::in(Project::ORIGINS)],
+            'origin_id' => ['nullable', 'integer'],
         ]);
 
         $project = $request->user()->projects()->create([
             'title' => $data['title'],
             'description' => $data['description'] ?? null,
+            'origin_type' => $data['origin_type'] ?? null,
+            // Only meaningful alongside a type; an id on its own would point at
+            // nothing and quietly corrupt any later attribution query.
+            'origin_id' => isset($data['origin_type']) ? ($data['origin_id'] ?? null) : null,
             'status' => Project::STATUS_DRAFT,
             'last_edited_at' => now(),
         ]);

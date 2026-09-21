@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\Admin\AdminController;
 use App\Http\Controllers\Api\Admin\BackupController;
+use App\Http\Controllers\Api\AnalyticsController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChannelWatchController;
 use App\Http\Controllers\Api\ClipCandidateController;
@@ -9,6 +10,7 @@ use App\Http\Controllers\Api\ClipController;
 use App\Http\Controllers\Api\ContentBriefController;
 use App\Http\Controllers\Api\CoverTemplateController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\FacebookMessageController;
 use App\Http\Controllers\Api\MediaUploadController;
 use App\Http\Controllers\Api\ProcessingJobController;
 use App\Http\Controllers\Api\ProjectController;
@@ -53,6 +55,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/dashboard', [DashboardController::class, 'index']);
 
+    // Performance of already-published posts, read back from the metrics
+    // SocialMetricsSyncer writes (see the `social:sync-metrics` schedule).
+    Route::get('/analytics', [AnalyticsController::class, 'index']);
+
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::post('/projects', [ProjectController::class, 'store']);
     Route::get('/projects/{project}', [ProjectController::class, 'show']);
@@ -67,6 +73,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/projects/{project}/videos', [VideoController::class, 'store']);
 
     Route::get('/videos/{video}', [VideoController::class, 'show']);
+    Route::get('/videos/{video}/transcript', [VideoController::class, 'transcript']);
+    Route::get('/videos/{video}/transcript/download', [VideoController::class, 'downloadTranscript']);
 
     Route::get('/video-batches', [VideoBatchController::class, 'index']);
     Route::post('/video-batches', [VideoBatchController::class, 'store']);
@@ -90,8 +98,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/media-uploads', [MediaUploadController::class, 'destroy']);
 
     Route::get('/clips', [ClipController::class, 'index']);
-    // Must precede /clips/{clip} — otherwise "search" is swallowed as a {clip} id.
+    // Must precede /clips/{clip} — otherwise "search"/"source-channels" is
+    // swallowed as a {clip} id.
     Route::get('/clips/search', [ClipController::class, 'search']);
+    Route::get('/clips/source-channels', [ClipController::class, 'sourceChannels']);
     Route::get('/clips/{clip}', [ClipController::class, 'show']);
     Route::get('/clips/{clip}/preview-config', [ClipController::class, 'previewConfig']);
     Route::patch('/clips/{clip}', [ClipController::class, 'update']);
@@ -105,6 +115,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/clips/{clip}/generate-reaction-script', [ClipController::class, 'generateReactionScript']);
     Route::post('/clips/{clip}/generate-cover', [ClipController::class, 'generateCover']);
     Route::post('/clips/export-zip', [ClipController::class, 'exportZip']);
+    Route::post('/clips/bulk-regenerate', [ClipController::class, 'bulkRegenerate']);
+    Route::post('/clips/bulk-generate-cover', [ClipController::class, 'bulkGenerateCover']);
+    Route::post('/clips/bulk-delete', [ClipController::class, 'bulkDestroy']);
+    Route::post('/clips/bulk-move-channel', [ClipController::class, 'bulkMoveChannel']);
 
     Route::get('/template-categories', [TemplateCategoryController::class, 'index']);
     Route::get('/templates', [TemplateController::class, 'index']);
@@ -159,6 +173,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/social-accounts/{socialAccount}', [SocialAccountController::class, 'update']);
     Route::post('/social-accounts/{socialAccount}/refresh', [SocialAccountController::class, 'refresh']);
     Route::post('/social-accounts/{socialAccount}/disconnect', [SocialAccountController::class, 'disconnect']);
+    Route::post('/social-accounts/{socialAccount}/sync-messages', [FacebookMessageController::class, 'sync']);
+
+    Route::get('/facebook-messages', [FacebookMessageController::class, 'index']);
+    Route::post('/facebook-messages/{facebookMessage}/convert-to-idea', [FacebookMessageController::class, 'convertToIdea']);
+    Route::post('/facebook-messages/{facebookMessage}/ignore', [FacebookMessageController::class, 'ignore']);
 
     Route::apiResource('publishing-profiles', PublishingProfileController::class)->except(['show']);
 
@@ -171,7 +190,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/social-posts/{socialPost}', [SocialPostController::class, 'update']);
     Route::post('/social-posts/{socialPost}/regenerate-schedule', [SocialPostController::class, 'regenerateSchedule']);
     Route::post('/social-posts/{socialPost}/retry', [SocialPostController::class, 'retry']);
+    Route::post('/social-posts/{socialPost}/sync-metrics', [SocialPostController::class, 'syncMetrics']);
     Route::post('/social-posts/{socialPost}/retry-thumbnail', [SocialPostController::class, 'retryThumbnail']);
+    Route::post('/social-posts/bulk-retry-thumbnail', [SocialPostController::class, 'bulkRetryThumbnail']);
     Route::post('/social-posts/{socialPost}/publish-now', [SocialPostController::class, 'publishNow']);
     Route::delete('/social-posts/{socialPost}', [SocialPostController::class, 'destroy']);
 

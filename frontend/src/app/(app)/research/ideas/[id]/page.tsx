@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Check, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, FolderPlus, Trash2, X } from "lucide-react";
 import { useApi } from "@/lib/hooks";
 import { api, ApiError } from "@/lib/api";
 import { useToastStore } from "@/store/toast";
@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Textarea } from "@/components/ui/Input";
 import { PriorityPill, ScoreGrid } from "@/components/research/ScoreBar";
 import { SourceEvidence } from "@/components/research/SourceEvidence";
+import { NewProjectModal } from "@/components/projects/NewProjectModal";
 import { formatRelativeTime } from "@/lib/format";
 import type { ContentIdea } from "@/lib/types";
 
@@ -26,6 +27,7 @@ export default function ContentIdeaDetailPage() {
   const { data, isLoading, mutate } = useApi<{ data: ContentIdea }>(`/content-ideas/${id}`);
   const [busy, setBusy] = useState(false);
   const [notes, setNotes] = useState<string | null>(null);
+  const [creatingProject, setCreatingProject] = useState(false);
 
   async function act(action: "select" | "reject") {
     setBusy(true);
@@ -111,9 +113,18 @@ export default function ContentIdeaDetailPage() {
               </Button>
             )}
             {idea.status === "idea" && (
-              <Button onClick={() => act("select")} loading={busy}>
+              <Button variant="secondary" onClick={() => act("select")} loading={busy}>
                 <Check className="size-4" />
                 Pilih Ide Ini
+              </Button>
+            )}
+            {/* The step that was missing entirely: until now an idea could only be
+                marked "selected" and went nowhere. Creating the project from here
+                is also what records the attribution the research scorer needs. */}
+            {idea.status !== "rejected" && (
+              <Button onClick={() => setCreatingProject(true)}>
+                <FolderPlus className="size-4" />
+                Buat Project
               </Button>
             )}
           </div>
@@ -222,6 +233,16 @@ export default function ContentIdeaDetailPage() {
           </Button>
         </div>
       </div>
+
+      {/* Reuses the normal project modal (upload or URL) rather than guessing
+          which of the idea's sources is an importable video — several sources are
+          articles, not clips. The origin is what makes the resulting project
+          traceable back to this idea. */}
+      <NewProjectModal
+        open={creatingProject}
+        onClose={() => setCreatingProject(false)}
+        origin={{ type: "content_idea", id: idea.id }}
+      />
     </div>
   );
 }

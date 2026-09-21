@@ -13,6 +13,7 @@ class ClipResource extends JsonResource
         return [
             'id' => $this->id,
             'project_id' => $this->project_id,
+            'project_title' => $this->whenLoaded('project', fn () => $this->project?->title),
             'video_id' => $this->video_id,
             'clip_candidate_id' => $this->clip_candidate_id,
             'template' => TemplateResource::make($this->whenLoaded('template')),
@@ -46,10 +47,42 @@ class ClipResource extends JsonResource
             'intro_voice' => $this->intro_voice,
             'reference_url' => $this->reference_url,
             'status' => $this->status,
+            // Actually posted to at least one platform — set via ->withExists() in
+            // ClipController::index(); falls back to a live query (e.g. ClipController::
+            // show()/update() don't attach it) so this is never silently wrong, just
+            // occasionally an extra query.
+            'is_published' => $this->is_published ?? $this->socialPosts()->where('status', 'published')->exists(),
+            'video_title' => $this->whenLoaded('video', fn () => $this->video?->title),
+            // Free-text uploader/channel name captured at import time — see the
+            // `source_channel` filter in ClipController::index() for why this
+            // isn't a foreign key.
+            'source_channel' => $this->whenLoaded('video', fn () => $this->video?->channelName()),
+            'published_platforms' => $this->whenLoaded('socialPosts', fn () => $this->socialPosts
+                ->where('status', 'published')->pluck('platform')->unique()->values()),
+            // One entry per published/scheduled post — the specific YouTube channel /
+            // Facebook Page / etc a clip went (or will go) to, not just the platform
+            // name (a user can have several connected accounts on the same platform).
+            'published_targets' => $this->whenLoaded('socialPosts', fn () => $this->socialPosts
+                ->where('status', 'published')
+                ->map(fn ($post) => [
+                    'social_account_id' => $post->social_account_id,
+                    'platform' => $post->platform,
+                    'account_name' => $post->socialAccount?->account_name,
+                ])->values()),
+            'scheduled_targets' => $this->whenLoaded('socialPosts', fn () => $this->socialPosts
+                ->where('status', 'scheduled')
+                ->map(fn ($post) => [
+                    'social_account_id' => $post->social_account_id,
+                    'platform' => $post->platform,
+                    'account_name' => $post->socialAccount?->account_name,
+                ])->values()),
             'progress' => $this->progress,
             'failure_reason' => $this->failure_reason,
             'url' => Media::url($this->output_path),
-            'thumbnail_url' => Media::url($this->thumbnail_path),
+            // Cover-first, raw-frame fallback — see Clip::displayThumbnailPath().
+            // `cover_url` below stays the raw cover_path (nullable) for the Cover
+            // tab, which needs to know whether one actually exists.
+            'thumbnail_url' => Media::url($this->displayThumbnailPath()),
             'cover_template_id' => $this->cover_template_id,
             'cover_template' => CoverTemplateResource::make($this->whenLoaded('coverTemplate')),
             'cover_text' => $this->cover_text,

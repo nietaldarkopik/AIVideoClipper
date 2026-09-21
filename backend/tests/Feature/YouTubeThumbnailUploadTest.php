@@ -68,7 +68,7 @@ class YouTubeThumbnailUploadTest extends TestCase
             '*/upload/youtube/v3/thumbnails/set*' => Http::response(['items' => [['default' => ['url' => 'https://img.example/x.jpg']]]]),
         ]);
 
-        $result = (new YouTubeProvider)->publish($post, $videoFilePath, $coverPath);
+        $result = app(YouTubeProvider::class)->publish($post, $videoFilePath, $coverPath);
 
         $this->assertTrue($result['success']);
 
@@ -128,7 +128,7 @@ class YouTubeThumbnailUploadTest extends TestCase
             '*/upload/youtube/v3/thumbnails/set*' => Http::response(['error' => ['message' => 'channel not verified']], 403),
         ]);
 
-        $result = (new YouTubeProvider)->publish($post, $videoFilePath, $coverPath);
+        $result = app(YouTubeProvider::class)->publish($post, $videoFilePath, $coverPath);
 
         // A thumbnail failure (e.g. an unverified channel, still a real possible
         // cause) must never sink the whole publish — the video itself already

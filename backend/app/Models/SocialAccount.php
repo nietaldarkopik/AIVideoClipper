@@ -23,7 +23,7 @@ class SocialAccount extends Model
         'user_id', 'platform', 'account_name', 'username', 'avatar_url',
         'external_account_id', 'status', 'access_token', 'refresh_token',
         'token_expires_at', 'permissions', 'auto_publish_enabled', 'last_synced_at',
-        'default_cover_template_id',
+        'default_cover_template_id', 'messenger_sync_enabled', 'messenger_last_synced_at',
     ];
 
     protected $casts = [
@@ -33,6 +33,8 @@ class SocialAccount extends Model
         'token_expires_at' => 'datetime',
         'last_synced_at' => 'datetime',
         'auto_publish_enabled' => 'boolean',
+        'messenger_sync_enabled' => 'boolean',
+        'messenger_last_synced_at' => 'datetime',
     ];
 
     protected $hidden = ['access_token', 'refresh_token'];
@@ -50,5 +52,10 @@ class SocialAccount extends Model
     public function defaultCoverTemplate(): BelongsTo
     {
         return $this->belongsTo(CoverTemplate::class, 'default_cover_template_id');
+    }
+
+    public function facebookMessages(): HasMany
+    {
+        return $this->hasMany(FacebookMessage::class);
     }
 }

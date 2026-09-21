@@ -15,9 +15,13 @@ import {
   Scissors,
   Wand2,
   RotateCcw,
+  RefreshCw,
+  FileText,
+  Download,
 } from "lucide-react";
 import { useApi } from "@/lib/hooks";
-import { api, ApiError } from "@/lib/api";
+import { api, apiOrigin, ApiError } from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
 import { toast } from "@/store/toast";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
@@ -26,6 +30,7 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { VideoPlayer } from "@/components/projects/VideoPlayer";
+import { TranscriptPanel } from "@/components/clips/TranscriptPanel";
 import { ProcessingStatus } from "@/components/projects/ProcessingStatus";
 import { ScheduledPublishing } from "@/components/projects/ScheduledPublishing";
 import { CandidateCard } from "@/components/projects/CandidateCard";
@@ -53,6 +58,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
   const [reactingCandidate, setReactingCandidate] = useState<ClipCandidate | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [videoTime, setVideoTime] = useState(0);
+  const [downloadingTranscript, setDownloadingTranscript] = useState(false);
 
   const { data: projectRes, isLoading } = useApi<{ data: Project }>(`/projects/${projectId}`, {
     refreshInterval: (latest) =>
@@ -63,6 +71,38 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
   const canAnalyze = project?.video?.status === "ready" && (project?.clip_candidates_count ?? 0) === 0;
   const hasCandidates = (project?.clip_candidates_count ?? 0) > 0;
+  // The complement of canAnalyze: once candidates already exist, "Analyze Video"
+  // never reappears on its own — this is the only way back to it short of the
+  // "Reprocess" recovery action, which only runs for a project that's FAILED.
+  const canReanalyze = project?.video?.status === "ready" && hasCandidates && !active;
+
+  const videoId = project?.video?.id;
+  const { data: transcriptRes } = useApi<{ language: string; segments: { start: number; end: number; text: string }[] }>(
+    showTranscript && videoId ? `/videos/${videoId}/transcript` : null
+  );
+
+  async function handleDownloadTranscript() {
+    if (!videoId) return;
+    setDownloadingTranscript(true);
+    try {
+      const token = useAuthStore.getState().token;
+      const res = await fetch(`${apiOrigin()}/api/videos/${videoId}/transcript/download`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Download failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${project?.title ?? "transcript"}.srt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast("Failed to download transcript.", "danger");
+    } finally {
+      setDownloadingTranscript(false);
+    }
+  }
 
   const { data: candidatesRes } = useApi<{ data: ClipCandidate[] }>(
     hasCandidates ? `/projects/${projectId}/clip-candidates` : null
@@ -83,6 +123,33 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       toast("Analysis started.", "success");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to start analysis.", "danger");
+    }
+  }
+
+  /**
+   * Hits the same /analyze endpoint as a first-time analysis — the backend
+   * doesn't distinguish "first pass" from "redo": AnalyzeVideoJob deletes this
+   * video's existing ClipCandidate rows before creating fresh ones. Already
+   * generated clips are unaffected (clips.clip_candidate_id is nullOnDelete,
+   * not cascadeOnDelete), so this only replaces the AI's suggestions, never
+   * anything already rendered.
+   */
+  async function handleReanalyze() {
+    if (
+      !confirm(
+        "Re-analyze this video? Current clip suggestions will be replaced with a fresh set. Clips you've already generated are not affected."
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await api.post(`/projects/${projectId}/analyze`);
+      await mutate(`/projects/${projectId}`);
+      await mutate(`/projects/${projectId}/clip-candidates`);
+      toast("Re-analysis started.", "success");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to start re-analysis.", "danger");
     }
   }
 
@@ -164,6 +231,12 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 Analyze Video
               </Button>
             )}
+            {canReanalyze && (
+              <Button variant="secondary" onClick={handleReanalyze}>
+                <RefreshCw className="size-4" />
+                Re-analyze
+              </Button>
+            )}
             {hasCandidates && (
               <Button
                 variant="secondary"
@@ -202,16 +275,57 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-        <div className="lg:col-span-3">
+        <div className="lg:col-span-3 space-y-3">
           <div className="aspect-video">
             {project.video?.url ? (
-              <VideoPlayer ref={videoRef} src={project.video.url} poster={project.video.thumbnail_url} />
+              <VideoPlayer
+                ref={videoRef}
+                src={project.video.url}
+                poster={project.video.thumbnail_url}
+                onTimeUpdate={setVideoTime}
+              />
             ) : (
               <div className="flex h-full items-center justify-center rounded-2xl bg-surface-elevated">
                 <Skeleton className="h-full w-full" />
               </div>
             )}
           </div>
+
+          {project.video?.has_transcript && (
+            <>
+              <Button variant={showTranscript ? "secondary" : "outline"} size="sm" onClick={() => setShowTranscript((v) => !v)}>
+                <FileText className="size-3.5" />
+                Transcript
+              </Button>
+
+              {showTranscript && (
+                <TranscriptPanel
+                  lines={transcriptRes?.segments ?? []}
+                  time={videoTime}
+                  emptyLabel={transcriptRes ? "No transcript segments available." : "Loading transcript..."}
+                  onSeek={(t) => {
+                    setVideoTime(t);
+                    if (videoRef.current) {
+                      videoRef.current.currentTime = t;
+                      void videoRef.current.play();
+                    }
+                  }}
+                  downloadAction={
+                    <button
+                      type="button"
+                      onClick={handleDownloadTranscript}
+                      disabled={downloadingTranscript}
+                      title="Download full transcript (.srt)"
+                      className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-muted hover:bg-white/5 hover:text-foreground disabled:opacity-50 cursor-pointer"
+                    >
+                      <Download className="size-3.5" />
+                      .srt
+                    </button>
+                  }
+                />
+              )}
+            </>
+          )}
         </div>
 
         <Card className="lg:col-span-2 p-5">

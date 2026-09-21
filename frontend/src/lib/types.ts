@@ -45,10 +45,16 @@ export interface Video {
   updated_at: string;
 }
 
+/** Mirrors Project::ORIGINS on the backend. */
+export type ProjectOrigin = "content_idea" | "content_brief" | "trending";
+
 export interface Project {
   id: number;
   title: string;
   description: string | null;
+  /** What suggested this project, when it wasn't a plain upload. */
+  origin_type: ProjectOrigin | null;
+  origin_id: number | null;
   status: ProjectStatus;
   failure_reason: string | null;
   video: Video | null;
@@ -169,6 +175,7 @@ export interface SubtitleCue {
 export interface Clip {
   id: number;
   project_id: number;
+  project_title?: string | null;
   video_id: number;
   clip_candidate_id: number | null;
   template: Template | null;
@@ -214,6 +221,12 @@ export interface Clip {
   intro_voice: string | null;
   reference_url: string | null;
   status: ClipStatus;
+  is_published: boolean;
+  video_title: string | null;
+  source_channel: string | null;
+  published_platforms: string[];
+  published_targets: { social_account_id: number; platform: string; account_name: string | null }[];
+  scheduled_targets: { social_account_id: number; platform: string; account_name: string | null }[];
   progress: number | null;
   failure_reason: string | null;
   url: string | null;
@@ -592,7 +605,21 @@ export interface SocialAccount {
   auto_publish_enabled: boolean;
   default_cover_template_id: number | null;
   default_cover_template: CoverTemplate | null;
+  messenger_sync_enabled: boolean;
+  messenger_last_synced_at: string | null;
   last_synced_at: string | null;
+  created_at: string;
+}
+
+export interface FacebookMessage {
+  id: number;
+  social_account_id: number;
+  page_name: string | null;
+  sender_name: string | null;
+  message: string | null;
+  sent_at: string | null;
+  status: "new" | "ignored" | "converted";
+  content_idea_id: number | null;
   created_at: string;
 }
 
@@ -642,6 +669,64 @@ export interface SocialPost {
   metrics: Record<string, number> | null;
   metrics_synced_at: string | null;
   created_at: string;
+}
+
+/**
+ * Shape returned by GET /analytics. `metrics` values come straight from each
+ * platform, so a key a platform doesn't report (YouTube has no shares, only the
+ * mock providers fill watch_time) arrives as 0 rather than being absent.
+ */
+export interface AnalyticsTotals {
+  posts: number;
+  views: number;
+  likes: number;
+  comments: number;
+  shares: number;
+  saves: number;
+  engagement_rate: number;
+}
+
+export interface AnalyticsPlatformRow {
+  platform: SocialPlatform;
+  posts: number;
+  views: number;
+  likes: number;
+  comments: number;
+  shares: number;
+  saves: number;
+  avg_views: number;
+}
+
+export interface AnalyticsTopPost {
+  id: number;
+  clip_id: number;
+  title: string | null;
+  thumbnail_url: string | null;
+  platform: SocialPlatform;
+  account_name: string | null;
+  post_url: string | null;
+  published_at: string | null;
+  metrics: Record<string, number> | null;
+}
+
+/**
+ * Views/likes GAINED that day, differenced from the daily snapshots — not the
+ * platforms' running totals. See AnalyticsController::timeseries for why.
+ */
+export interface AnalyticsTimeseriesPoint {
+  date: string;
+  views: number;
+  likes: number;
+}
+
+export interface AnalyticsResponse {
+  range_days: number;
+  totals: AnalyticsTotals;
+  by_platform: AnalyticsPlatformRow[];
+  top_posts: AnalyticsTopPost[];
+  timeseries: AnalyticsTimeseriesPoint[];
+  last_synced_at: string | null;
+  awaiting_first_sync: number;
 }
 
 export interface ProcessingJob {
@@ -948,6 +1033,8 @@ export interface ContentChannel {
   id: number;
   name: string;
   handle: string | null;
+  /** The channel's logo on its platform — a remote CDN URL, as on SocialAccount. */
+  avatar_url: string | null;
   description: string | null;
   language: string;
   timezone: string;
@@ -1083,6 +1170,12 @@ export interface ContentIdea {
     freshness: number;
     engagement: number;
     cross_source: number;
+    /**
+     * How much this topic resembles the owner's best-performing published clips.
+     * Null means there wasn't enough measured history to judge — not a zero — and
+     * the bar is hidden rather than drawn empty.
+     */
+    performance: number | null;
     priority: number;
   };
   priority_score: number;

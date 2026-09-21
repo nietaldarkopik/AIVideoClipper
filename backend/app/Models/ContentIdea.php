@@ -42,7 +42,7 @@ class ContentIdea extends Model
         'topic', 'title', 'alternative_titles', 'short_description', 'content_angle',
         'why_this_topic', 'target_audience', 'keywords', 'source_summary',
         'trend_score', 'relevance_score', 'originality_score', 'freshness_score',
-        'engagement_score', 'cross_source_score', 'priority_score',
+        'engagement_score', 'cross_source_score', 'performance_score', 'priority_score',
         'suggested_content_type', 'suggested_format', 'status', 'notes', 'fingerprint', 'selected_at',
     ];
 
