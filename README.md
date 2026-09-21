@@ -45,6 +45,41 @@ Open http://localhost:3000 (API on :8000). The seeder creates `admin@clipper.tes
   *browser* uses for the API. Change it and run `docker compose up -d --build frontend`.
 - After changing PHP code, rebuild: `docker compose up -d --build`. Workers cache config at start.
 - Other provider/OAuth keys: copy the lines you need from `backend/.env.example` into `.env`.
+- Port already taken (e.g. Portainer uses :8000)? Set `API_PORT=8100` and
+  `NEXT_PUBLIC_API_URL=http://localhost:8100/api` (and `APP_URL=http://localhost:8100`) in `.env`,
+  then `docker compose up -d --build`. `FRONTEND_PORT` works the same for :3000.
+
+### Media access (signed URLs)
+
+`/api/media/{path}` serves videos, clips, thumbnails and uploads to `<video>`/`<img>`/`<audio>`
+tags, which can't send a bearer token. Every URL therefore carries an expiring HMAC signature
+(`?expires=…&signature=…`) and the route answers **403** without a valid one.
+
+- The API returns already-signed URLs (`url`, `thumbnail_url`, `srt_url`, …). Don't build
+  `/api/media/...` URLs by hand; to sign a path the client holds (a layer's `image_path`, a
+  waveform), call `POST /api/media/sign` with `{"paths": [...]}` — it only signs paths the caller
+  owns (`null` otherwise). In the frontend use `useMediaUrl` / `SignedImg` / `SignedAudio`
+  from `src/lib/media.tsx`.
+- Signatures are keyed on `APP_KEY`, so rotating it invalidates outstanding links (a page reload
+  fetches new ones). Lifetime: `MEDIA_URL_TTL` seconds (default `86400`), set in `.env`.
+- Adding a new folder on the media disk? Add its prefix to `App\Support\MediaAccess`, or the sign
+  endpoint will refuse it.
+
+### Running the backend tests
+
+The backend image is built without dev dependencies and the host may have no PHP, so run PHPUnit
+in a throwaway container (from the repo root, after `docker compose build api`):
+
+```bash
+docker run --rm --entrypoint bash -v "$PWD/backend":/src:ro -e HOME=/tmp -e COMPOSER_HOME=/tmp/c \
+  aivideoclipper-api -c '
+    mkdir /tmp/t && cd /src && tar --exclude=./vendor --exclude=./storage/app -cf - . | tar -xf - -C /tmp/t
+    cd /tmp/t && rm -f bootstrap/cache/*.php && mkdir -p storage/framework/{cache,sessions,views} storage/logs
+    export APP_KEY=base64:$(openssl rand -base64 32) APP_ENV=testing
+    composer install --no-interaction --no-scripts -q && vendor/bin/phpunit'
+```
+
+Add `--filter=MediaSigningTest` to `phpunit` to run a single class.
 
 ## Running it
 

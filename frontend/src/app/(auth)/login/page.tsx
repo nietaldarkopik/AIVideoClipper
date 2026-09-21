@@ -24,12 +24,13 @@ function LoginPageInner() {
 
   // Lands here after a "Continue with TikTok" round trip
   // (AuthController::tiktokCallback always redirects back with
-  // ?tiktok_token=<sanctum token> or ?error=<message>).
+  // ?tiktok_code=<one-time code> or ?error=<message>). The code is only good
+  // together with the nonce TikTokLoginButton stored in sessionStorage.
   useEffect(() => {
-    const tiktokToken = searchParams.get("tiktok_token");
+    const tiktokCode = searchParams.get("tiktok_code");
     const oauthError = searchParams.get("error");
 
-    if (!tiktokToken && !oauthError) return;
+    if (!tiktokCode && !oauthError) return;
 
     if (oauthError) {
       toast(oauthError, "danger");
@@ -40,13 +41,14 @@ function LoginPageInner() {
     setResumingTikTok(true);
     (async () => {
       try {
-        // AuthController::me() returns UserResource as the top-level response,
-        // which Laravel auto-wraps in { data: ... } — unlike /auth/login and
-        // /auth/register, which nest it manually under "user" (unwrapped).
-        const { data: user } = await api.get<{ data: User }>("/auth/me", {
-          headers: { Authorization: `Bearer ${tiktokToken}` },
-        });
-        setAuth(tiktokToken!, user);
+        const nonce = sessionStorage.getItem("tiktok_login_nonce") ?? "";
+        sessionStorage.removeItem("tiktok_login_nonce");
+        const res = await api.post<{ user: User; token: string }>(
+          "/auth/tiktok/exchange",
+          { code: tiktokCode, nonce },
+          { skipAuth: true }
+        );
+        setAuth(res.token, res.user);
         router.push("/dashboard");
       } catch (err) {
         toast(err instanceof ApiError ? err.message : "TikTok login failed.", "danger");

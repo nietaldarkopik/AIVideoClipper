@@ -1,7 +1,7 @@
 "use client";
 
 import { useApi } from "@/lib/hooks";
-import { mediaUrl } from "@/lib/api";
+import { SignedImg } from "@/lib/media";
 import { newLayer } from "@/lib/layers";
 import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
 import { ArrowLeft } from "lucide-react";
@@ -111,7 +111,7 @@ export function StickerPanel({
           <h4 className="mb-2 text-xs font-semibold text-muted">On this clip</h4>
           <div className="grid grid-cols-5 gap-1.5">
             {placed.map((layer) => {
-              const src = mediaUrl((layer.props as ImageLayerProps)?.image_path);
+              const src = (layer.props as ImageLayerProps)?.image_path;
               return (
                 <button
                   key={layer.id}
@@ -121,10 +121,8 @@ export function StickerPanel({
                   className="cursor-pointer rounded-lg border border-border-subtle bg-black/20 p-1.5 hover:border-accent"
                 >
                   {src ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={src}
-                      alt=""
+                    <SignedImg
+                      path={src}
                       className="aspect-square w-full object-contain"
                       style={{ transform: layer.rotation ? `rotate(${layer.rotation}deg)` : undefined }}
                     />

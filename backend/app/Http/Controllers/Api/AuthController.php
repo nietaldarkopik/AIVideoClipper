@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\Social\Providers\TikTokProvider;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -89,11 +90,19 @@ class AuthController extends Controller
      * carries no user_id — only a purpose marker + nonce, checked in
      * tiktokCallback() below.
      */
-    public function tiktokRedirect(TikTokProvider $tiktok)
+    public function tiktokRedirect(Request $request, TikTokProvider $tiktok)
     {
+        // The SPA generates this and keeps it in sessionStorage; tiktokExchange()
+        // demands it back. Without that binding, anyone could start a flow, get a
+        // callback URL for *their own* TikTok account and trick a victim's browser
+        // into completing it (login CSRF) — the state alone can't tell browsers apart.
+        $data = $request->validate([
+            'nonce' => ['required', 'string', 'min:32', 'max:128', 'regex:/^[A-Za-z0-9_-]+$/'],
+        ]);
+
         $state = Crypt::encryptString(json_encode([
             'purpose' => 'login',
-            'nonce' => Str::random(16),
+            'nonce' => $data['nonce'],
             'issued_at' => now()->timestamp,
         ]));
 
@@ -137,6 +146,7 @@ class AuthController extends Controller
         if (
             ! is_array($payload)
             || ($payload['purpose'] ?? null) !== 'login'
+            || ! is_string($payload['nonce'] ?? null)
             || now()->timestamp - (int) ($payload['issued_at'] ?? 0) > 600
         ) {
             return redirect($frontendBase.'?error='.urlencode('Login request expired or invalid. Please try again.'));
@@ -174,9 +184,44 @@ class AuthController extends Controller
 
         $tiktok->storeAccount($user, $exchanged);
 
-        $token = $user->createToken('web')->plainTextToken;
+        // A short-lived one-time code goes in the URL instead of the bearer token
+        // itself (URLs end up in history, proxy logs and Referer headers). The SPA
+        // trades it for a token via tiktokExchange(), proving it started the flow.
+        $code = Str::random(64);
+        Cache::put('tiktok_login:'.hash('sha256', $code), [
+            'user_id' => $user->id,
+            'nonce' => $payload['nonce'],
+        ], now()->addSeconds(120));
 
-        return redirect($frontendBase.'?tiktok_token='.urlencode($token));
+        return redirect($frontendBase.'?tiktok_code='.urlencode($code));
+    }
+
+    /**
+     * Step 3: the SPA trades the one-time code from tiktokCallback() plus the nonce
+     * it generated in step 1 for a Sanctum token. The code is single-use.
+     */
+    public function tiktokExchange(Request $request)
+    {
+        $data = $request->validate([
+            'code' => ['required', 'string', 'size:64'],
+            'nonce' => ['required', 'string', 'max:128'],
+        ]);
+
+        $entry = Cache::pull('tiktok_login:'.hash('sha256', $data['code']));
+
+        if (! is_array($entry) || ! hash_equals((string) $entry['nonce'], $data['nonce'])) {
+            return response()->json(['message' => 'Login request expired or invalid. Please try again.'], 422);
+        }
+
+        $user = User::find($entry['user_id']);
+        if (! $user) {
+            return response()->json(['message' => 'Login request expired or invalid. Please try again.'], 422);
+        }
+
+        return response()->json([
+            'user' => UserResource::make($user),
+            'token' => $user->createToken('web')->plainTextToken,
+        ]);
     }
 
     private function tiktokLoginRedirectUri(): string

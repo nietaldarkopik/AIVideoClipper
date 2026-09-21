@@ -52,3 +52,5 @@ tools/instagram-automation/debug-screenshots/
 tools/instagram-automation/profiles/
 
 node_modules
+# graphify output (local, regenerable)
+graphify-out/

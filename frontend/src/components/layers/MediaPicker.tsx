@@ -4,7 +4,8 @@ import { useRef, useState } from "react";
 import { mutate } from "swr";
 import { Check, Music, Trash2, Upload } from "lucide-react";
 import { useApi } from "@/lib/hooks";
-import { api, ApiError, mediaUrl } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { SignedAudio } from "@/lib/media";
 import { toast } from "@/store/toast";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Input";
@@ -204,7 +205,7 @@ export function MediaPicker({
       )}
 
       {selected && kind === "audio" && (
-        <audio src={mediaUrl(selected.path) ?? undefined} controls className="w-full" />
+        <SignedAudio path={selected.path} controls className="w-full" />
       )}
 
       <details className="text-[11px] text-muted">

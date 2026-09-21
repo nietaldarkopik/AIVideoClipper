@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Rules\PublicHttpUrl;
 use App\Http\Resources\VideoBatchItemResource;
 use App\Http\Resources\VideoBatchResource;
 use App\Jobs\ProcessBatchItemJob;
@@ -29,7 +30,7 @@ class VideoBatchController extends Controller
         $data = $request->validate([
             'name' => ['nullable', 'string', 'max:255'],
             'urls' => ['required', 'array', 'min:1', 'max:50'],
-            'urls.*' => ['nullable', 'string', 'max:2048'],
+            'urls.*' => ['nullable', 'string', 'max:2048', new PublicHttpUrl],
             'clip_mode' => ['sometimes', Rule::in(['top_3', 'top_5', 'top_10', 'all'])],
             'template_id' => ['nullable', 'exists:templates,id'],
             'aspect_ratio' => ['sometimes', Rule::in(['9:16', '1:1', '16:9'])],

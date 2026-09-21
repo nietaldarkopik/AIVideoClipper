@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
 import { PLATFORM_LABELS } from "@/components/social/platforms";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { formatDuration } from "@/lib/format";
+import { formatDuration, withDownload } from "@/lib/format";
 import { api, ApiError } from "@/lib/api";
 import { toast } from "@/store/toast";
 import { ClipVideoModal } from "@/components/clips/ClipVideoModal";
@@ -152,7 +152,7 @@ export function ClipCard({ clip, mutateKey }: { clip: Clip; mutateKey?: string }
           </button>
           {clip.url && (
             <a
-              href={`${clip.url}?download=1`}
+              href={withDownload(clip.url)}
               title="Download"
               onClick={(e) => e.stopPropagation()}
               className="rounded-lg p-1.5 text-muted hover:bg-white/5 hover:text-foreground cursor-pointer"
