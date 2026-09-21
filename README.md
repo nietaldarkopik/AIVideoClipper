@@ -17,6 +17,35 @@ swappable mock providers so the whole thing runs with zero API keys.
 - **Queue/Cache**: Redis (portable build, no service install — see `tools/redis`)
 - **Video**: FFmpeg (crop/reframe, subtitle burn-in, thumbnails) + yt-dlp (URL import)
 
+## Running it with Docker
+
+The whole stack (PostgreSQL, Redis, Laravel API, three queue workers, scheduler,
+Next.js) runs from one `docker-compose.yml`. FFmpeg and yt-dlp are baked into the
+backend image, so nothing needs installing on the host.
+
+```bash
+cp .env.example .env
+# 1. set DB_PASSWORD in .env
+# 2. generate an app key and paste it into APP_KEY:
+docker compose run --rm --no-deps -e APP_KEY=x api php artisan key:generate --show
+docker compose up -d --build
+docker compose exec api php artisan db:seed --force   # first run only: templates, platforms, admin user
+```
+
+Open http://localhost:3000 (API on :8000). The seeder creates `admin@clipper.test` /
+`password` — **change that password before exposing the stack anywhere.**
+
+- Migrations run automatically on the `api` container's start; workers wait for it to be healthy.
+- Optional self-hosted services are opt-in profiles:
+  `docker compose --profile whisper --profile face-tracker --profile instagram up -d`
+  (then set `AI_TRANSCRIPTION_PROVIDER=whisper_engine` / `AI_REFRAMING_PROVIDER=face_tracker` in `.env`).
+- Uploaded/rendered media lives in the `app_storage` volume; Postgres in `pgdata`.
+  Back up both before `docker compose down -v` (which deletes them).
+- `NEXT_PUBLIC_API_URL` is baked into the frontend at build time — it must be the URL the
+  *browser* uses for the API. Change it and run `docker compose up -d --build frontend`.
+- After changing PHP code, rebuild: `docker compose up -d --build`. Workers cache config at start.
+- Other provider/OAuth keys: copy the lines you need from `backend/.env.example` into `.env`.
+
 ## Running it
 
 ### Quick start: `start-all`
