@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
+import { BrandMark } from "@/components/layout/BrandMark";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { clsx } from "clsx";
@@ -117,15 +117,6 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
         </Link>
       ))}
     </nav>
-  );
-}
-
-function BrandMark() {
-  return (
-    <div className="flex items-center gap-2">
-      <Image src="/logo.png" alt="Existcode" width={32} height={32} className="size-8 rounded-lg" />
-      <span className="text-sm font-semibold">Existcode</span>
-    </div>
   );
 }
 

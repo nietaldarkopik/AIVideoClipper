@@ -33,7 +33,7 @@ export default function Home() {
             Turn long videos into social-ready clips, automatically
           </h1>
           <p className="mt-4 text-base text-muted">
-            Existcode uses AI to find the best moments in your videos, cut them into
+            ClipWize uses AI to find the best moments in your videos, cut them into
             short clips, and publish them to TikTok, YouTube, Facebook, and Instagram.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">

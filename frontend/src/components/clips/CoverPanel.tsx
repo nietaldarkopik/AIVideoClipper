@@ -41,7 +41,7 @@ function Suggestions({ options, active, onPick }: { options: string[]; active: s
           className={
             "rounded-lg px-2 py-1 text-[11px] transition-colors cursor-pointer " +
             (active === option
-              ? "bg-accent text-white"
+              ? "bg-accent text-accent-foreground"
               : "bg-surface-elevated text-muted hover:bg-white/10 hover:text-foreground")
           }
         >

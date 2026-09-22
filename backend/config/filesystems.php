@@ -28,6 +28,9 @@ return [
     |
     */
 
+    // Lifetime (seconds, beyond the current hour) of signed /api/media URLs.
+    'media_url_ttl' => (int) env('MEDIA_URL_TTL', 86400),
+
     'disks' => [
 
         'local' => [

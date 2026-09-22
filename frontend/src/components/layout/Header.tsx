@@ -1,6 +1,6 @@
 "use client";
 
-import Image from "next/image";
+import { BrandMark } from "@/components/layout/BrandMark";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/Button";
@@ -11,9 +11,8 @@ export function Header() {
 
   return (
     <header className="flex items-center justify-between px-6 py-5 sm:px-10">
-      <Link href="/" className="flex items-center gap-2">
-        <Image src="/logo.png" alt="Existcode" width={32} height={32} className="size-8 rounded-lg" />
-        <span className="text-sm font-semibold">Existcode</span>
+      <Link href="/" aria-label="ClipWize home">
+        <BrandMark />
       </Link>
       <nav className="flex items-center gap-4">
         {!isHome && (

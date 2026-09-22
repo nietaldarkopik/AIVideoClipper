@@ -241,7 +241,7 @@ function TransitionFieldsForAdditionalClip({
               }
               className={
                 "rounded-lg px-2.5 py-1.5 text-xs capitalize cursor-pointer " +
-                (type === value ? "bg-accent text-white" : "bg-surface-elevated text-muted hover:text-foreground")
+                (type === value ? "bg-accent text-accent-foreground" : "bg-surface-elevated text-muted hover:text-foreground")
               }
             >
               {value === "none" ? "None" : value}

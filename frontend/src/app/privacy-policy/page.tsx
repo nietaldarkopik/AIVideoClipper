@@ -3,8 +3,8 @@ import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — Existcode",
-  description: "How Existcode collects, uses, and protects your data.",
+  title: "Privacy Policy — ClipWize",
+  description: "How ClipWize collects, uses, and protects your data.",
 };
 
 const LAST_UPDATED = "September 5, 2026";
@@ -20,7 +20,7 @@ export default function PrivacyPolicyPage() {
       <div className="mt-10 space-y-10 text-sm leading-relaxed text-foreground">
         <section>
           <p>
-            Existcode (&quot;we&quot;, &quot;our&quot;, &quot;us&quot;) provides a web application that helps
+            ClipWize (&quot;we&quot;, &quot;our&quot;, &quot;us&quot;) provides a web application that helps
             creators turn long-form videos into short, social-ready clips and publish
             them to third-party platforms such as TikTok, YouTube, Facebook, and
             Instagram. This Privacy Policy explains what information we collect, how we
@@ -79,7 +79,7 @@ export default function PrivacyPolicyPage() {
             When you connect a social account (e.g. via TikTok&apos;s Login Kit), you
             authorize us to act on your behalf within the scopes you approve — for
             example, publishing a video or reading basic profile and post metrics. You
-            can revoke this access at any time from within Existcode&apos;s Settings page,
+            can revoke this access at any time from within ClipWize&apos;s Settings page,
             or directly from the third-party platform&apos;s own app-permissions settings.
             Revoking access deletes the stored access/refresh tokens for that account.
           </p>

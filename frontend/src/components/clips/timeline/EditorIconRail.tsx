@@ -61,7 +61,7 @@ export function EditorIconRail({ active, onChange }: { active: EditorTabKey; onC
             onClick={() => onChange(item.key)}
             className={
               "flex w-14 cursor-pointer flex-col items-center gap-1 rounded-lg px-1.5 py-2 text-[10px] font-medium " +
-              (selected ? "bg-accent text-white" : "text-muted hover:bg-white/5 hover:text-foreground")
+              (selected ? "bg-accent text-accent-foreground" : "text-muted hover:bg-white/5 hover:text-foreground")
             }
           >
             <Icon className="size-4" />

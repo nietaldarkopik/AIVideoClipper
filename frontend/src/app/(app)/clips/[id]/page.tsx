@@ -47,7 +47,7 @@ import { LayerPropsFields } from "@/components/layers/LayerPropsFields";
 import { diffLayers } from "@/lib/layerOverrides";
 import { newLayer } from "@/lib/layers";
 import { EFFECTS, FILTERS } from "@/lib/videoFx";
-import { formatDuration } from "@/lib/format";
+import { formatDuration, withDownload } from "@/lib/format";
 import type {
   Clip,
   CropKeyframe,
@@ -368,7 +368,7 @@ function TransitionFields({
               onClick={() => onChange(value === "none" ? null : { type: value, duration: active?.duration ?? 0.4 })}
               className={
                 "rounded-lg px-2.5 py-1.5 text-xs capitalize cursor-pointer " +
-                (type === value ? "bg-accent text-white" : "bg-surface-elevated text-muted hover:text-foreground")
+                (type === value ? "bg-accent text-accent-foreground" : "bg-surface-elevated text-muted hover:text-foreground")
               }
             >
               {value === "none" ? "None" : TRANSITION_TYPES.find((t) => t.value === value)?.label}
@@ -849,7 +849,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
               Duplicate
             </Button>
             {clip.url && (
-              <a href={`${clip.url}?download=1`}>
+              <a href={withDownload(clip.url)}>
                 <Button variant="outline" size="sm">
                   <Download className="size-3.5" />
                   Download
@@ -951,7 +951,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                     downloadAction={
                       clip?.srt_url && (
                         <a
-                          href={`${clip.srt_url}?download=1`}
+                          href={withDownload(clip.srt_url)}
                           title="Download caption (.srt)"
                           className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-muted hover:bg-white/5 hover:text-foreground"
                         >
@@ -1066,7 +1066,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                             onClick={() => setCropMode(mode)}
                             className={
                               "rounded-md px-2.5 py-1 text-xs capitalize cursor-pointer " +
-                              (history.current.cropMode === mode ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                              (history.current.cropMode === mode ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
                             }
                           >
                             {mode === "smart" ? "Auto (AI)" : "Manual"}
@@ -1160,7 +1160,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                           onClick={() => setForm({ ...form, speed: s })}
                           className={
                             "rounded-lg px-2.5 py-1 text-xs cursor-pointer " +
-                            (form.speed === s ? "bg-accent text-white" : "bg-surface text-muted hover:text-foreground")
+                            (form.speed === s ? "bg-accent text-accent-foreground" : "bg-surface text-muted hover:text-foreground")
                           }
                         >
                           {s}x

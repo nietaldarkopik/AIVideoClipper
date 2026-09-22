@@ -229,7 +229,7 @@ export function SchedulerWeekView({
                 title={`${g}-minute rows`}
                 className={clsx(
                   "rounded-md px-2 py-1 text-[11px] cursor-pointer",
-                  granularity === g ? "bg-accent text-white" : "text-muted hover:text-foreground"
+                  granularity === g ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground"
                 )}
               >
                 {g}m

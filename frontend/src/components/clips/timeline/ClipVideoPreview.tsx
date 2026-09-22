@@ -2,7 +2,7 @@
 
 import { RefObject, useEffect, useRef, useState } from "react";
 import { activeFxCss, activeVignetteOpacity, isColorLayer } from "@/lib/videoFx";
-import { mediaUrl } from "@/lib/api";
+import { SignedImg } from "@/lib/media";
 import { useSegmentAwarePlayback } from "./useSegmentAwarePlayback";
 import type {
   AudioLayerProps,
@@ -548,7 +548,6 @@ export function LayerOverlay({ layer, currentTime, duration }: { layer: Template
     // (ffmpeg's overlay=x:y anchors the overlay's top-left corner, not a center).
     const props = (layer.props as ImageLayerProps) ?? {};
     if (!props.image_path) return null;
-    const src = mediaUrl(props.image_path);
     return (
       <div
         className="absolute"
@@ -568,8 +567,7 @@ export function LayerOverlay({ layer, currentTime, duration }: { layer: Template
             than being forced square as this used to. Plain <img>: these are
             user-uploaded files served from the media disk, not build-time assets
             next/image could optimize. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={src ?? undefined} alt="" className="w-full" />
+        <SignedImg path={props.image_path} className="w-full" />
       </div>
     );
   }

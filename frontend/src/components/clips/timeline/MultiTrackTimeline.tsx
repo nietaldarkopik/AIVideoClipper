@@ -5,7 +5,7 @@ import { Maximize2, Music, Plus, Scissors, Sparkles, Trash2, ZoomIn, ZoomOut } f
 import { Select } from "@/components/ui/Input";
 import { ELEMENT_LAYER_TYPES, LAYER_ICONS, LAYER_LABELS, layerLabel, newLayer } from "@/lib/layers";
 import { isColorLayer } from "@/lib/videoFx";
-import { mediaUrl } from "@/lib/api";
+import { useMediaUrl } from "@/lib/media";
 import { formatDuration } from "@/lib/format";
 import {
   MAX_ZOOM,
@@ -96,7 +96,8 @@ function TimelineBlock({
   tone,
   label,
   title,
-  waveformUrl,
+  waveformUrl: waveformUrlProp,
+  waveformPath,
 }: {
   window: { start: number; end: number };
   pxPerSecond: number;
@@ -114,7 +115,11 @@ function TimelineBlock({
   // shows the shape of the sound over exactly the stretch of time the block
   // covers — trimming the block visibly trims the waveform with it.
   waveformUrl?: string | null;
+  // Same waveform, given as a media-disk path (a layer prop) that has to be signed first.
+  waveformPath?: string | null;
 }) {
+  const signedWaveform = useMediaUrl(waveformPath);
+  const waveformUrl = waveformUrlProp ?? signedWaveform;
   const drag = useDragWindow({ pxPerSecond, min: 0, max, minLength: 0.2, snapTargets, onChange });
   const live = drag.live ?? window;
 
@@ -702,7 +707,7 @@ export function MultiTrackTimeline({
                   onChange={(w) => moveLayerWindow(layer, w)}
                   tone={BLOCK_TONES.audio}
                   label={layerLabel(layer)}
-                  waveformUrl={mediaUrl((layer.props as AudioLayerProps)?.waveform_path)}
+                  waveformPath={(layer.props as AudioLayerProps)?.waveform_path}
                 />
               </Lane>
             </div>
