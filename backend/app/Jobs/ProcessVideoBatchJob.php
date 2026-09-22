@@ -125,11 +125,30 @@ class ProcessVideoBatchJob implements ShouldQueue
                     'error' => $e->getMessage(),
                 ]);
 
-                $item->update([
-                    'status' => VideoBatchItem::STATUS_FAILED,
-                    'failure_reason' => $e->getMessage(),
-                    'finished_at' => now(),
-                ]);
+                // This save must not itself throw: if it did, the item would never
+                // reach a TERMINAL_STATUSES value, so every future run of this
+                // job (retryUntil keeps it coming back for up to 7h) would retry
+                // the same doomed download from scratch instead of skipping it —
+                // burning the whole retry window on one already-failed item.
+                try {
+                    $item->update([
+                        'status' => VideoBatchItem::STATUS_FAILED,
+                        'failure_reason' => $e->getMessage(),
+                        'finished_at' => now(),
+                    ]);
+                } catch (Throwable $saveError) {
+                    Log::error('Failed to record batch item failure, marking with generic reason', [
+                        'batch_id' => $batch->id,
+                        'item_id' => $item->id,
+                        'error' => $saveError->getMessage(),
+                    ]);
+
+                    $item->update([
+                        'status' => VideoBatchItem::STATUS_FAILED,
+                        'failure_reason' => 'Download failed.',
+                        'finished_at' => now(),
+                    ]);
+                }
                 $batch->settleStatusIfAllItemsTerminal();
             }
 

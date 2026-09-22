@@ -225,9 +225,21 @@ class UrlVideoDownloader
         [$title, $channelName] = array_pad(explode("\t", $lastLine, 2), 2, null);
 
         return [
-            trim((string) $title) ?: null,
-            trim((string) $channelName) ?: null,
+            $this->sanitizeUtf8(trim((string) $title)) ?: null,
+            $this->sanitizeUtf8(trim((string) $channelName)) ?: null,
         ];
+    }
+
+    /**
+     * yt-dlp occasionally emits titles/channel names with byte sequences that
+     * aren't valid UTF-8 (e.g. a mis-decoded Windows-1252 curly quote, 0x92).
+     * Postgres columns are strict UTF8, so saving one of these raw crashes the
+     * whole import with an uncatchable-looking PDOException. Scrub instead of
+     * rejecting the video outright.
+     */
+    private function sanitizeUtf8(string $value): string
+    {
+        return mb_scrub($value, 'UTF-8');
     }
 
     /**
