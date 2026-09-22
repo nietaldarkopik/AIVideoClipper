@@ -1,4 +1,4 @@
-# AI Video Clipper
+# ClipWize (AI Video Clipper)
 
 A working SaaS MVP: upload or import a long video, run AI analysis to find the best
 moments, generate social-ready vertical clips with auto captions and smart reframing,
@@ -16,6 +16,70 @@ swappable mock providers so the whole thing runs with zero API keys.
 - **Database**: PostgreSQL 17
 - **Queue/Cache**: Redis (portable build, no service install — see `tools/redis`)
 - **Video**: FFmpeg (crop/reframe, subtitle burn-in, thumbnails) + yt-dlp (URL import)
+
+## Running it with Docker
+
+The whole stack (PostgreSQL, Redis, Laravel API, three queue workers, scheduler,
+Next.js) runs from one `docker-compose.yml`. FFmpeg and yt-dlp are baked into the
+backend image, so nothing needs installing on the host.
+
+```bash
+cp .env.example .env
+# 1. set DB_PASSWORD in .env
+# 2. generate an app key and paste it into APP_KEY:
+docker compose run --rm --no-deps -e APP_KEY=x api php artisan key:generate --show
+docker compose up -d --build
+docker compose exec api php artisan db:seed --force   # first run only: templates, platforms, admin user
+```
+
+Open http://localhost:3000 (API on :8000). The seeder creates `admin@clipper.test` /
+`password` — **change that password before exposing the stack anywhere.**
+
+- Migrations run automatically on the `api` container's start; workers wait for it to be healthy.
+- Optional self-hosted services are opt-in profiles:
+  `docker compose --profile whisper --profile face-tracker --profile instagram up -d`
+  (then set `AI_TRANSCRIPTION_PROVIDER=whisper_engine` / `AI_REFRAMING_PROVIDER=face_tracker` in `.env`).
+- Uploaded/rendered media lives in the `app_storage` volume; Postgres in `pgdata`.
+  Back up both before `docker compose down -v` (which deletes them).
+- `NEXT_PUBLIC_API_URL` is baked into the frontend at build time — it must be the URL the
+  *browser* uses for the API. Change it and run `docker compose up -d --build frontend`.
+- After changing PHP code, rebuild: `docker compose up -d --build`. Workers cache config at start.
+- Other provider/OAuth keys: copy the lines you need from `backend/.env.example` into `.env`.
+- Port already taken (e.g. Portainer uses :8000)? Set `API_PORT=8100` and
+  `NEXT_PUBLIC_API_URL=http://localhost:8100/api` (and `APP_URL=http://localhost:8100`) in `.env`,
+  then `docker compose up -d --build`. `FRONTEND_PORT` works the same for :3000.
+
+### Media access (signed URLs)
+
+`/api/media/{path}` serves videos, clips, thumbnails and uploads to `<video>`/`<img>`/`<audio>`
+tags, which can't send a bearer token. Every URL therefore carries an expiring HMAC signature
+(`?expires=…&signature=…`) and the route answers **403** without a valid one.
+
+- The API returns already-signed URLs (`url`, `thumbnail_url`, `srt_url`, …). Don't build
+  `/api/media/...` URLs by hand; to sign a path the client holds (a layer's `image_path`, a
+  waveform), call `POST /api/media/sign` with `{"paths": [...]}` — it only signs paths the caller
+  owns (`null` otherwise). In the frontend use `useMediaUrl` / `SignedImg` / `SignedAudio`
+  from `src/lib/media.tsx`.
+- Signatures are keyed on `APP_KEY`, so rotating it invalidates outstanding links (a page reload
+  fetches new ones). Lifetime: `MEDIA_URL_TTL` seconds (default `86400`), set in `.env`.
+- Adding a new folder on the media disk? Add its prefix to `App\Support\MediaAccess`, or the sign
+  endpoint will refuse it.
+
+### Running the backend tests
+
+The backend image is built without dev dependencies and the host may have no PHP, so run PHPUnit
+in a throwaway container (from the repo root, after `docker compose build api`):
+
+```bash
+docker run --rm --entrypoint bash -v "$PWD/backend":/src:ro -e HOME=/tmp -e COMPOSER_HOME=/tmp/c \
+  aivideoclipper-api -c '
+    mkdir /tmp/t && cd /src && tar --exclude=./vendor --exclude=./storage/app -cf - . | tar -xf - -C /tmp/t
+    cd /tmp/t && rm -f bootstrap/cache/*.php && mkdir -p storage/framework/{cache,sessions,views} storage/logs
+    export APP_KEY=base64:$(openssl rand -base64 32) APP_ENV=testing
+    composer install --no-interaction --no-scripts -q && vendor/bin/phpunit'
+```
+
+Add `--filter=MediaSigningTest` to `phpunit` to run a single class.
 
 ## Running it
 
@@ -125,6 +189,35 @@ See `tools/whisper-engine/README.md`, `tools/face-tracker/README.md`, and
 
 If you restart your terminal, `ffmpeg`/`ffprobe`/`yt-dlp` will resolve from PATH directly
 (winget added them); until then `backend/.env` points at their absolute install paths.
+
+## Branding and theme
+
+The product is branded **ClipWize**. Everything visual is driven from a few places, so a future
+rebrand is a small change:
+
+- **Colours** — CSS variables in `frontend/src/app/globals.css` (`:root`), exposed to Tailwind as
+  `bg-accent`, `text-accent`, `text-accent-2`, etc. Palette: emerald `--accent` `#10b981`, amber
+  `--accent-2` `#fbbf24` (the logo's spark), green-tinted near-black surfaces.
+  Use `text-accent-foreground` (not `text-white`) on a solid `bg-accent` fill — white on emerald
+  fails contrast.
+- **Logo** — source of truth is `frontend/public/logo.svg` (Play-W tile + amber spark). Rendered
+  files: `public/logo.png` (1024), `src/app/icon.png` (64), `src/app/apple-icon.png` (180),
+  `src/app/favicon.ico` (32 + 64). The wordmark ("Clip" + accent "Wize") lives in
+  `src/components/layout/BrandMark.tsx`, used by the header and sidebar.
+- **Regenerating PNGs after editing the SVG** — render it with the Playwright Chromium already on
+  disk (macOS shown; adjust the path elsewhere), one run per size:
+  ```bash
+  cd frontend
+  printf '<body style="margin:0;background:transparent"><img src="file://%s/public/logo.svg" width="1024" height="1024" style="display:block">' "$PWD" > /tmp/logo.html
+  ~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac-arm64/chrome-headless-shell \
+    --no-sandbox --default-background-color=00000000 --hide-scrollbars --window-size=1024,1024 \
+    --screenshot=public/logo.png file:///tmp/logo.html
+  ```
+  Repeat with 64 / 180 for `icon.png` / `apple-icon.png`.
+- **Deliberately not rebranded**: the default colour `#7C5CFF` of the *rendered video* progress bar
+  (`RenderClipJob`, `LayerCompositionService`, `TemplatePreviewService`, `lib/layers.ts`) — changing
+  it would recolour existing templates on re-render; the `clipper-auth` localStorage key (renaming
+  logs everyone out); and the `allowedDevOrigins` hosts in `next.config.ts`.
 
 ## What's real vs. mocked
 

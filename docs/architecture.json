@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AI Video Clipper Architecture",
+    "output": "architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "Users",
+      "sublabel": "Browser",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "frontend",
+      "type": "frontend",
+      "label": "Frontend",
+      "sublabel": "Next.js :3000",
+      "pos": [
+        250,
+        210
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Laravel API",
+      "sublabel": "artisan serve :8000",
+      "pos": [
+        460,
+        210
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "app data :5432",
+      "pos": [
+        460,
+        60
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "messagebus",
+      "label": "Redis",
+      "sublabel": "queues :6379",
+      "pos": [
+        460,
+        370
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "scheduler",
+      "type": "backend",
+      "label": "Scheduler",
+      "sublabel": "schedule:work",
+      "pos": [
+        250,
+        370
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Queue Workers",
+      "sublabel": "default / batch / publish",
+      "pos": [
+        670,
+        370
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "ai",
+      "type": "external",
+      "label": "AI Providers",
+      "sublabel": "Claude, Gemini, OpenAI, Groq",
+      "pos": [
+        670,
+        210
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "whisper",
+      "type": "cloud",
+      "label": "Whisper Engine",
+      "sublabel": "opt-in :8100",
+      "pos": [
+        950,
+        290
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "face",
+      "type": "cloud",
+      "label": "Face Tracker",
+      "sublabel": "opt-in :8200",
+      "pos": [
+        950,
+        370
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "ig",
+      "type": "cloud",
+      "label": "Instagram Automation",
+      "sublabel": "opt-in :8300",
+      "pos": [
+        950,
+        450
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "social",
+      "type": "external",
+      "label": "Social Platforms",
+      "sublabel": "publish + metrics",
+      "pos": [
+        670,
+        520
+      ],
+      "size": [
+        140,
+        60
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "users-to-frontend",
+      "from": "users",
+      "to": "frontend",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "frontend-to-api",
+      "from": "frontend",
+      "to": "api",
+      "label": "REST /api",
+      "variant": "emphasis"
+    },
+    {
+      "id": "api-to-db",
+      "from": "api",
+      "to": "postgres",
+      "label": "SQL"
+    },
+    {
+      "id": "api-to-redis",
+      "from": "api",
+      "to": "redis",
+      "label": "dispatch jobs",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "scheduler-to-redis",
+      "from": "scheduler",
+      "to": "redis",
+      "label": "cron jobs",
+      "variant": "dashed"
+    },
+    {
+      "id": "redis-to-workers",
+      "from": "redis",
+      "to": "workers",
+      "label": "consume"
+    },
+    {
+      "id": "workers-to-ai",
+      "from": "workers",
+      "to": "ai",
+      "label": "analyze"
+    },
+    {
+      "id": "workers-to-whisper",
+      "from": "workers",
+      "to": "whisper",
+      "label": "transcribe",
+      "labelSegment": 1
+    },
+    {
+      "id": "workers-to-face",
+      "from": "workers",
+      "to": "face",
+      "label": "track",
+      "labelDx": 35
+    },
+    {
+      "id": "workers-to-ig",
+      "from": "workers",
+      "to": "ig",
+      "label": "post",
+      "labelSegment": 1
+    },
+    {
+      "id": "workers-to-social",
+      "from": "workers",
+      "to": "social",
+      "label": "publish",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Request path",
+      "items": [
+        "Next.js talks to the Laravel API over REST",
+        "API persists to PostgreSQL and enqueues long work"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Async pipeline",
+      "items": [
+        "Redis queues feed default, batch and publish workers",
+        "Workers run ffmpeg and yt-dlp for import and render"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Optional engines",
+      "items": [
+        "Whisper, face tracker and Instagram run as compose profiles"
+      ]
+    }
+  ]
+}

@@ -230,7 +230,7 @@ export function TimelineTrack({
               className={
                 "absolute top-1/2 z-20 flex size-5 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border shadow transition-opacity " +
                 (selectedTransitionIndex === index
-                  ? "border-white bg-accent text-white"
+                  ? "border-white bg-accent text-accent-foreground"
                   : hasTransition
                     ? "border-accent-2 bg-accent-2/90 text-white hover:brightness-110"
                     : "border-white/40 bg-black/70 text-white/50 opacity-60 hover:opacity-100")

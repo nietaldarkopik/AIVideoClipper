@@ -315,7 +315,7 @@ function ChannelForm({
               type="checkbox"
               checked={form.scheduler_enabled}
               onChange={(e) => setForm({ ...form, scheduler_enabled: e.target.checked })}
-              className="size-4 accent-[var(--accent,#7c5cff)]"
+              className="size-4 accent-[var(--accent,#10b981)]"
             />
             Aktifkan riset otomatis
           </label>
@@ -406,7 +406,7 @@ function ChannelForm({
                   type="checkbox"
                   checked={!!selectedSources[source.id]}
                   onChange={(e) => setSelectedSources({ ...selectedSources, [source.id]: e.target.checked })}
-                  className="mt-0.5 size-4 accent-[var(--accent,#7c5cff)]"
+                  className="mt-0.5 size-4 accent-[var(--accent,#10b981)]"
                 />
                 <span className="min-w-0">
                   <span className="flex items-center gap-1.5">
