@@ -368,7 +368,7 @@ function TransitionFields({
               onClick={() => onChange(value === "none" ? null : { type: value, duration: active?.duration ?? 0.4 })}
               className={
                 "rounded-lg px-2.5 py-1.5 text-xs capitalize cursor-pointer " +
-                (type === value ? "bg-accent text-white" : "bg-surface-elevated text-muted hover:text-foreground")
+                (type === value ? "bg-accent text-accent-foreground" : "bg-surface-elevated text-muted hover:text-foreground")
               }
             >
               {value === "none" ? "None" : TRANSITION_TYPES.find((t) => t.value === value)?.label}
@@ -1066,7 +1066,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                             onClick={() => setCropMode(mode)}
                             className={
                               "rounded-md px-2.5 py-1 text-xs capitalize cursor-pointer " +
-                              (history.current.cropMode === mode ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                              (history.current.cropMode === mode ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
                             }
                           >
                             {mode === "smart" ? "Auto (AI)" : "Manual"}
@@ -1160,7 +1160,7 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                           onClick={() => setForm({ ...form, speed: s })}
                           className={
                             "rounded-lg px-2.5 py-1 text-xs cursor-pointer " +
-                            (form.speed === s ? "bg-accent text-white" : "bg-surface text-muted hover:text-foreground")
+                            (form.speed === s ? "bg-accent text-accent-foreground" : "bg-surface text-muted hover:text-foreground")
                           }
                         >
                           {s}x

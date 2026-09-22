@@ -1,4 +1,4 @@
-# AI Video Clipper
+# ClipWize (AI Video Clipper)
 
 A working SaaS MVP: upload or import a long video, run AI analysis to find the best
 moments, generate social-ready vertical clips with auto captions and smart reframing,
@@ -189,6 +189,35 @@ See `tools/whisper-engine/README.md`, `tools/face-tracker/README.md`, and
 
 If you restart your terminal, `ffmpeg`/`ffprobe`/`yt-dlp` will resolve from PATH directly
 (winget added them); until then `backend/.env` points at their absolute install paths.
+
+## Branding and theme
+
+The product is branded **ClipWize**. Everything visual is driven from a few places, so a future
+rebrand is a small change:
+
+- **Colours** — CSS variables in `frontend/src/app/globals.css` (`:root`), exposed to Tailwind as
+  `bg-accent`, `text-accent`, `text-accent-2`, etc. Palette: emerald `--accent` `#10b981`, amber
+  `--accent-2` `#fbbf24` (the logo's spark), green-tinted near-black surfaces.
+  Use `text-accent-foreground` (not `text-white`) on a solid `bg-accent` fill — white on emerald
+  fails contrast.
+- **Logo** — source of truth is `frontend/public/logo.svg` (Play-W tile + amber spark). Rendered
+  files: `public/logo.png` (1024), `src/app/icon.png` (64), `src/app/apple-icon.png` (180),
+  `src/app/favicon.ico` (32 + 64). The wordmark ("Clip" + accent "Wize") lives in
+  `src/components/layout/BrandMark.tsx`, used by the header and sidebar.
+- **Regenerating PNGs after editing the SVG** — render it with the Playwright Chromium already on
+  disk (macOS shown; adjust the path elsewhere), one run per size:
+  ```bash
+  cd frontend
+  printf '<body style="margin:0;background:transparent"><img src="file://%s/public/logo.svg" width="1024" height="1024" style="display:block">' "$PWD" > /tmp/logo.html
+  ~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac-arm64/chrome-headless-shell \
+    --no-sandbox --default-background-color=00000000 --hide-scrollbars --window-size=1024,1024 \
+    --screenshot=public/logo.png file:///tmp/logo.html
+  ```
+  Repeat with 64 / 180 for `icon.png` / `apple-icon.png`.
+- **Deliberately not rebranded**: the default colour `#7C5CFF` of the *rendered video* progress bar
+  (`RenderClipJob`, `LayerCompositionService`, `TemplatePreviewService`, `lib/layers.ts`) — changing
+  it would recolour existing templates on re-render; the `clipper-auth` localStorage key (renaming
+  logs everyone out); and the `allowedDevOrigins` hosts in `next.config.ts`.
 
 ## What's real vs. mocked
 

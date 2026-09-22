@@ -181,7 +181,7 @@ function ConfigField({
             type="checkbox"
             checked={value === true}
             onChange={(e) => onChange(e.target.checked)}
-            className="size-4 accent-[var(--accent,#7c5cff)]"
+            className="size-4 accent-[var(--accent,#10b981)]"
           />
           Aktif
         </label>

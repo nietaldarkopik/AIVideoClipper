@@ -1,16 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0a0a0d;
-  --surface: #111114;
-  --surface-elevated: #17171b;
-  --border-subtle: #26262c;
-  --foreground: #f4f4f5;
-  --muted: #9a9aa3;
-  --accent: #7c5cff;
-  --accent-2: #22d3ee;
+  /* ClipWize palette: emerald accent, amber spark, green-tinted near-blacks. */
+  --background: #0a0d0c;
+  --surface: #111513;
+  --surface-elevated: #171c1a;
+  --border-subtle: #26302c;
+  --foreground: #f4f6f5;
+  --muted: #9aa5a0;
+  --accent: #10b981;
+  --accent-foreground: #04130d; /* text/icons on a solid --accent fill (white would be ~2.5:1) */
+  --accent-2: #fbbf24;
   --success: #22c55e;
-  --warning: #f59e0b;
+  --warning: #f97316;
   --danger: #ef4444;
 }
 
@@ -22,6 +24,7 @@
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
   --color-accent-2: var(--accent-2);
   --color-success: var(--success);
   --color-warning: var(--warning);

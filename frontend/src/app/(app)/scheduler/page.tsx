@@ -524,7 +524,7 @@ export default function SchedulerPage() {
             onClick={() => { setView("table"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
-              (view === "table" ? "bg-accent text-white" : "text-muted hover:text-foreground")
+              (view === "table" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
             }
           >
             <LayoutList className="size-3.5" />
@@ -534,7 +534,7 @@ export default function SchedulerPage() {
             onClick={() => { setView("month"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
-              (view === "month" ? "bg-accent text-white" : "text-muted hover:text-foreground")
+              (view === "month" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
             }
           >
             <CalendarClock className="size-3.5" />
@@ -544,7 +544,7 @@ export default function SchedulerPage() {
             onClick={() => { setView("week"); resetListing(); }}
             className={
               "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs cursor-pointer " +
-              (view === "week" ? "bg-accent text-white" : "text-muted hover:text-foreground")
+              (view === "week" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
             }
           >
             <CalendarDays className="size-3.5" />

@@ -83,7 +83,7 @@ export function Pagination({
               onClick={() => onPageChange(p)}
               className={
                 "min-w-7 rounded-lg px-2 py-1 cursor-pointer " +
-                (p === page ? "bg-accent text-white" : "text-muted hover:bg-white/5 hover:text-foreground")
+                (p === page ? "bg-accent text-accent-foreground" : "text-muted hover:bg-white/5 hover:text-foreground")
               }
             >
               {p}

@@ -504,7 +504,7 @@ export default function AllClipsPage() {
               type="button"
               onClick={() => setView("grid")}
               title="Grid view"
-              className={`rounded-md p-1.5 cursor-pointer ${view === "grid" ? "bg-accent text-white" : "text-muted hover:text-foreground"}`}
+              className={`rounded-md p-1.5 cursor-pointer ${view === "grid" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground"}`}
             >
               <LayoutGrid className="size-3.5" />
             </button>
@@ -515,7 +515,7 @@ export default function AllClipsPage() {
                 resetListing();
               }}
               title="Table view"
-              className={`rounded-md p-1.5 cursor-pointer ${view === "table" ? "bg-accent text-white" : "text-muted hover:text-foreground"}`}
+              className={`rounded-md p-1.5 cursor-pointer ${view === "table" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground"}`}
             >
               <LayoutList className="size-3.5" />
             </button>

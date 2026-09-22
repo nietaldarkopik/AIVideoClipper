@@ -695,7 +695,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 onClick={() => setVideoRegion(null)}
                 className={
                   "rounded-md px-2.5 py-1 text-xs cursor-pointer disabled:cursor-not-allowed " +
-                  (videoRegion === null ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                  (videoRegion === null ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
                 }
               >
                 Full-bleed video (default)
@@ -706,7 +706,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
                 onClick={() => setVideoRegion(videoRegion ?? { top: 0.15, height: 0.65 })}
                 className={
                   "rounded-md px-2.5 py-1 text-xs cursor-pointer disabled:cursor-not-allowed " +
-                  (videoRegion !== null ? "bg-accent text-white" : "text-muted hover:text-foreground")
+                  (videoRegion !== null ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground")
                 }
               >
                 Custom video area
