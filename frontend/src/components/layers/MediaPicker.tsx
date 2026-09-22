@@ -145,7 +145,7 @@ export function MediaPicker({
                 <img src={asset.url} alt={asset.name} className="size-full object-contain" />
               </button>
               {asset.path === value && (
-                <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-accent p-0.5 text-white">
+                <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-accent p-0.5 text-accent-foreground">
                   <Check className="size-2.5" />
                 </span>
               )}
