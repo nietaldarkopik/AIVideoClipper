@@ -4,13 +4,16 @@ namespace App\Providers;
 
 use App\Models\Setting;
 use App\Services\AI\Claude\ClaudeContentAnalysisProvider;
+use App\Services\AI\Contracts\AssistantChatProvider;
 use App\Services\AI\Contracts\ContentAnalysisProvider;
 use App\Services\AI\Contracts\ContentIdeaProvider;
 use App\Services\AI\Contracts\EmbeddingProvider;
 use App\Services\AI\Contracts\ImageGenerationProvider;
 use App\Services\AI\Contracts\ReactionScriptProvider;
 use App\Services\AI\Contracts\ReframingProvider;
+use App\Services\AI\Contracts\SceneVideoProvider;
 use App\Services\AI\Contracts\SocialMetadataProvider;
+use App\Services\AI\Contracts\StoryboardProvider;
 use App\Services\AI\Contracts\TextToSpeechProvider;
 use App\Services\AI\Contracts\TranscriptionProvider;
 use App\Services\AI\Contracts\VideoNarrativeProvider;
@@ -19,8 +22,12 @@ use App\Services\AI\Contracts\WebSearchProvider;
 use App\Services\AI\FaceTracker\FaceTrackerReframingProvider;
 use App\Services\AI\Gemini\GeminiContentAnalysisProvider;
 use App\Services\AI\Gemini\GeminiContentIdeaProvider;
+use App\Services\AI\Gemini\GeminiImageGenerationProvider;
+use App\Services\AI\Gemini\GeminiInteractionsClient;
+use App\Services\AI\Gemini\GeminiOmniSceneVideoProvider;
 use App\Services\AI\Gemini\GeminiReactionScriptProvider;
 use App\Services\AI\Groq\GroqTranscriptionProvider;
+use App\Services\AI\Mock\MockAssistantChatProvider;
 use App\Services\AI\Mock\MockContentAnalysisProvider;
 use App\Services\AI\Mock\MockContentIdeaProvider;
 use App\Services\AI\Mock\MockEmbeddingProvider;
@@ -28,17 +35,21 @@ use App\Services\AI\Mock\MockImageGenerationProvider;
 use App\Services\AI\Mock\MockReactionScriptProvider;
 use App\Services\AI\Mock\MockReframingProvider;
 use App\Services\AI\Mock\MockSocialMetadataProvider;
+use App\Services\AI\Mock\MockStoryboardProvider;
 use App\Services\AI\Mock\MockTextToSpeechProvider;
 use App\Services\AI\Mock\MockTranscriptionProvider;
 use App\Services\AI\Mock\MockVideoNarrativeProvider;
 use App\Services\AI\Mock\MockWebFetchProvider;
 use App\Services\AI\Mock\MockWebSearchProvider;
+use App\Services\AI\NineRouter\NineRouterAssistantChatProvider;
 use App\Services\AI\NineRouter\NineRouterContentAnalysisProvider;
 use App\Services\AI\NineRouter\NineRouterContentIdeaProvider;
 use App\Services\AI\NineRouter\NineRouterEmbeddingProvider;
 use App\Services\AI\NineRouter\NineRouterImageGenerationProvider;
 use App\Services\AI\NineRouter\NineRouterReactionScriptProvider;
+use App\Services\AI\NineRouter\NineRouterSceneVideoProvider;
 use App\Services\AI\NineRouter\NineRouterSocialMetadataProvider;
+use App\Services\AI\NineRouter\NineRouterStoryboardProvider;
 use App\Services\AI\NineRouter\NineRouterTextToSpeechProvider;
 use App\Services\AI\NineRouter\NineRouterTranscriptionProvider;
 use App\Services\AI\NineRouter\NineRouterVideoNarrativeProvider;
@@ -54,6 +65,9 @@ use App\Services\AI\OpenAI\OpenAISocialMetadataProvider;
 use App\Services\AI\OpenAI\OpenAITextToSpeechProvider;
 use App\Services\AI\OpenAI\OpenAITranscriptionProvider;
 use App\Services\AI\WhisperEngine\WhisperEngineTranscriptionProvider;
+use App\Services\AI\Support\FallbackImageGenerationProvider;
+use App\Services\AI\Support\FallbackSceneVideoProvider;
+use App\Services\AI\Video\CameraMotionSceneVideoProvider;
 use App\Services\Video\FFmpegService;
 use App\Services\Video\LayerCompositionService;
 use App\Services\Video\UrlVideoDownloader;
@@ -89,6 +103,8 @@ class AIServiceProvider extends ServiceProvider
                 ffmpegBin: config('services.media.ffmpeg_bin', 'ffmpeg'),
                 proxy: config('services.ytdlp.proxy'),
                 maxHeight: (int) config('services.ytdlp.max_height', 1440),
+                cookiesFromBrowser: config('services.ytdlp.cookies_from_browser'),
+                processTimeout: (int) config('services.ytdlp.process_timeout', 3600),
             );
         });
 
@@ -327,15 +343,124 @@ class AIServiceProvider extends ServiceProvider
         });
 
         $this->app->bind(ImageGenerationProvider::class, function ($app) {
-            return match ($provider = config('services.ai.cover_image_provider', 'mock')) {
-                'mock' => $app->make(MockImageGenerationProvider::class),
-                'nine_router' => new NineRouterImageGenerationProvider(
+            return $this->makeImageProvider(
+                $app,
+                (string) config('services.ai.cover_image_provider', 'mock'),
+                (string) config('services.nine_router.image_model'),
+                'AI_COVER_IMAGE_PROVIDER',
+            );
+        });
+
+        // Scene images for cartoon videos: same contract, but configured independently so
+        // enabling real image generation here doesn't also change reaction-intro covers.
+        $this->app->bind('cartoon.image', function ($app) {
+            return $this->makeImageChain(
+                $app,
+                (string) (config('services.ai.cartoon_image_provider') ?: config('services.ai.cover_image_provider', 'mock')),
+                (string) (config('services.nine_router.cartoon_image_model') ?: config('services.nine_router.image_model')),
+                'AI_CARTOON_IMAGE_PROVIDER',
+            );
+        });
+        $this->app->bind(AssistantChatProvider::class, function ($app) {
+            return match ($provider = config('services.ai.assistant_provider', 'mock')) {
+                'mock' => $app->make(MockAssistantChatProvider::class),
+                'nine_router' => new NineRouterAssistantChatProvider(
                     (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
                     config('services.nine_router.api_key'),
-                    (string) config('services.nine_router.image_model'),
+                    (string) (config('services.nine_router.assistant_model') ?: config('services.nine_router.model')),
                 ),
-                default => throw new InvalidArgumentException("Unknown AI_COVER_IMAGE_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+                default => throw new InvalidArgumentException("Unknown AI_ASSISTANT_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
             };
         });
+
+        $this->app->bind(StoryboardProvider::class, function ($app) {
+            return match ($provider = config('services.ai.storyboard_provider', 'mock')) {
+                'mock' => $app->make(MockStoryboardProvider::class),
+                'nine_router' => new NineRouterStoryboardProvider(
+                    (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                    config('services.nine_router.api_key'),
+                    (string) (config('services.nine_router.storyboard_model')
+                        ?: config('services.nine_router.video_narrative_model')
+                        ?: config('services.nine_router.model')),
+                ),
+                default => throw new InvalidArgumentException("Unknown AI_STORYBOARD_PROVIDER [{$provider}]. Valid values: mock, nine_router."),
+            };
+        });
+
+        $this->app->bind(SceneVideoProvider::class, function () {
+            $spec = (string) config('services.ai.scene_video_provider', 'camera_motion');
+            $entries = $this->chainEntries($spec);
+
+            if (count($entries) === 1 && ! str_contains($entries[0], ':')) {
+                return $this->makeSceneVideoProvider($entries[0], null);
+            }
+
+            return new FallbackSceneVideoProvider(array_map(function (string $entry) {
+                [$name, $model] = array_pad(explode(':', $entry, 2), 2, null);
+
+                return ['label' => $entry, 'provider' => $this->makeSceneVideoProvider($name, $model)];
+            }, $entries));
+        });
+    }
+
+    /**
+     * A provider setting is either one name ("nine_router") or an ordered, comma-separated
+     * rollover chain of "name[:model]" entries ("nine_router:ag/gemini-3.1-flash-image,gemini").
+     *
+     * @return string[]
+     */
+    private function chainEntries(string $spec): array
+    {
+        return array_values(array_filter(array_map('trim', explode(',', $spec))));
+    }
+
+    private function makeImageChain($app, string $spec, string $defaultNineRouterModel, string $envName): ImageGenerationProvider
+    {
+        $entries = $this->chainEntries($spec);
+
+        if (count($entries) <= 1 && ! str_contains($spec, ':')) {
+            return $this->makeImageProvider($app, $spec, $defaultNineRouterModel, $envName);
+        }
+
+        return new FallbackImageGenerationProvider(array_map(function (string $entry) use ($app, $defaultNineRouterModel, $envName) {
+            [$name, $model] = array_pad(explode(':', $entry, 2), 2, null);
+
+            return ['label' => $entry, 'provider' => $this->makeImageProvider($app, $name, $model ?: $defaultNineRouterModel, $envName)];
+        }, $entries));
+    }
+
+    private function makeSceneVideoProvider(string $provider, ?string $model): SceneVideoProvider
+    {
+        return match ($provider) {
+            'camera_motion' => new CameraMotionSceneVideoProvider(config('services.media.ffmpeg_bin', 'ffmpeg')),
+            'nine_router' => new NineRouterSceneVideoProvider(
+                (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                config('services.nine_router.api_key'),
+                $model ?: (string) config('services.nine_router.video_model'),
+                (string) config('services.nine_router.video_resolution', '720p'),
+            ),
+            'gemini_omni' => new GeminiOmniSceneVideoProvider(
+                new GeminiInteractionsClient((string) config('services.gemini.api_key')),
+                $model ?: (string) config('services.gemini.video_model', 'gemini-omni-1.1-flash'),
+                (string) config('services.gemini.video_resolution', '720p'),
+            ),
+            default => throw new InvalidArgumentException("Unknown AI_SCENE_VIDEO_PROVIDER entry [{$provider}]. Valid values: camera_motion, nine_router, gemini_omni (comma-separate to roll over in order)."),
+        };
+    }
+    private function makeImageProvider($app, string $provider, string $nineRouterModel, string $envName): ImageGenerationProvider
+    {
+        return match ($provider) {
+            'mock' => $app->make(MockImageGenerationProvider::class),
+            'nine_router' => new NineRouterImageGenerationProvider(
+                (string) config('services.nine_router.base_url', 'http://localhost:20128/v1'),
+                config('services.nine_router.api_key'),
+                $nineRouterModel,
+            ),
+            'gemini' => new GeminiImageGenerationProvider(
+                new GeminiInteractionsClient((string) config('services.gemini.api_key')),
+                (string) config('services.gemini.image_model', 'gemini-nano-banana-2.1'),
+            ),
+            default => throw new InvalidArgumentException("Unknown {$envName} [{$provider}]. Valid values: mock, nine_router, gemini."),
+        };
     }
 }

@@ -7,6 +7,7 @@ use App\Jobs\Concerns\ChecksCancellation;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\Video;
+use App\Services\Video\DownloadProgress;
 use App\Services\Video\FFmpegService;
 use App\Services\Video\UrlVideoDownloader;
 use Illuminate\Bus\Queueable;
@@ -49,7 +50,30 @@ class ImportVideoJob implements ShouldQueue
                 $this->abortIfCancelled($processingJob);
                 $processingJob->markProgress(10, 'Downloading video...');
                 $destDir = $disk->path("videos/{$video->id}");
-                $downloaded = $downloader->download($video->source_url, $destDir);
+                $downloaded = $downloader->download(
+                    $video->source_url,
+                    $destDir,
+                    // Downloading owns the 10-40% band of this job's overall bar
+                    // (40 is where metadata reading picks up below), so yt-dlp's
+                    // own 0-100% per stream is scaled into it rather than
+                    // overwriting the whole bar. The message keeps yt-dlp's real
+                    // numbers, which is what makes a slow-but-alive download
+                    // visibly different from a stuck one.
+                    function (DownloadProgress $progress) use ($processingJob) {
+                        // Stages without a percentage of their own are pinned to an
+                        // end of the band rather than falling back to 0 — otherwise
+                        // the bar visibly jumps backwards (38% mid-download, then
+                        // 10% the moment merging starts).
+                        $percent = match ($progress->stage) {
+                            DownloadProgress::STAGE_EXTRACTING => 10,
+                            DownloadProgress::STAGE_MERGING, DownloadProgress::STAGE_COMPLETED => 40,
+                            DownloadProgress::STAGE_FAILED => $processingJob->progress,
+                            default => 10 + (int) round(($progress->percent ?? 0) * 0.3),
+                        };
+
+                        $processingJob->markProgress($percent, $progress->describe());
+                    }
+                );
 
                 $relativePath = 'videos/' . $video->id . '/' . basename($downloaded['path']);
                 $metadata = $video->metadata ?? [];

@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
+import { CreateCartoonVideoButton } from "@/components/cartoon-videos/CreateCartoonVideoButton";
 import type { ContentBrief } from "@/lib/types";
 
 const ACTIVE_STATUSES = ["pending", "searching", "fetching_sources", "generating_script", "finding_videos"];
@@ -165,6 +166,15 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
       {brief.status === "failed" && (
         <Card className="border-danger/30 bg-danger/5 p-5">
           <p className="text-sm text-danger">{brief.failure_reason || "Riset konten gagal."}</p>
+          {/* The Naskah card below only renders once a script exists, so a brief that failed
+              while writing it would otherwise have no way to retry. Sources are already stored,
+              so this reruns just the script step. */}
+          {canRegenerate && !brief.narrative_full_script && !brief.narrative_title && (
+            <Button className="mt-3" size="sm" variant="secondary" onClick={handleRegenerate} loading={regenerating}>
+              <RotateCcw className="size-3.5" />
+              Buat Ulang Naskah
+            </Button>
+          )}
         </Card>
       )}
 
@@ -219,6 +229,13 @@ export default function ContentBriefDetailPage({ params }: { params: Promise<{ i
                 <Download className="size-3.5" />
                 Unduh .txt
               </Button>
+              <CreateCartoonVideoButton
+                sourceType="content_brief"
+                sourceId={briefId}
+                size="sm"
+                disabled={brief.status !== "completed" || !brief.narrative_full_script}
+                title="Ubah naskah ini menjadi video pendek bergaya kartun"
+              />
               <Button size="sm" variant="secondary" onClick={handleRegenerate} loading={regenerating} disabled={!canRegenerate}>
                 <RotateCcw className="size-3.5" />
                 Buat Ulang Naskah

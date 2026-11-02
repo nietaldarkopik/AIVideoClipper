@@ -1812,6 +1812,144 @@ class FFmpegService
         }
     }
 
+    /**
+     * Compose an image onto a vertical canvas: the image scaled to full width and
+     * centered over a blurred, cropped copy of itself. Image models often ignore the
+     * requested aspect ratio and return a square; for flat cartoon art on a simple
+     * background this reads as a deliberate vertical layout, unlike a hard crop that
+     * cuts the subject or black bars. A no-op copy when the image is already ~9:16.
+     */
+    public function fitImageToVertical(string $inPath, string $outPath, int $width = 1080, int $height = 1920): void
+    {
+        $this->ensureDir($outPath);
+
+        $dims = $this->probe($inPath);
+
+        // Image models often draw a portrait picture inside a square canvas, leaving
+        // white pillarbox bars. Trim those first so the art itself fills the frame.
+        $trim = $this->detectWhiteSideBars($inPath, $dims['width'], $dims['height']);
+        if ($trim !== null) {
+            $dims = ['width' => $trim['w'], 'height' => $trim['h']];
+        }
+        $pre = $trim !== null ? "crop={$trim['w']}:{$trim['h']}:{$trim['x']}:{$trim['y']}," : '';
+
+        if ($dims['width'] && $dims['height'] && abs($dims['width'] / $dims['height'] - $width / $height) < 0.02) {
+            $result = Process::timeout(60)->run([
+                $this->ffmpegBin, '-y', '-i', $inPath,
+                '-vf', "{$pre}scale={$width}:{$height}", '-frames:v', '1', '-q:v', '2',
+                $outPath,
+            ]);
+            $this->assertSuccess($result, 'normalize scene image');
+
+            return;
+        }
+
+        $result = Process::timeout(60)->run([
+            $this->ffmpegBin, '-y', '-i', $inPath,
+            '-filter_complex',
+            "[0:v]{$pre}split[a][b];[a]scale={$width}:{$height}:force_original_aspect_ratio=increase,crop={$width}:{$height},boxblur=40:5[bg];"
+                . "[b]scale={$width}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2",
+            '-frames:v', '1', '-q:v', '2',
+            $outPath,
+        ]);
+        $this->assertSuccess($result, 'fit image to vertical canvas');
+    }
+
+    /**
+     * Find near-white pillarbox bars on the left/right of an image (negate turns white
+     * into black, which cropdetect treats as empty). Only returns a crop for the
+     * specific case of a full-height picture with side bars: trimming any tighter would
+     * also cut into a cartoon that legitimately has a white background.
+     *
+     * @return array{w: int, h: int, x: int, y: int}|null
+     */
+    private function detectWhiteSideBars(string $path, ?int $width, ?int $height): ?array
+    {
+        if (! $width || ! $height) {
+            return null;
+        }
+
+        $result = Process::timeout(30)->run([
+            $this->ffmpegBin, '-hide_banner', '-i', $path,
+            // skip=0: cropdetect discards its first frames by default, and a still image has only one.
+            '-vf', 'negate,cropdetect=limit=0.1:round=2:reset=0:skip=0', '-frames:v', '1', '-f', 'null', '-',
+        ]);
+
+        if (! preg_match_all('/crop=(\d+):(\d+):(\d+):(\d+)/', $result->errorOutput(), $m, PREG_SET_ORDER)) {
+            return null;
+        }
+
+        [, $w, $h, $x, $y] = array_map('intval', end($m));
+
+        $fullHeight = $h >= $height * 0.95;
+        $meaningfulBars = $w <= $width * 0.85;
+        $notTooThin = $w >= $width * 0.3;
+        // Symmetric bars: a lopsided detection is more likely real content than padding.
+        $centered = abs(($x + $w / 2) - $width / 2) <= $width * 0.05;
+
+        return ($fullHeight && $meaningfulBars && $notTooThin && $centered) ? ['w' => $w, 'h' => $h, 'x' => $x, 'y' => $y] : null;
+    }
+
+    /**
+     * Join per-scene clips + narration into one vertical video for a cartoon explainer.
+     *
+     * Each scene's clip is conformed to the scene's `duration` regardless of its own
+     * length: an AI video model returns whatever length it likes, so a shorter clip
+     * holds its last frame (tpad clone) and a longer one is cut (trim). Audio is padded
+     * or cut the same way so every scene's video and audio stay the exact same length —
+     * which is what keeps a concat of many scenes from drifting out of sync.
+     *
+     * @param  array<int, array{clip: string, audio: string, duration: float}>  $scenes
+     */
+    public function assembleCartoonVideo(array $scenes, ?string $subtitlesAssPath, string $outPath, int $width = 1080, int $height = 1920): void
+    {
+        if (empty($scenes)) {
+            throw new RuntimeException('Cannot assemble a cartoon video with no scenes.');
+        }
+
+        $this->ensureDir($outPath);
+
+        $inputArgs = [];
+        $graph = [];
+        $concatInputs = '';
+
+        foreach (array_values($scenes) as $i => $scene) {
+            $d = number_format(max(0.5, $scene['duration']), 3, '.', '');
+            $inputArgs = [...$inputArgs, '-i', $scene['clip'], '-i', $scene['audio']];
+            $v = $i * 2;
+            $a = $v + 1;
+
+            $graph[] = "[{$v}:v]scale={$width}:{$height}:force_original_aspect_ratio=increase,crop={$width}:{$height},setsar=1,"
+                . 'fps=' . self::FADE_CONCAT_FPS . ",tpad=stop_mode=clone:stop_duration={$d},trim=duration={$d},setpts=PTS-STARTPTS[v{$i}]";
+            $graph[] = "[{$a}:a]aresample=" . self::CONCAT_AUDIO_SAMPLE_RATE
+                . ",aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration={$d},asetpts=PTS-STARTPTS[a{$i}]";
+            $concatInputs .= "[v{$i}][a{$i}]";
+        }
+
+        $graph[] = $concatInputs . 'concat=n=' . count($scenes) . ':v=1:a=1[vcat][acat]';
+
+        $videoLabel = 'vcat';
+        if ($subtitlesAssPath && file_exists($subtitlesAssPath)) {
+            $graph[] = "[vcat]ass='" . $this->escapeFilterPath($subtitlesAssPath) . "'[vout]";
+            $videoLabel = 'vout';
+        }
+
+        $this->runWithFilterScript(
+            $inputArgs,
+            $graph,
+            ['-map', "[{$videoLabel}]", '-map', '[acat]'],
+            [
+                '-c:v', 'libx264', '-preset', $this->x264Preset, '-crf', '21', '-pix_fmt', 'yuv420p',
+                '-r', (string) self::FADE_CONCAT_FPS,
+                '-c:a', 'aac', '-b:a', '160k',
+                '-movflags', '+faststart',
+                $outPath,
+            ],
+            'assemble cartoon video',
+            1800,
+        );
+    }
+
     private function ensureDir(string $filePath): void
     {
         $dir = dirname($filePath);

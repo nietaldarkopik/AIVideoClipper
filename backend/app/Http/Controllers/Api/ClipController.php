@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ClipResource;
 use App\Jobs\GenerateClipEmbeddingJob;
+use App\Jobs\PublishClipJob;
 use App\Jobs\RenderClipJob;
 use App\Models\Clip;
 use App\Models\CoverTemplate;
@@ -22,6 +23,7 @@ use App\Services\Video\ClipCreditFormatter;
 use App\Services\Video\CoverGeneratorService;
 use App\Services\Video\DefaultTemplateConfig;
 use App\Services\Video\LayerOverrideMerger;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Log;
@@ -99,6 +101,20 @@ class ClipController extends Controller
                 fn ($q) => $q->where('social_account_id', $request->integer('scheduled_social_account_id'))
                     ->where('status', SocialPost::STATUS_SCHEDULED)
             );
+        }
+        // "Scheduled between X and Y" — independent of scheduled_platform/
+        // scheduled_social_account_id above, so either can narrow it further.
+        // Both bounds optional: either alone is a valid one-sided range.
+        if ($request->filled('scheduled_from') || $request->filled('scheduled_to')) {
+            $query->whereHas('socialPosts', function ($q) use ($request) {
+                $q->where('status', SocialPost::STATUS_SCHEDULED);
+                if ($request->filled('scheduled_from')) {
+                    $q->where('scheduled_at', '>=', $request->date('scheduled_from'));
+                }
+                if ($request->filled('scheduled_to')) {
+                    $q->where('scheduled_at', '<=', $request->date('scheduled_to')->endOfDay());
+                }
+            });
         }
         // The YouTube/etc uploader name captured at import time (Video::metadata->
         // channel_name — see UrlVideoDownloader), NOT a foreign key to any Channel
@@ -571,6 +587,101 @@ class ClipController extends Controller
             'moved_count' => count($movedIds),
             'created_count' => count($createdIds),
             'cancelled_count' => $cancelledCount,
+        ]);
+    }
+
+    /**
+     * Sets an explicit publish schedule for a caller-picked set of clips, across
+     * one or more target accounts at once — the "Set Schedule" bulk action on the
+     * clips page. Deliberately its own stagger loop rather than reusing
+     * AutoPublishScheduler::rescheduleBulk(): that method always anchors its
+     * cursor at now() (see its docblock), with no way to start from a caller-
+     * chosen date/time, which is the entire point of this action (vs. bulk-
+     * reschedule's "redistribute starting from whenever this runs").
+     *
+     * Each target account gets its own cursor starting at $scheduledAt, advancing
+     * by a random gap in [gap_min_minutes, gap_max_minutes] per clip — same
+     * "one account's queue is independent of another's" reasoning as
+     * AutoPublishScheduler. A clip already published/in-flight to a given
+     * account is left untouched rather than double-booked; a clip with an
+     * existing scheduled/ready/failed/cancelled post there gets that post moved
+     * to the new time instead of creating a duplicate.
+     */
+    public function bulkSchedule(Request $request)
+    {
+        $data = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1'],
+            'clip_ids.*' => ['integer', 'exists:clips,id'],
+            'social_account_ids' => ['required', 'array', 'min:1'],
+            'social_account_ids.*' => ['integer', 'exists:social_accounts,id'],
+            'scheduled_at' => ['required', 'date'],
+            'gap_min_minutes' => ['sometimes', 'integer', 'min:0'],
+            'gap_max_minutes' => ['sometimes', 'integer', 'min:0'],
+        ]);
+
+        $accounts = SocialAccount::where('user_id', $request->user()->id)
+            ->where('status', SocialAccount::STATUS_CONNECTED)
+            ->whereIn('id', $data['social_account_ids'])
+            ->get();
+        if ($accounts->isEmpty()) {
+            return response()->json(['message' => 'Select at least one connected account.'], 422);
+        }
+
+        $clips = Clip::whereIn('id', $data['clip_ids'])
+            ->whereHas('project', fn ($q) => $q->where('user_id', $request->user()->id))
+            ->where('status', Clip::STATUS_COMPLETED)
+            ->with('socialPosts')
+            ->get();
+        if ($clips->isEmpty()) {
+            return response()->json(['message' => 'No eligible clips selected — a clip must finish rendering first.'], 422);
+        }
+
+        $gapMinSeconds = (int) ($data['gap_min_minutes'] ?? 30) * 60;
+        $gapMaxSeconds = max($gapMinSeconds, (int) ($data['gap_max_minutes'] ?? 90) * 60);
+        $nonTerminalStatuses = [SocialPost::STATUS_PUBLISHED, SocialPost::STATUS_UPLOADING, SocialPost::STATUS_PUBLISHING];
+
+        $cursors = [];
+        foreach ($accounts as $account) {
+            $cursors[$account->id] = Carbon::parse($data['scheduled_at']);
+        }
+
+        $scheduledCount = 0;
+        foreach ($clips as $clip) {
+            foreach ($accounts as $account) {
+                $existing = $clip->socialPosts->firstWhere('social_account_id', $account->id);
+                if ($existing && in_array($existing->status, $nonTerminalStatuses, true)) {
+                    continue;
+                }
+
+                $slot = $cursors[$account->id];
+
+                if ($existing) {
+                    $existing->update(['status' => SocialPost::STATUS_SCHEDULED, 'scheduled_at' => $slot]);
+                    $post = $existing;
+                } else {
+                    $post = SocialPost::create([
+                        'clip_id' => $clip->id,
+                        'social_account_id' => $account->id,
+                        'platform' => $account->platform,
+                        'title' => $clip->title,
+                        'caption' => $clip->caption,
+                        'hashtags' => $clip->hashtags,
+                        'status' => SocialPost::STATUS_SCHEDULED,
+                        'scheduled_at' => $slot,
+                    ]);
+                }
+
+                PublishClipJob::dispatch($post->id)->delay($slot);
+                $scheduledCount++;
+
+                $gap = $gapMaxSeconds > $gapMinSeconds ? random_int($gapMinSeconds, $gapMaxSeconds) : $gapMinSeconds;
+                $cursors[$account->id] = $slot->clone()->addSeconds($gap);
+            }
+        }
+
+        return response()->json([
+            'message' => "Scheduled {$scheduledCount} post(s).",
+            'scheduled_count' => $scheduledCount,
         ]);
     }
 

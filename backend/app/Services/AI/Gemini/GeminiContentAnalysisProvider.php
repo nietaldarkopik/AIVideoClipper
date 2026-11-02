@@ -191,17 +191,31 @@ class GeminiContentAnalysisProvider implements ContentAnalysisProvider
 
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript of a
-long video, find the {$maxCandidates} best self-contained "punchline" moments to cut
-into short vertical clips (like TikTok/Reels/Shorts) — cold-open hooks, twist
-reveals, and payoff lines that work with little to no extra context.
+long video, find the {$maxCandidates} best self-contained "punchline" and
+high-retention moments to cut into short vertical clips (like TikTok/Reels/Shorts) —
+cold-open hooks, twist reveals, emotional peaks, and payoff lines that work with
+little to no extra context.
 
 Return up to {$maxCandidates} candidates. Each needs: start_time/end_time (seconds;
 15-{$maxDuration}s span after start_time — {$maxDuration}s is a HARD CEILING, never
 exceed it even if the moment feels like it deserves more room), the six
 1-100 scores plus viral_potential, hook_text (the exact or near-exact opening line,
-in the transcript's own language), moment_type, 2-4 short reasons, a one-sentence
-explanation, a short punchy suggested_title, a 1-2 sentence suggested_caption, and
-4-6 relevant hashtags.
+in the transcript's own language), moment_type, 2-4 short reasons explaining why this
+clip grabs attention and keeps viewers watching until the end, a one-sentence
+explanation, a short punchy high-CTR suggested_title, a 1-2 sentence suggested_caption
+to boost comments and shares, and 4-6 relevant hashtags.
+
+To maximize viewer retention and viral potential, actively scan and prioritize moments
+containing these core engagement drivers:
+
+- Humor & Satire: jokes, self-deprecating humor, sharp satire, funny anecdotes, witty
+  comebacks, or unique local punchlines/nicknames.
+- High-Stakes & Bold Statements: provocative claims, extreme challenges, or intense
+  personal commitments that instantly spark curiosity or debate.
+- Sharp Contrast & Plot Twist: transformation stories (e.g. past vs. present) or sudden
+  narrative turns where a serious setup leads to an unexpected payoff.
+- Relatable & Spoken-Word Charm: engaging discussions on social/cultural topics
+  delivered with authentic, casual, or entertaining delivery.
 
 {$coverInstructions}
 

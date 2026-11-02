@@ -58,7 +58,21 @@ class RenderClipJob implements ShouldQueue
         ImageGenerationProvider $imageGen,
         CoverGeneratorService $covers,
     ): void {
-        $clip = Clip::with(['video', 'template', 'templateVersion', 'clipCandidate'])->findOrFail($this->clipId);
+        $clip = Clip::with(['video', 'template', 'templateVersion', 'clipCandidate'])->find($this->clipId);
+
+        // Same case as PublishClipJob's missing-post guard: the clip (or its
+        // whole project) was deleted while this render was still queued, so
+        // there is nothing to render and no retry could bring the row back.
+        // Returning quietly keeps a deletion from filling failed_jobs, and
+        // matters more here than it looks — both the clips page and the
+        // projects page can delete in bulk, so one click can orphan a lot of
+        // queued renders at once.
+        if (! $clip) {
+            Log::info('Render skipped — clip no longer exists', ['clip_id' => $this->clipId]);
+
+            return;
+        }
+
         $disk = Storage::disk('media');
 
         $processingJob = ProcessingJob::create([

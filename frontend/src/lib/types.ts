@@ -815,6 +815,10 @@ export interface VideoBatchItem {
   status: VideoBatchItemStatus;
   progress: number;
   message: string | null;
+  // Live detail from whichever job is running for this item right now — the
+  // download's percentage/speed/ETA, which `message` is too coarse to carry.
+  // Only present on the batch detail endpoint, and only while something runs.
+  live_message?: string | null;
   failure_reason: string | null;
   clips_generated: number;
   posts_published: number;
@@ -1227,4 +1231,128 @@ export interface ResearchDashboard {
     sources: number;
     research_date: string;
   }[];
+}
+
+// --- Cartoon explainer videos ---
+
+export type CartoonVideoStatus =
+  | "pending"
+  | "storyboarding"
+  | "storyboard_ready"
+  | "rendering"
+  | "assembling"
+  | "completed"
+  | "needs_attention"
+  | "failed"
+  | "cancelled";
+
+export type CartoonSceneStatus = "pending" | "processing" | "done" | "failed";
+
+export interface CartoonScene {
+  id: number;
+  position: number;
+  narration: string;
+  visual_prompt: string;
+  motion_prompt: string | null;
+  status: CartoonSceneStatus;
+  error: string | null;
+  audio_duration: number | null;
+  image_provider: string | null;
+  clip_provider: string | null;
+  image_url: string | null;
+  clip_url: string | null;
+}
+
+export interface CartoonVideo {
+  id: number;
+  source_type: "content_idea" | "content_brief";
+  source_id: number;
+  title: string;
+  topic: string | null;
+  character_description: string | null;
+  style: string;
+  voice: string | null;
+  motion_provider: string;
+  status: CartoonVideoStatus;
+  progress: number;
+  message: string | null;
+  failure_reason: string | null;
+  duration_seconds: number | null;
+  url: string | null;
+  thumbnail_url: string | null;
+  project_id: number | null;
+  clip_id: number | null;
+  estimated_cost_usd: number | null;
+  scenes?: CartoonScene[];
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+// --- AI assistant ---
+export type AssistantStatus = "idle" | "running" | "awaiting_approval" | "failed";
+export type AssistantActionRisk = "write" | "outbound" | "destructive";
+export type AssistantActionStatus = "pending" | "approved" | "rejected" | "executed" | "failed";
+
+export interface AssistantConfig {
+  provider: string;
+  configured: boolean;
+  tool_count: number;
+  max_files: number;
+  max_file_mb: number;
+  accepted_formats: string[];
+}
+
+export interface AssistantAttachment {
+  id: number;
+  name: string;
+  mime: string | null;
+  size_bytes: number;
+  kind: "image" | "document" | "spreadsheet" | "text" | "unsupported";
+  readable: boolean;
+  note: string | null;
+  url: string | null;
+}
+
+export interface AssistantToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface AssistantMessage {
+  id: number;
+  role: "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls: AssistantToolCall[] | null;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  attachments: AssistantAttachment[];
+  created_at: string;
+}
+
+export interface AssistantAction {
+  id: number;
+  tool_call_id: string;
+  tool: string;
+  risk: AssistantActionRisk;
+  arguments: Record<string, unknown>;
+  summary: string;
+  status: AssistantActionStatus;
+  result: { ok?: boolean; content?: string; message?: string } | null;
+  decided_at: string | null;
+}
+
+export interface AssistantConversationSummary {
+  id: number;
+  title: string | null;
+  status: AssistantStatus;
+  last_message_at: string | null;
+  created_at: string;
+}
+
+export interface AssistantConversation extends AssistantConversationSummary {
+  failure_reason: string | null;
+  messages: AssistantMessage[];
+  actions: AssistantAction[];
 }

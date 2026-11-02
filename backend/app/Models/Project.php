@@ -35,6 +35,21 @@ class Project extends Model
     public const STATUS_COMPLETED = 'completed';
     public const STATUS_FAILED = 'failed';
 
+    /**
+     * Statuses that mean a queued job is working on this project right now, as
+     * opposed to draft/completed/failed where nothing is holding it. Deleting a
+     * project in one of these leaves the running job writing to a row that no
+     * longer exists, so bulk actions skip them.
+     */
+    public const ACTIVE_STATUSES = [
+        self::STATUS_UPLOADING,
+        self::STATUS_PROCESSING,
+        self::STATUS_TRANSCRIBING,
+        self::STATUS_ANALYZING,
+        self::STATUS_GENERATING_CLIPS,
+        self::STATUS_RENDERING,
+    ];
+
     protected $fillable = [
         'user_id', 'title', 'description', 'origin_type', 'origin_id', 'status', 'failure_reason', 'last_edited_at',
     ];

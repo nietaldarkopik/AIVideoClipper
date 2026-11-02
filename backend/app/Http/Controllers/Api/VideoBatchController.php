@@ -7,9 +7,12 @@ use App\Rules\PublicHttpUrl;
 use App\Http\Resources\VideoBatchItemResource;
 use App\Http\Resources\VideoBatchResource;
 use App\Jobs\ProcessBatchItemJob;
+use App\Models\ProcessingJob;
+use App\Models\Project;
 use App\Models\VideoBatch;
 use App\Models\VideoBatchItem;
 use App\Services\Batch\VideoBatchFactory;
+use App\Services\Video\ProjectDeletionService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -19,6 +22,8 @@ class VideoBatchController extends Controller
     public function index(Request $request)
     {
         $batches = $request->user()->videoBatches()
+            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->string('status')))
+            ->when($request->filled('search'), fn ($q) => $q->where('name', 'like', '%'.$request->string('search').'%'))
             ->latest()
             ->paginate($request->integer('per_page', 12));
 
@@ -66,7 +71,14 @@ class VideoBatchController extends Controller
     {
         $this->authorizeBatch($request, $videoBatch);
 
-        $videoBatch->load(['items.project:id,title,status']);
+        $videoBatch->load([
+            'items.project:id,title,status',
+            // Only the running one: a finished job's last message is stale the
+            // moment it completes, and the item's own message takes over then.
+            'items.processingJobs' => fn ($q) => $q
+                ->where('status', ProcessingJob::STATUS_RUNNING)
+                ->select(['id', 'project_id', 'progress', 'message', 'status']),
+        ]);
 
         return VideoBatchResource::make($videoBatch);
     }
@@ -75,8 +87,44 @@ class VideoBatchController extends Controller
     {
         $this->authorizeBatch($request, $videoBatch);
 
-        if (! in_array($videoBatch->status, [VideoBatch::STATUS_PENDING, VideoBatch::STATUS_RUNNING], true)) {
+        if (! $this->cancelBatch($videoBatch)) {
             return response()->json(['message' => 'This batch already finished.'], 422);
+        }
+
+        return VideoBatchResource::make($videoBatch->fresh());
+    }
+
+    /**
+     * Stop every selected batch that's still pending/running in one call — list-page
+     * counterpart to cancel() above, same cooperative-cancel rules per batch. Batches
+     * that already finished (or don't belong to the user) are silently skipped rather
+     * than failing the whole request, since a bulk selection routinely mixes both.
+     */
+    public function bulkCancel(Request $request)
+    {
+        $data = $request->validate([
+            'batch_ids' => ['required', 'array', 'min:1'],
+            'batch_ids.*' => ['integer', 'exists:video_batches,id'],
+        ]);
+
+        $batches = $request->user()->videoBatches()->whereIn('id', $data['batch_ids'])->get();
+
+        $cancelled = $batches->filter(fn (VideoBatch $batch) => $this->cancelBatch($batch));
+
+        return response()->json([
+            'message' => "Stopped {$cancelled->count()} batch(es).",
+            'cancelled_count' => $cancelled->count(),
+        ]);
+    }
+
+    /**
+     * @return bool whether the batch was pending/running (and so got cancelled) —
+     *              false means it had already finished and nothing changed.
+     */
+    private function cancelBatch(VideoBatch $videoBatch): bool
+    {
+        if (! in_array($videoBatch->status, [VideoBatch::STATUS_PENDING, VideoBatch::STATUS_RUNNING], true)) {
+            return false;
         }
 
         if ($videoBatch->status === VideoBatch::STATUS_PENDING) {
@@ -90,7 +138,7 @@ class VideoBatchController extends Controller
             $videoBatch->update(['cancel_requested' => true]);
         }
 
-        return VideoBatchResource::make($videoBatch->fresh());
+        return true;
     }
 
     /**
@@ -129,7 +177,7 @@ class VideoBatchController extends Controller
         return VideoBatchItemResource::make($item->fresh());
     }
 
-    public function destroy(Request $request, VideoBatch $videoBatch)
+    public function destroy(Request $request, VideoBatch $videoBatch, ProjectDeletionService $deleter)
     {
         $this->authorizeBatch($request, $videoBatch);
 
@@ -137,9 +185,59 @@ class VideoBatchController extends Controller
             return response()->json(['message' => 'Cancel this batch before deleting it.'], 422);
         }
 
+        $this->deleteLinkedProjects($videoBatch, $deleter);
         $videoBatch->delete();
 
         return response()->json(['message' => 'Batch deleted.']);
+    }
+
+    /**
+     * A batch's items each optionally own one Project (populated once
+     * BatchItemDownloader imports that item's video — see its docblock), which in
+     * turn owns the imported source video, every rendered clip, and their files on
+     * disk. video_batch_items.project_id is nullOnDelete, not cascade (see its
+     * migration), so deleting the batch/items alone would leave those Projects
+     * behind as orphans forever — this walks them down explicitly before the batch
+     * itself goes.
+     */
+    private function deleteLinkedProjects(VideoBatch $videoBatch, ProjectDeletionService $deleter): void
+    {
+        $projectIds = $videoBatch->items()->whereNotNull('project_id')->pluck('project_id');
+
+        Project::whereIn('id', $projectIds)->get()->each(fn (Project $project) => $deleter->delete($project));
+    }
+
+    /**
+     * Same "must be stopped first" rule as destroy() above, applied per batch — a
+     * still-active batch in the selection is skipped rather than failing the whole
+     * request, since ProcessVideoBatchJob keeps writing to it via cancel_requested
+     * polling and deleting out from under that would just orphan its DB row.
+     */
+    public function bulkDestroy(Request $request, ProjectDeletionService $deleter)
+    {
+        $data = $request->validate([
+            'batch_ids' => ['required', 'array', 'min:1'],
+            'batch_ids.*' => ['integer', 'exists:video_batches,id'],
+        ]);
+
+        $batches = $request->user()->videoBatches()->whereIn('id', $data['batch_ids'])->get();
+
+        [$deletable, $active] = $batches->partition(
+            fn (VideoBatch $batch) => ! in_array($batch->status, [VideoBatch::STATUS_PENDING, VideoBatch::STATUS_RUNNING], true)
+        );
+
+        foreach ($deletable as $batch) {
+            $this->deleteLinkedProjects($batch, $deleter);
+            $batch->delete();
+        }
+
+        return response()->json([
+            'message' => $active->isEmpty()
+                ? "Deleted {$deletable->count()} batch(es)."
+                : "Deleted {$deletable->count()} batch(es). {$active->count()} still running were skipped — stop them first.",
+            'deleted_count' => $deletable->count(),
+            'skipped_count' => $active->count(),
+        ]);
     }
 
     private function authorizeBatch(Request $request, VideoBatch $videoBatch): void

@@ -11,6 +11,7 @@ use App\Jobs\RenderClipJob;
 use App\Models\Clip;
 use App\Models\Project;
 use App\Services\Video\ClipGenerationService;
+use App\Services\Video\ProjectDeletionService;
 use App\Services\Video\ProjectReprocessor;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Bus;
@@ -21,11 +22,36 @@ class ProjectController extends Controller
 {
     public function index(Request $request)
     {
-        $projects = $request->user()->projects()
+        $query = $request->user()->projects()
             ->withCount(['clips', 'clipCandidates'])
-            ->with(['videos' => fn ($q) => $q->latest()->limit(1)])
-            ->orderByDesc('last_edited_at')
-            ->orderByDesc('created_at')
+            ->with(['videos' => fn ($q) => $q->latest()->limit(1)]);
+
+        if ($request->filled('status')) {
+            $query->where('status', $request->string('status'));
+        }
+        if ($request->filled('search')) {
+            $query->where('title', 'like', '%'.$request->string('search').'%');
+        }
+
+        // Sorted in the database, not in the page already sent: the list pages
+        // through hundreds of projects, so a client-side sort would only ever
+        // reorder the current page.
+        $direction = $request->string('sort_dir')->lower()->toString() === 'asc' ? 'asc' : 'desc';
+
+        match ($request->string('sort_by')->toString()) {
+            'title' => $query->orderByRaw('title IS NULL')->orderBy('title', $direction),
+            'created_at' => $query->orderBy('created_at', $direction),
+            'clips_count' => $query->orderBy('clips_count', $direction),
+            // Unchanged default: most recently worked on first, with created_at
+            // breaking ties for the rows that have never been edited.
+            default => $query->orderBy('last_edited_at', $direction)->orderBy('created_at', $direction),
+        };
+
+        $projects = $query
+            // Stable tiebreaker — without one, rows sharing a sort value (several
+            // projects created in the same second, or any two with the same clip
+            // count) can swap places between pages and show up twice or not at all.
+            ->orderByDesc('id')
             ->paginate($request->integer('per_page', 12));
 
         return ProjectResource::collection($projects);
@@ -82,13 +108,51 @@ class ProjectController extends Controller
         return ProjectResource::make($project);
     }
 
-    public function destroy(Request $request, Project $project)
+    public function destroy(Request $request, Project $project, ProjectDeletionService $deleter)
     {
         $this->authorizeProject($request, $project);
 
-        $project->delete();
+        $deleter->delete($project);
 
         return response()->json(['message' => 'Project deleted.']);
+    }
+
+    /**
+     * Deletes a caller-chosen set of projects, each with everything under it —
+     * videos, clips, candidates and their files on disk (see
+     * ProjectDeletionService, the same path destroy() above takes).
+     *
+     * A project that's mid-pipeline is skipped rather than deleted: an import,
+     * analysis or render running right now still holds the row and keeps writing
+     * to it, and pulling it out from under that job turns a clean run into a
+     * stream of "model not found" failures. Same rule and same reporting as
+     * VideoBatchController::bulkDestroy, so "stop it first, then delete" behaves
+     * consistently across both list pages.
+     */
+    public function bulkDestroy(Request $request, ProjectDeletionService $deleter)
+    {
+        $data = $request->validate([
+            'project_ids' => ['required', 'array', 'min:1'],
+            'project_ids.*' => ['integer', 'exists:projects,id'],
+        ]);
+
+        $projects = $request->user()->projects()->whereIn('id', $data['project_ids'])->get();
+
+        [$deletable, $active] = $projects->partition(
+            fn (Project $project) => ! in_array($project->status, Project::ACTIVE_STATUSES, true)
+        );
+
+        foreach ($deletable as $project) {
+            $deleter->delete($project);
+        }
+
+        return response()->json([
+            'message' => $active->isEmpty()
+                ? "Deleted {$deletable->count()} project(s)."
+                : "Deleted {$deletable->count()} project(s). {$active->count()} still processing were skipped.",
+            'deleted_count' => $deletable->count(),
+            'skipped_count' => $active->count(),
+        ]);
     }
 
     public function analyze(Request $request, Project $project)
