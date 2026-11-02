@@ -16,6 +16,8 @@ const MOMENT_EMOJI: Record<string, string> = {
   educational: "🎓",
   story_peak: "📈",
   conclusion: "✅",
+  punchline: "😂",
+  reveal: "🎭",
 };
 
 function scoreTone(score: number): "success" | "warning" | "danger" {

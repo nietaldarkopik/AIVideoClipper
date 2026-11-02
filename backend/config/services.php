@@ -199,6 +199,19 @@ return [
         // AI-generated background for the reaction intro cover — see
         // RenderClipJob::composeIntroOutro().
         'cover_image_provider' => env('AI_COVER_IMAGE_PROVIDER', 'mock'),
+        // Cartoon explainer videos (research idea/brief -> illustrated short) — see
+        // CartoonVideo. The storyboard splits a script into scenes; scene_video turns
+        // each scene's still image into a clip: 'camera_motion' = free FFmpeg zoom/pan,
+        // 'nine_router' = AI image-to-video via /videos/generations (grok), 'gemini_omni'
+        // = Gemini Omni (needs a billed GEMINI_API_KEY). Narration reuses tts_provider.
+        'storyboard_provider' => env('AI_STORYBOARD_PROVIDER', 'mock'),
+        // Chat assistant with tool-calling over the user's own data — see AssistantChatProvider.
+        'assistant_provider' => env('AI_ASSISTANT_PROVIDER', 'mock'),
+        'scene_video_provider' => env('AI_SCENE_VIDEO_PROVIDER', 'camera_motion'),
+        // Scene images get their OWN provider setting instead of reusing
+        // cover_image_provider: switching that one on would also change the reaction-intro
+        // covers RenderClipJob generates. Falls back to cover_image_provider when unset.
+        'cartoon_image_provider' => env('AI_CARTOON_IMAGE_PROVIDER'),
         'max_clips_per_video' => env('MAX_CLIPS_PER_VIDEO', 10),
         // Upper bound each AI content-analysis provider is told to target when
         // picking a candidate's start_time/end_time (see each provider's
@@ -225,6 +238,11 @@ return [
         // and unrelated to any Google Cloud/Vertex project credentials.
         'api_key' => env('GEMINI_API_KEY'),
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+        // Interactions API models for cartoon videos. Both have a free-tier quota of 0:
+        // enable billing on the key's project or every call fails with HTTP 429.
+        'image_model' => env('GEMINI_IMAGE_MODEL', 'gemini-nano-banana-2.1'),
+        'video_model' => env('GEMINI_VIDEO_MODEL', 'gemini-omni-1.1-flash'),
+        'video_resolution' => env('GEMINI_VIDEO_RESOLUTION', '720p'),
     ],
 
     'groq' => [
@@ -295,6 +313,18 @@ return [
         'content_idea_model' => env('NINE_ROUTER_CONTENT_IDEA_MODEL'),
         // Model id for the /images/generations endpoint — check GET {base_url}/models/image.
         'image_model' => env('NINE_ROUTER_IMAGE_MODEL'),
+        // Storyboard splitting for cartoon videos. Falls back to video_narrative_model,
+        // then `model` — see AIServiceProvider.
+        'storyboard_model' => env('NINE_ROUTER_STORYBOARD_MODEL'),
+        // Chat assistant (tool-calling). Falls back to `model`. Needs a model whose upstream
+        // supports function calling — a router like Kombo works even though its metadata says tools:false.
+        'assistant_model' => env('NINE_ROUTER_ASSISTANT_MODEL'),
+        // Scene images for cartoon videos (falls back to image_model) — e.g.
+        // ag/gemini-3.1-flash-image. See GET {base_url}/models/image.
+        'cartoon_image_model' => env('NINE_ROUTER_CARTOON_IMAGE_MODEL'),
+        // Image-to-video model for /videos/generations, e.g. xai/grok-imagine-video.
+        'video_model' => env('NINE_ROUTER_VIDEO_MODEL', 'xai/grok-imagine-video'),
+        'video_resolution' => env('NINE_ROUTER_VIDEO_RESOLUTION', '720p'),
     ],
 
     'whisper_engine' => [
@@ -351,6 +381,21 @@ return [
         // outright (observed with TikTok — no yt-dlp version fixes that, only a
         // different egress IP does); leave unset to download directly as before.
         'proxy' => env('YTDLP_PROXY'),
+        // Gets yt-dlp past YouTube's "Sign in to confirm you're not a bot" gate —
+        // "chrome"/"edge"/"firefox" reads cookies straight from that browser's own
+        // store on this machine (requires it to be logged into YouTube; only works
+        // where a real browser profile exists, not in headless/Docker), or a path
+        // to a Netscape-format cookies.txt exported from a browser extension.
+        'cookies_from_browser' => env('YTDLP_COOKIES_FROM_BROWSER'),
+        // Wall-clock ceiling for ONE yt-dlp download attempt. Was a hardcoded 900s
+        // (15 min), which a large source legitimately outgrows — a 460MB video at
+        // ~1.9MiB/s needs ~4 minutes of transfer but far longer once YouTube
+        // throttles the connection mid-download, and the process was being killed
+        // with "exceeded the timeout of 900 seconds" while it was still visibly
+        // progressing. The download now reports live progress (see
+        // UrlVideoDownloader::download), so a genuinely hung yt-dlp is caught by
+        // ReapStalledProcessingJobs going quiet rather than by this ceiling.
+        'process_timeout' => (int) env('YTDLP_PROCESS_TIMEOUT', 3600),
     ],
 
     'video_batch' => [

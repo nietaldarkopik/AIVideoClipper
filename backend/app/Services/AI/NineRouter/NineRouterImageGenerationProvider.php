@@ -50,7 +50,7 @@ class NineRouterImageGenerationProvider implements ImageGenerationProvider
         $response = $request->post(rtrim($this->baseUrl, '/') . '/images/generations?response_format=binary', [
             'model' => $this->model,
             'prompt' => $prompt,
-            'size' => '1080x1920',
+            'size' => $this->sizeFor($this->model),
         ]);
 
         if ($response->failed()) {
@@ -61,5 +61,20 @@ class NineRouterImageGenerationProvider implements ImageGenerationProvider
 
         file_put_contents($outputPath, $response->body());
         $span->success("image written: {$outputPath} (" . strlen($response->body()) . ' bytes)');
+    }
+
+    /**
+     * Each upstream accepts its own fixed set of sizes and silently falls back to a square
+     * for one it doesn't know. Verified against this instance: nb/* turns 1024x1792 into a
+     * real 9:16 (768x1344) but returns a square for 1080x1920; ag/* ignores size entirely.
+     * 1080x1920 stays the default so existing cover-image behavior is unchanged.
+     */
+    private function sizeFor(string $model): string
+    {
+        return match (true) {
+            str_starts_with($model, 'nb/') => '1024x1792',
+            str_starts_with($model, 'openai/gpt-image') => '1024x1536',
+            default => '1080x1920',
+        };
     }
 }

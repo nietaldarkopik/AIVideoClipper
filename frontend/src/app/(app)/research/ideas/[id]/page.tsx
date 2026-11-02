@@ -15,6 +15,7 @@ import { Textarea } from "@/components/ui/Input";
 import { PriorityPill, ScoreGrid } from "@/components/research/ScoreBar";
 import { SourceEvidence } from "@/components/research/SourceEvidence";
 import { NewProjectModal } from "@/components/projects/NewProjectModal";
+import { CreateCartoonVideoButton } from "@/components/cartoon-videos/CreateCartoonVideoButton";
 import { formatRelativeTime } from "@/lib/format";
 import type { ContentIdea } from "@/lib/types";
 
@@ -127,6 +128,7 @@ export default function ContentIdeaDetailPage() {
                 Buat Project
               </Button>
             )}
+            {idea.status !== "rejected" && <CreateCartoonVideoButton sourceType="content_idea" sourceId={idea.id} />}
           </div>
         </div>
       </div>

@@ -59,24 +59,49 @@ class NineRouterVideoNarrativeProvider implements VideoNarrativeProvider
             $request = $request->withToken($this->apiKey);
         }
 
-        $response = $request->post(rtrim($this->baseUrl, '/') . '/chat/completions', [
-            'model' => $this->model,
-            'stream' => false,
-            'response_format' => ['type' => 'json_object'],
-            'temperature' => 0.8,
-            'messages' => [
-                ['role' => 'system', 'content' => $systemPrompt],
-                ['role' => 'user', 'content' => $context],
-            ],
-        ]);
+        // A router can answer HTTP 200 with an EMPTY message after a long wait when the
+        // upstream behind it stalls (seen on a real brief: 252s, then content_len 0, while the
+        // identical request a few minutes later returned 8 KB). That is a transient failure
+        // the HTTP-level retry above can't see, so retry the whole call once before giving up.
+        $raw = '';
+        $response = null;
+        for ($attempt = 1; $attempt <= 2 && trim($raw) === ''; $attempt++) {
+            $response = $request->post(rtrim($this->baseUrl, '/') . '/chat/completions', [
+                'model' => $this->model,
+                'stream' => false,
+                'response_format' => ['type' => 'json_object'],
+                'temperature' => 0.8,
+                'messages' => [
+                    ['role' => 'system', 'content' => $systemPrompt],
+                    ['role' => 'user', 'content' => $context],
+                ],
+            ]);
 
-        if ($response->failed()) {
-            $span->failure($response->body());
+            if ($response->failed()) {
+                $span->failure($response->body());
 
-            throw new RuntimeException('9Router video narrative generation failed: ' . $response->body());
+                throw new RuntimeException('9Router video narrative generation failed: ' . $response->body());
+            }
+
+            $raw = (string) $response->json('choices.0.message.content');
         }
 
-        $raw = (string) $response->json('choices.0.message.content');
+        if (trim($raw) === '') {
+            $reason = (string) $response->json('choices.0.finish_reason');
+            $span->failure("empty response after 2 attempts (finish_reason={$reason})");
+
+            // finish_reason "refusal" means the model itself declined (safety policy), which
+            // is not an outage and retrying the same topic often repeats it — and it is
+            // non-deterministic: the identical request can pass on another try.
+            throw new RuntimeException(
+                in_array($reason, ['refusal', 'content_filter'], true)
+                    ? 'Model menolak menulis naskah untuk topik ini (kebijakan keselamatan model; sering terjadi pada topik alat exploit/peretasan). ' .
+                        'Coba "Buat ulang naskah" (hasilnya bisa berbeda), ubah topik menjadi sudut pandang pertahanan/edukasi, atau pilih model lain lewat NINE_ROUTER_VIDEO_NARRATIVE_MODEL.'
+                    : '9Router mengembalikan balasan kosong untuk naskah ini setelah 2 percobaan (finish_reason: ' . ($reason ?: 'tidak ada') .
+                        '). Biasanya gangguan sementara di router/model — coba "Buat ulang naskah".'
+            );
+        }
+
         $span->success($raw);
         $parsed = $this->extractJsonObject($raw) ?? [];
 

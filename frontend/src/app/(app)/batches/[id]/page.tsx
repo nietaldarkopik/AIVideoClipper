@@ -144,7 +144,7 @@ export default function BatchDetailPage({ params }: { params: Promise<{ id: stri
 
             <div className="mt-2 flex items-center justify-between text-xs text-muted">
               <span>
-                {item.status === "failed" ? item.failure_reason : item.message}
+                {item.status === "failed" ? item.failure_reason : item.live_message || item.message}
                 {item.status === "completed" &&
                   ` · ${item.clips_generated} clip${item.clips_generated === 1 ? "" : "s"}, ${item.posts_published} post${item.posts_published === 1 ? "" : "s"} published`}
               </span>

@@ -44,9 +44,19 @@ class RepublishOverdueSocialPosts extends Command
         // there is nothing to gain by waiting as long as jobs:reap-stalled does.
         $minutes = (int) ($this->option('minutes') ?? config('services.processing.publish_grace_minutes', 10));
 
+        $cutoff = now()->subMinutes($minutes);
+
+        // Also covers STATUS_READY: a post created by POST /social-posts without
+        // scheduled_at (the direct "publish now" path used by external callers)
+        // dispatches its PublishClipJob immediately, and if Redis or the 'publish'
+        // worker was down at that moment the job is lost and the post sits at
+        // 'ready' forever. PublishClipJob is unique per post, so a duplicate
+        // dispatch is harmless.
         $overdue = SocialPost::query()
-            ->where('status', SocialPost::STATUS_SCHEDULED)
-            ->where('scheduled_at', '<', now()->subMinutes($minutes))
+            ->where(function ($q) use ($cutoff) {
+                $q->where(fn ($q) => $q->where('status', SocialPost::STATUS_SCHEDULED)->where('scheduled_at', '<', $cutoff))
+                    ->orWhere(fn ($q) => $q->where('status', SocialPost::STATUS_READY)->where('updated_at', '<', $cutoff));
+            })
             ->with('clip')
             ->get();
 

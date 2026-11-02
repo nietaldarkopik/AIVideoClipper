@@ -25,6 +25,15 @@ return Application::configure(basePath: dirname(__DIR__))
         // Each command in its own OS process means one hanging never blocks another.
         $schedule->command('jobs:reap-stalled')->everyFiveMinutes()->onOneServer()->runInBackground();
 
+        // See App\Console\Commands\ReapStalledVideoBatches — same "reached running,
+        // then went quiet" detection as jobs:reap-stalled above, for VideoBatch rows
+        // instead of ProcessingJob (VideoBatch has no ProcessingJob row of its own).
+        // Also what makes the batch list/detail page's "Stop" button actually finish
+        // a batch whose worker is already gone, instead of leaving it at "running"
+        // forever with cancel_requested=true and nothing left to honor it. Same
+        // schedule:work caveat as jobs:reap-stalled.
+        $schedule->command('batches:reap-stalled')->everyFiveMinutes()->onOneServer()->runInBackground();
+
         // See App\Console\Commands\PollChannelWatches. Every 15 min, not 5: YouTube's
         // default quota is 10,000 units/day and playlistItems.list costs 1 unit/channel/
         // poll, so even 50 watched channels stays at ~4,800 units/day, leaving headroom
@@ -32,12 +41,24 @@ return Application::configure(basePath: dirname(__DIR__))
         // schedule:work caveat as jobs:reap-stalled above. withoutOverlapping() because
         // a network-bound poll across many channels is more likely to run long than the
         // 5-minute reap job is; runInBackground() for the same reason as above.
-        $schedule->command('channels:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+        //
+        // The explicit expiry on withoutOverlapping() is load-bearing, not tuning:
+        // its default is 1440 (24 HOURS). A run that dies without releasing its
+        // mutex — the scheduler being force-killed mid-run, a PC restart, a poll
+        // hung on an unreachable YouTube API — therefore leaves the lock behind for
+        // a full day, and every tick after that is silently skipped as "already
+        // running", with nothing logged anywhere to say why. That is exactly what
+        // happened on 2026-09-23: the 10:00 tick (the one minute where all five
+        // withoutOverlapping tasks below were due at once) orphaned all five locks,
+        // and channel watching sat dead for ~23 hours until noticed by hand. A few
+        // multiples of the interval is enough headroom for a slow run while letting
+        // an orphaned lock self-heal in minutes instead of a day.
+        $schedule->command('channels:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(30)->runInBackground();
 
         // See App\Console\Commands\PollFacebookMessages. Only Pages with
         // messenger_sync_enabled are polled, so this stays cheap even at 15 min.
         // Same schedule:work / runInBackground caveats as channels:poll above.
-        $schedule->command('messenger:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('messenger:poll')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(30)->runInBackground();
 
         // See App\Console\Commands\DailyContentResearch. Hourly rather than at a fixed
         // daily time on purpose: each content channel stores its own research times in
@@ -47,7 +68,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // The command only dispatches queued jobs, so it returns fast — but
         // withoutOverlapping() still guards against a slow database making two ticks
         // race and double-dispatch the same channel.
-        $schedule->command('research:daily')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('research:daily')->hourly()->onOneServer()->withoutOverlapping(120)->runInBackground();
 
         // See App\Console\Commands\SyncSocialMetrics. Hourly is the finest granularity
         // any tier in SocialMetricsSyncer asks for, so a more frequent tick would only
@@ -55,13 +76,13 @@ return Application::configure(basePath: dirname(__DIR__))
         // up to 200 posts, each a network call, and two overlapping runs would double
         // the API spend against the same YouTube quota channels:poll draws from. Same
         // schedule:work caveat as the three above.
-        $schedule->command('social:sync-metrics')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('social:sync-metrics')->hourly()->onOneServer()->withoutOverlapping(120)->runInBackground();
 
         // See App\Console\Commands\RefreshSocialTokens. Hourly against a 6-hour renewal
         // window, so an account gets several attempts before its token could actually
         // lapse — the point being that an overnight auto-publish never wakes up to a
         // dead token. Same schedule:work caveat as the ones above.
-        $schedule->command('social:refresh-tokens')->hourly()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('social:refresh-tokens')->hourly()->onOneServer()->withoutOverlapping(120)->runInBackground();
 
         // See App\Console\Commands\ReapStuckClipRenders and
         // App\Console\Commands\RepublishOverdueSocialPosts. Both exist because a
@@ -74,8 +95,10 @@ return Application::configure(basePath: dirname(__DIR__))
         // or a missed publish slot is directly visible to the end user, so it's
         // worth checking more often than an API sync nobody is staring at.
         // withoutOverlapping() + runInBackground() for the same reasons as above.
-        $schedule->command('clips:reap-stuck-renders')->everyTenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
-        $schedule->command('social:republish-overdue')->everyTenMinutes()->onOneServer()->withoutOverlapping()->runInBackground();
+        $schedule->command('clips:reap-stuck-renders')->everyTenMinutes()->onOneServer()->withoutOverlapping(20)->runInBackground();
+        $schedule->command('social:republish-overdue')->everyTenMinutes()->onOneServer()->withoutOverlapping(20)->runInBackground();
+        // Speech generated through POST /api/tts is throwaway; drop it after the retention window.
+        $schedule->command('tts:prune')->daily()->onOneServer()->withoutOverlapping(20);
     })
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([

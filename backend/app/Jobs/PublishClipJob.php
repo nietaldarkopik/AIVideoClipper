@@ -73,7 +73,22 @@ class PublishClipJob implements ShouldQueue, ShouldBeUnique
 
     public function handle(SocialProviderManager $manager, CoverGeneratorService $covers): void
     {
-        $post = SocialPost::with(['clip', 'socialAccount'])->findOrFail($this->socialPostId);
+        $post = SocialPost::with(['clip', 'socialAccount'])->find($this->socialPostId);
+
+        // The post is gone: its clip (or project) was deleted after this job was
+        // already sitting in the queue with a delay. Nothing to publish, and
+        // nothing a retry could ever fix — the row cannot come back. This is the
+        // same "my work is no longer wanted" case as the reschedule and
+        // already-published guards below, so it returns quietly instead of
+        // throwing: findOrFail() here meant every such job burned all four tries
+        // and then landed in failed_jobs, which is how deleting a batch of clips
+        // turned into hundreds of ModelNotFoundException failures trickling in
+        // for days afterwards as each delayed slot came due.
+        if (! $post) {
+            Log::info('Publish skipped — social post no longer exists', ['post_id' => $this->socialPostId]);
+
+            return;
+        }
 
         Log::info('Publishing clip to social platform', [
             'post_id' => $post->id,

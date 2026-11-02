@@ -19,6 +19,7 @@ import {
   Share2,
   CheckSquare,
   Square,
+  CalendarClock,
 } from "lucide-react";
 import { mutate } from "swr";
 import { useApi } from "@/lib/hooks";
@@ -35,6 +36,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { ClipCard } from "@/components/clips/ClipCard";
 import { ClipVideoModal } from "@/components/clips/ClipVideoModal";
 import { ClipMoveChannelModal } from "@/components/clips/ClipMoveChannelModal";
+import { ClipScheduleModal } from "@/components/clips/ClipScheduleModal";
 import { PLATFORM_LABELS, PLATFORMS } from "@/components/social/platforms";
 import { formatDuration, formatRelativeTime } from "@/lib/format";
 import type { Clip, Paginated, Project, SocialAccount } from "@/lib/types";
@@ -115,11 +117,14 @@ export default function AllClipsPage() {
   const [socialAccountId, setSocialAccountId] = useState("");
   const [scheduledPlatform, setScheduledPlatform] = useState("");
   const [scheduledSocialAccountId, setScheduledSocialAccountId] = useState("");
+  const [scheduledFrom, setScheduledFrom] = useState("");
+  const [scheduledTo, setScheduledTo] = useState("");
   const [sourceChannel, setSourceChannel] = useState("");
   const [aspectRatio, setAspectRatio] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
   const [moveChannelOpen, setMoveChannelOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [previewClip, setPreviewClip] = useState<Clip | null>(null);
   const [exporting, setExporting] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -128,11 +133,14 @@ export default function AllClipsPage() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
 
-  // Table-only pagination + server-side sort — the grid view instead just
-  // takes a large flat page (per_page=60, newest first), same as before this
-  // feature, since a card grid has no sortable columns to click.
+  // Server-side sort is table-only (a card grid has no sortable columns to
+  // click), but both views are now fully paginated — each keeps its own
+  // page/perPage so switching views (or the browser back button) doesn't leave
+  // one view's page number applied to the other's, very different, row counts.
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(25);
+  const [gridPage, setGridPage] = useState(1);
+  const [gridPerPage, setGridPerPage] = useState(60);
   const [sortBy, setSortBy] = useState<SortKey>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
@@ -154,7 +162,7 @@ export default function AllClipsPage() {
     const params = new URLSearchParams(
       view === "table"
         ? { per_page: String(perPage), page: String(page), sort_by: sortBy, sort_dir: sortDir }
-        : { per_page: "60" }
+        : { per_page: String(gridPerPage), page: String(gridPage) }
     );
     if (status) params.set("status", status);
     if (published) params.set("published", published);
@@ -162,6 +170,8 @@ export default function AllClipsPage() {
     if (socialAccountId) params.set("social_account_id", socialAccountId);
     if (scheduledPlatform) params.set("scheduled_platform", scheduledPlatform);
     if (scheduledSocialAccountId) params.set("scheduled_social_account_id", scheduledSocialAccountId);
+    if (scheduledFrom) params.set("scheduled_from", scheduledFrom);
+    if (scheduledTo) params.set("scheduled_to", scheduledTo);
     if (sourceChannel) params.set("source_channel", sourceChannel);
     if (aspectRatio) params.set("aspect_ratio", aspectRatio);
     if (projectFilter) params.set("project_id", projectFilter);
@@ -172,6 +182,8 @@ export default function AllClipsPage() {
     view,
     page,
     perPage,
+    gridPage,
+    gridPerPage,
     sortBy,
     sortDir,
     status,
@@ -180,6 +192,8 @@ export default function AllClipsPage() {
     socialAccountId,
     scheduledPlatform,
     scheduledSocialAccountId,
+    scheduledFrom,
+    scheduledTo,
     sourceChannel,
     aspectRatio,
     projectFilter,
@@ -199,6 +213,7 @@ export default function AllClipsPage() {
   // react-hooks/set-state-in-effect).
   function resetListing() {
     setPage(1);
+    setGridPage(1);
     setSelected([]);
   }
 
@@ -437,6 +452,43 @@ export default function AllClipsPage() {
               ))}
             </Select>
           )}
+          <div className="flex items-center gap-1.5" title="Filter clips by their scheduled publish date">
+            <Input
+              type="date"
+              value={scheduledFrom}
+              onChange={(e) => {
+                setScheduledFrom(e.target.value);
+                resetListing();
+              }}
+              disabled={isSearching}
+              className="w-auto"
+            />
+            <span className="text-xs text-muted">to</span>
+            <Input
+              type="date"
+              value={scheduledTo}
+              onChange={(e) => {
+                setScheduledTo(e.target.value);
+                resetListing();
+              }}
+              disabled={isSearching}
+              className="w-auto"
+            />
+            {(scheduledFrom || scheduledTo) && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setScheduledFrom("");
+                  setScheduledTo("");
+                  resetListing();
+                }}
+              >
+                <X className="size-3.5" />
+              </Button>
+            )}
+          </div>
           <Select
             value={sourceChannel}
             onChange={(e) => {
@@ -502,7 +554,10 @@ export default function AllClipsPage() {
           <div className="flex items-center rounded-lg border border-border-subtle p-0.5">
             <button
               type="button"
-              onClick={() => setView("grid")}
+              onClick={() => {
+                setView("grid");
+                resetListing();
+              }}
               title="Grid view"
               className={`rounded-md p-1.5 cursor-pointer ${view === "grid" ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground"}`}
             >
@@ -548,6 +603,10 @@ export default function AllClipsPage() {
             <Button size="sm" variant="outline" onClick={() => setMoveChannelOpen(true)}>
               <Share2 className="size-3.5" />
               Move to Channel
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setScheduleOpen(true)}>
+              <CalendarClock className="size-3.5" />
+              Set Schedule
             </Button>
             <Button size="sm" onClick={handleExportZip} loading={exporting}>
               <Download className="size-3.5" />
@@ -606,6 +665,25 @@ export default function AllClipsPage() {
             </div>
           ))}
           </div>
+
+          {data.meta && data.meta.last_page > 0 && (
+            <Pagination
+              page={data.meta.current_page}
+              lastPage={data.meta.last_page}
+              total={data.meta.total}
+              perPage={gridPerPage}
+              perPageOptions={[24, 60, 120, 240]}
+              itemLabel="clips"
+              onPageChange={(p) => {
+                setGridPage(p);
+                setSelected([]);
+              }}
+              onPerPageChange={(n) => {
+                setGridPerPage(n);
+                resetListing();
+              }}
+            />
+          )}
         </>
       ) : (
         <Card className="overflow-x-auto">
@@ -725,6 +803,16 @@ export default function AllClipsPage() {
         accounts={accountsRes?.data ?? []}
         onClose={() => setMoveChannelOpen(false)}
         onMoved={() => {
+          setSelected([]);
+          mutate(key);
+        }}
+      />
+      <ClipScheduleModal
+        open={scheduleOpen}
+        clipIds={selected}
+        accounts={accountsRes?.data ?? []}
+        onClose={() => setScheduleOpen(false)}
+        onScheduled={() => {
           setSelected([]);
           mutate(key);
         }}

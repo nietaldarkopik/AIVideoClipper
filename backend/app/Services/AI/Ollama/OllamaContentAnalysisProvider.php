@@ -199,9 +199,11 @@ class OllamaContentAnalysisProvider implements ContentAnalysisProvider
 
         return <<<PROMPT
 You are an expert short-form video producer. Given a timestamped transcript excerpt
-from a longer video, find up to {$maxCandidates} best self-contained moments in THIS
-excerpt to cut into short vertical clips (like TikTok/Reels/Shorts). It's fine to
-return fewer than {$maxCandidates}, or none, if this excerpt has no strong moments.
+from a longer video, find up to {$maxCandidates} best self-contained "punchline" and
+high-retention moments in THIS excerpt to cut into short vertical clips (like
+TikTok/Reels/Shorts) — cold-open hooks, twist reveals, emotional peaks, and payoff
+lines that work with little to no extra context. It's fine to return fewer than
+{$maxCandidates}, or none, if this excerpt has no strong moments.
 
 Respond with ONLY a JSON object: {"candidates": [...]}. Each candidate object must have:
 start_time (number, seconds), end_time (number, seconds, 15-{$maxDuration} seconds after
@@ -210,10 +212,23 @@ like it deserves more room), overall_score (1-100), engagement_score (1-100),
 hook_score (1-100), story_score (1-100), emotional_score (1-100), information_score (1-100),
 viral_potential (1-100), hook_text (the exact or near-exact opening line, in the transcript's
 own language), moment_type (one of: hook, question, emotional, funny, controversial,
-educational, story_peak, conclusion), reasons (array of 2-4 short strings explaining why this
-clip works), explanation (one sentence summary), suggested_title (short, punchy, in the
-transcript's own language), suggested_caption (1-2 sentences, in the transcript's own
-language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
+educational, story_peak, conclusion, punchline, reveal), reasons (array of 2-4 short strings
+explaining why this clip grabs attention and keeps viewers watching until the end),
+explanation (one sentence summary), suggested_title (short, punchy, high-CTR, in the
+transcript's own language), suggested_caption (1-2 sentences to boost comments and shares,
+in the transcript's own language), hashtags (array of 4-6 relevant hashtag strings, no spaces).
+
+To maximize viewer retention and viral potential, actively scan and prioritize moments
+containing these core engagement drivers:
+
+- Humor & Satire: jokes, self-deprecating humor, sharp satire, funny anecdotes, witty
+  comebacks, or unique local punchlines/nicknames.
+- High-Stakes & Bold Statements: provocative claims, extreme challenges, or intense
+  personal commitments that instantly spark curiosity or debate.
+- Sharp Contrast & Plot Twist: transformation stories (e.g. past vs. present) or sudden
+  narrative turns where a serious setup leads to an unexpected payoff.
+- Relatable & Spoken-Word Charm: engaging discussions on social/cultural topics
+  delivered with authentic, casual, or entertaining delivery.
 
 {$coverInstructions}
 

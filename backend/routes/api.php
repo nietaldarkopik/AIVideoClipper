@@ -7,6 +7,9 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChannelWatchController;
 use App\Http\Controllers\Api\ClipCandidateController;
 use App\Http\Controllers\Api\ClipController;
+use App\Http\Controllers\Api\ClipImportController;
+use App\Http\Controllers\Api\AssistantController;
+use App\Http\Controllers\Api\CartoonVideoController;
 use App\Http\Controllers\Api\ContentBriefController;
 use App\Http\Controllers\Api\CoverTemplateController;
 use App\Http\Controllers\Api\DashboardController;
@@ -28,6 +31,7 @@ use App\Http\Controllers\Api\StickerController;
 use App\Http\Controllers\Api\TemplateCategoryController;
 use App\Http\Controllers\Api\TemplateController;
 use App\Http\Controllers\Api\TrendingController;
+use App\Http\Controllers\Api\TtsController;
 use App\Http\Controllers\Api\VideoBatchController;
 use App\Http\Controllers\Api\VideoController;
 use App\Http\Controllers\MediaStreamController;
@@ -64,6 +68,7 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
 
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::post('/projects', [ProjectController::class, 'store']);
+    Route::post('/projects/bulk-delete', [ProjectController::class, 'bulkDestroy']);
     Route::get('/projects/{project}', [ProjectController::class, 'show']);
     Route::patch('/projects/{project}', [ProjectController::class, 'update']);
     Route::delete('/projects/{project}', [ProjectController::class, 'destroy']);
@@ -81,6 +86,8 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
 
     Route::get('/video-batches', [VideoBatchController::class, 'index']);
     Route::post('/video-batches', [VideoBatchController::class, 'store'])->middleware('throttle:expensive');
+    Route::post('/video-batches/bulk-cancel', [VideoBatchController::class, 'bulkCancel']);
+    Route::post('/video-batches/bulk-delete', [VideoBatchController::class, 'bulkDestroy']);
     Route::get('/video-batches/{videoBatch}', [VideoBatchController::class, 'show']);
     Route::post('/video-batches/{videoBatch}/cancel', [VideoBatchController::class, 'cancel']);
     Route::post('/video-batches/{videoBatch}/items/{item}/retry', [VideoBatchController::class, 'retryItem']);
@@ -119,10 +126,15 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::post('/clips/{clip}/generate-reaction-script', [ClipController::class, 'generateReactionScript'])->middleware('throttle:expensive');
     Route::post('/clips/{clip}/generate-cover', [ClipController::class, 'generateCover'])->middleware('throttle:expensive');
     Route::post('/clips/export-zip', [ClipController::class, 'exportZip'])->middleware('throttle:expensive');
+    // Register an already-finished video as a publishable clip (registers only; never posts).
+    Route::post('/clips/import', ClipImportController::class)->middleware('throttle:expensive');
+    // Text -> speech for external apps.
+    Route::post('/tts', TtsController::class)->middleware('throttle:expensive');
     Route::post('/clips/bulk-regenerate', [ClipController::class, 'bulkRegenerate'])->middleware('throttle:expensive');
     Route::post('/clips/bulk-generate-cover', [ClipController::class, 'bulkGenerateCover'])->middleware('throttle:expensive');
     Route::post('/clips/bulk-delete', [ClipController::class, 'bulkDestroy']);
     Route::post('/clips/bulk-move-channel', [ClipController::class, 'bulkMoveChannel']);
+    Route::post('/clips/bulk-schedule', [ClipController::class, 'bulkSchedule']);
 
     Route::get('/template-categories', [TemplateCategoryController::class, 'index']);
     Route::get('/templates', [TemplateController::class, 'index']);
@@ -144,6 +156,28 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::post('/content-briefs/{contentBrief}/regenerate-script', [ContentBriefController::class, 'regenerateScript'])->middleware('throttle:expensive');
     Route::post('/content-briefs/{contentBrief}/search-videos', [ContentBriefController::class, 'searchVideos'])->middleware('throttle:expensive');
     Route::delete('/content-briefs/{contentBrief}', [ContentBriefController::class, 'destroy']);
+
+    // --- AI assistant (chat with tools over the user's own data) ---
+    Route::get('/assistant/config', [AssistantController::class, 'config']);
+    Route::get('/assistant/conversations', [AssistantController::class, 'index']);
+    Route::get('/assistant/conversations/{conversation}', [AssistantController::class, 'show']);
+    Route::patch('/assistant/conversations/{conversation}', [AssistantController::class, 'update']);
+    Route::delete('/assistant/conversations/{conversation}', [AssistantController::class, 'destroy']);
+    Route::post('/assistant/conversations/{conversation}/decide', [AssistantController::class, 'decide']);
+    Route::post('/assistant/conversations/{conversation}/stop', [AssistantController::class, 'stop']);
+    Route::post('/assistant/attachments', [AssistantController::class, 'uploadAttachments'])->middleware('throttle:expensive');
+    Route::post('/assistant/messages', [AssistantController::class, 'sendMessage'])->middleware('throttle:expensive');
+
+    // --- Cartoon explainer videos (from a content idea / content brief) ---
+    Route::get('/cartoon-videos', [CartoonVideoController::class, 'index']);
+    Route::post('/cartoon-videos', [CartoonVideoController::class, 'store'])->middleware('throttle:expensive');
+    Route::get('/cartoon-videos/{cartoonVideo}', [CartoonVideoController::class, 'show']);
+    Route::patch('/cartoon-videos/{cartoonVideo}', [CartoonVideoController::class, 'update']);
+    Route::patch('/cartoon-videos/{cartoonVideo}/scenes/{scene}', [CartoonVideoController::class, 'updateScene']);
+    Route::post('/cartoon-videos/{cartoonVideo}/regenerate-storyboard', [CartoonVideoController::class, 'regenerateStoryboard'])->middleware('throttle:expensive');
+    Route::post('/cartoon-videos/{cartoonVideo}/render', [CartoonVideoController::class, 'render'])->middleware('throttle:expensive');
+    Route::post('/cartoon-videos/{cartoonVideo}/cancel', [CartoonVideoController::class, 'cancel']);
+    Route::delete('/cartoon-videos/{cartoonVideo}', [CartoonVideoController::class, 'destroy']);
 
     // --- Content Research Engine ---
     // "Content channels" are brand/persona channels the research engine generates

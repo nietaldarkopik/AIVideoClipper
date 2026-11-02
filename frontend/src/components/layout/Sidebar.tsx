@@ -21,16 +21,19 @@ import {
   Rss,
   Lightbulb,
   Radar,
+  Clapperboard,
   BarChart3,
   Menu,
   X,
   LogOut,
+  Sparkles,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { api } from "@/lib/api";
 
 const primaryNav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
+  { href: "/assistant", label: "Asisten AI", icon: Sparkles },
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/batches", label: "Batch Autobot", icon: Bot },
   { href: "/channels", label: "Channels", icon: Rss },
@@ -38,6 +41,7 @@ const primaryNav = [
   { href: "/cover-templates", label: "Cover Templates", icon: ImageIcon },
   { href: "/trending", label: "Trending", icon: TrendingUp },
   { href: "/content-briefs", label: "Riset Konten", icon: Lightbulb },
+  { href: "/cartoon-videos", label: "Video Kartun", icon: Clapperboard },
   // Content Research Engine. Distinct from "Channels" above (watched YouTube
   // upload feeds) — these are brand/persona channels the engine researches for.
   { href: "/research", label: "Content Research", icon: Radar },

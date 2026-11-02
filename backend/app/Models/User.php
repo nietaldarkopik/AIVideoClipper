@@ -89,6 +89,16 @@ class User extends Authenticatable
         return $this->hasMany(ContentBrief::class);
     }
 
+    public function assistantConversations(): HasMany
+    {
+        return $this->hasMany(AssistantConversation::class);
+    }
+
+    public function cartoonVideos(): HasMany
+    {
+        return $this->hasMany(CartoonVideo::class);
+    }
+
     /**
      * Research channels (brand/persona), distinct from channelWatches() above —
      * that one is a watched YouTube upload feed.

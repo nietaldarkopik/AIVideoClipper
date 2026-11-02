@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class VideoBatchItem extends Model
 {
@@ -42,5 +43,22 @@ class VideoBatchItem extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    /**
+     * The ProcessingJob rows of this item's project, joined on project_id rather
+     * than through a foreign key of their own (an item owns exactly one project —
+     * see BatchItemDownloader — so its project's jobs are its jobs).
+     *
+     * Read-only, and deliberately so: it exists purely so the batch UI can show
+     * the live download progress ImportVideoJob already writes to ProcessingJob
+     * (percentage, speed, ETA) instead of the coarse "Downloading video..." this
+     * item's own message column is left on for the whole download. Nothing in the
+     * import path needs to know a batch item exists, which is what keeps that path
+     * free of a progress callback it would have to carry through the queue.
+     */
+    public function processingJobs(): HasMany
+    {
+        return $this->hasMany(ProcessingJob::class, 'project_id', 'project_id');
     }
 }

@@ -18,6 +18,14 @@ class VideoBatchItemResource extends JsonResource
             'status' => $this->status,
             'progress' => $this->progress,
             'message' => $this->message,
+            // Live detail from the job actually doing the work right now (see
+            // VideoBatchItem::processingJobs) — the download's percentage, speed
+            // and ETA, which this row's own coarse message can't show. Null
+            // whenever nothing is running, so the UI falls back to `message`.
+            'live_message' => $this->whenLoaded(
+                'processingJobs',
+                fn () => $this->processingJobs->last()?->message
+            ),
             'failure_reason' => $this->failure_reason,
             'clips_generated' => $this->clips_generated,
             'posts_published' => $this->posts_published,
